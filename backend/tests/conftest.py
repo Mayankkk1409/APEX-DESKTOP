@@ -33,9 +33,11 @@ from app.models import (  # noqa: F401
     BrokerageConnection,
     LoginAudit,
     Order,
+    PaperBalanceAudit,
     Position,
     Scan,
     User,
+    UserTradingSettings,
     WatchlistItem,
 )
 from app.redis_client import reset_redis_for_tests

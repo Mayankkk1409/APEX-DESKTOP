@@ -42,3 +42,6 @@ npm-debug.log*
 *.sqlite
 backend/.data/
 logs/
+
+# CI workflows need a PAT with workflow scope to push
+.github/workflows/

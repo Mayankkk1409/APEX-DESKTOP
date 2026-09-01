@@ -39,6 +39,7 @@ from app.analysis.black_scholes import greeks, implied_vol, year_fraction
 from app.analysis.options_rules import DEFAULT_THRESHOLDS, ChainContext, evaluate_chain
 from app.analysis.volatility import (
     HV_WINDOWS,
+    compute_iv_rank,
     expected_move,
     hv_rank_bundle,
     hv_snapshot,
@@ -784,7 +785,7 @@ def build_volatility_payload(
     if rank_iv is None:
         rank_iv = primary_iv
     iv_hist_values = list(iv_history or [v for _, v in hist_points])
-    iv_ranks = iv_rank_from_history(iv_hist_values, rank_iv)
+    iv_ranks = compute_iv_rank(iv_hist_values, rank_iv, atm_iv=atm_iv_val, hv=hv)
 
     em = expected_move(resolved_spot, atm_iv_val, dte)
     iv_vs_hv = _iv_hv_signal(atm_iv_val, hv)

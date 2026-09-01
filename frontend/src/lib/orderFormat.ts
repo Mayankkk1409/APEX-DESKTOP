@@ -1,4 +1,5 @@
 import type { AccountMode, OrderConfirmationDetails, OrderPlacementResult, User } from "../types";
+import { normalizeStrategyName } from "./strategyDisplay";
 
 /** Display order type and asset class as `market · us_option`. */
 export function formatOrderType(orderType: string, assetClass: string): string {
@@ -40,7 +41,7 @@ export function buildOrderConfirmationDetails(
   return {
     orderIds,
     legs,
-    strategyName: ctx.strategyName,
+    strategyName: normalizeStrategyName(ctx.strategyName),
     accountLabel: formatOrderAccountLabel(ctx.user),
     accountMode: ctx.accountMode ?? ctx.user?.account_mode ?? null,
     ticker: ctx.ticker,

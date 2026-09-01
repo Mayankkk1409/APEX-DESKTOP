@@ -9,13 +9,18 @@ vi.mock("framer-motion", () => ({
   },
 }));
 
+vi.mock("../hooks/useFocusTrap", () => ({
+  useFocusTrap: () => ({ current: null }),
+  useEscapeKey: () => undefined,
+}));
+
 const sampleDetails: OrderConfirmationDetails = {
   orderIds: ["ord-1", "ord-2"],
   legs: [
     { id: "ord-1", symbol: "AAPL270115C00150000", side: "buy", qty: 1, fill_price: 4.25 },
     { id: "ord-2", symbol: "AAPL270115C00155000", side: "sell", qty: 1, fill_price: 2.1 },
   ],
-  strategyName: "Bull Call Spread",
+  strategyName: "Gamma Trampoline™",
   accountLabel: "Paper · @trader1 · usr-pape",
   accountMode: "paper_funded",
   ticker: "AAPL",
@@ -34,7 +39,9 @@ describe("OrderConfirmationCertificate", () => {
     expect(html).toContain('data-testid="order-cert-ticker"');
     expect(html).toContain("AAPL");
     expect(html).toContain('data-testid="order-cert-strategy"');
-    expect(html).toContain("Bull Call Spread");
+    expect(html).toContain("APEX Strategy");
+    expect(html).toContain('data-testid="cert-leg-expiration"');
+    expect(html).toMatch(/Jan 15, 2027/);
     expect(html).toContain('data-testid="order-cert-order-type"');
     expect(html).toContain("market · us_option");
     expect(html).toContain('data-testid="order-cert-account"');

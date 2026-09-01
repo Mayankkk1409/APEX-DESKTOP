@@ -1,0 +1,175 @@
+---
+description: APEX encyclopedia strategy, scoring, selectivity, settings, and certificate conventions
+alwaysApply: true
+---
+
+# APEX Encyclopedia & Strategy Rules
+
+Authoritative sources: `docs/APEX_Options_Platform_Full_Document.txt`, `docs/Project_APEX.txt`, `docs/CONTRACT.md`. Do not invent layers, thresholds, or legal language.
+
+## Naming (mandatory)
+
+- The proprietary catalyst structure is **APEX Strategy** — never "Gamma Trampoline", "Gamma Trampoline™", or legacy internal keys in user-facing copy, API responses, tests, or comments.
+- When renaming legacy code, preserve behavior; only change identifiers and display strings.
+- Use **Best Match** for the single selected strategy label in UI and API.
+
+## Selectivity principle
+
+- Return **exactly one** Best Match strategy per scan, or **No Trade / Insufficient Conviction**.
+- Do not surface multiple weak playbook candidates; rank deterministically and pick the top eligible match.
+- Technical analysis: surface **only** high-confidence **confirmed** patterns on charts and API payloads. Hide forming, invalidated, and low-strength signals.
+- Prefer the strongest bull **or** bear setup — not both simultaneously unless confluence is explicitly scored.
+- Down-weight counter-trend reversal patterns against the EMA stack (9/21/50/100/200).
+
+## Recommendation pipeline (staged gating)
+
+```
+regime → hard gates → composite score → strategy matrix → Best Match
+```
+
+1. **Regime** — IV vs HV, directional bias (SuperTrend + MACD), catalyst window, liquidity.
+2. **Hard gates** — spread, OI/volume, defined-risk, data freshness, earnings blackout.
+3. **Composite score** — weighted pillars with explainable breakdown.
+4. **Strategy matrix** — Full Document §9.1 eligibility (IV env × direction × tech strength × catalyst).
+5. **Select** — one Best Match; undefined-risk structures never auto-execute.
+
+## APEX Composite Score weights
+
+Current implementation (`scan_engine.py`, `strategy_engine.py`):
+
+| Pillar | Weight |
+|--------|--------|
+| Technicals | 30% |
+| Volatility / IV regime | 25% |
+| Options / Greeks quality | 20% |
+| Sentiment | 15% |
+| Fundamentals | 10% |
+| Risk (advisory) | 0% — gates only |
+
+Target upgrade weights (central config when migrated):
+
+| Pillar | Weight |
+|--------|--------|
+| Technical | 35% |
+| Options / IV | 20% |
+| Liquidity | 15% |
+| Catalyst / Fundamental | 10% |
+| Payoff / Risk | 10% |
+| Cross-timeframe | 5% |
+| Data freshness | 5% |
+
+Apply penalties for pattern conflicts, stale quotes, and wide spreads. Risk tier is derived from composite + liquidity failures, not added to the score.
+
+## Execution tiers
+
+Constants in `backend/app/analysis/layers.py`:
+
+| Composite | Tier | Behavior |
+|-----------|------|----------|
+| ≤ 50 | `blocked` | No trade; monitor only |
+| 51–71 | `caution` | Review playbook; no auto-exec |
+| ≥ 72 | `auto_exec` candidate | Meets Full Document §8 threshold |
+| ≥ 85 | Project APEX stretch | Default user auto-exec minimum |
+
+User-configurable `auto_execution_threshold` (default **85**) is the final gate for automated order submission. Global auto-exec toggle defaults **OFF**.
+
+## Eligibility hard gates (options chain §5)
+
+From `backend/app/analysis/options_rules.py`:
+
+- **Spread** — hard reject > 10% of mid (user cap clamped 1–15%).
+- **Delta (buy)** — ≥ 0.50; Rule 1 buy: Δ ≥ 0.55, daily Θ < 0.05, Δ/Θ ratio > 10.
+- **Delta (sell)** — short leg Δ ≤ 0.20–0.25.
+- **OI** — ≥ 500; volume > 25% of OI; UOA at 3× average volume.
+- **Gamma** — flag inside 7 DTE unless structure absorbs it (APEX Strategy selected).
+- **Vega cap** — blocks long premium in catalyst environments unless override or APEX Strategy structure.
+- **Earnings blackout** — no new positions within 1 day of earnings (exception: APEX Strategy with catalyst rules).
+- **Extreme IV** — `iv > hv × 1.35` → NO TRADE — Wait for IV Crush.
+
+Undefined-risk strategies (naked short options, unhedged short straddles) are **excluded from auto-execution** even when composite clears 72.
+
+## APEX Strategy strict eligibility
+
+Dedicated module must validate **all** before selecting APEX Strategy:
+
+| Criterion | Threshold |
+|-----------|-----------|
+| Catalyst window | 5–10 calendar days |
+| Front-week IVR | > 70 |
+| Term structure | Front-week IV > back-week IV (inversion) |
+| Structure | 4 legs, same strikes across front/back expirations |
+| Strike selection | 0.15–0.25 delta OTM calls and puts |
+| Premium offset | Front-week shorts subsidize ≥ 50% of back-week long cost |
+| Stock liquidity | ADV > 5M shares |
+| Option liquidity | OI > 1,000 per strike; bid/ask < 8% of mid on all legs |
+
+Return explicit **rejection reasons** when any criterion fails (no catalyst, bad term structure, insufficient offset, liquidity, missing quotes). Do not fall back to APEX Strategy on partial matches.
+
+## Strategy playbook (§9.1 summary)
+
+After composite ≥ 72 and IV crush gate passes:
+
+- **IV cheap + strong bull** → APEX Benchmark Greeks Strategy (if Δ/Θ ≥ 10) or Bull Call Spread.
+- **IV cheap + strong bear** → Bear Put Spread.
+- **IV cheap + neutral** → Long Straddle.
+- **IV rich + neutral RSI** → Short Iron Condor.
+- **IV rich + mild bull/bear** → Bull Put / Bear Call credit spreads.
+- **Catalyst + IVR > 70 + IV inversion** → **APEX Strategy** (only if strict module passes).
+- **Composite < 72** → NO TRADE — Insufficient Conviction.
+
+Position sizing: 2–5% of capital per structure.
+
+## Technical analysis encyclopedia (summary)
+
+- **100 patterns** across reversal, continuation, candlestick, and chart families.
+- **10-layer TA pipeline** (Project APEX): volume → candlestick → MACD → RSI(14) → EMA stack → SuperTrend(ATR 10, factor 3) → Bollinger(20, 2σ) → pivots → S/R.
+- **PatternSignal** fields: `id`, `name`, `family`, `direction`, `status` (forming/confirmed/invalidated), `strength` 0–100, reliability tier, confirmation evidence, invalidation level.
+- Only export patterns with `status === confirmed` and strength above the conviction floor.
+- Require confirmation triggers (volume, close beyond level, indicator alignment) before highlighting on chart overlays.
+
+## Settings page requirements
+
+Gear icon entry from Dashboard/Portfolio. Five sections:
+
+**A. Account** — paper cash, buying power, P&L, equity; edit/reset balance with confirmation modal; audit log (prev, new, timestamp, reason); simulation-only disclaimer.
+
+**B. Brokerage** — list SnapTrade connections; add/remove with confirmation; status, last sync, read-only label for real accounts.
+
+**C. Risk & Auto-Execution** — profile (Conservative/Moderate/Aggressive/Custom); auto-exec minimum slider 0–100 (default 85, warn if < 72); global toggle OFF by default; max risk per trade %; max positions.
+
+**D. Appearance** — Light/Dark/System theme; persist localStorage + backend sync; apply theme before first paint (no white flash).
+
+**E. Security** — logout; delete account with high-friction confirmation (type `DELETE`, password).
+
+Backend endpoints: `GET/PATCH /api/settings`, `PATCH /api/settings/paper-balance`, `DELETE /api/account`.
+
+## Open positions certificate
+
+Click any open position row/card → read-only modal styled like `OrderConfirmationCertificate`.
+
+Required fields per leg: expiration (`Sep 18, 2026`), strike, call/put, long/short, premium/fill price.
+
+Header: strategy name (APEX Strategy where applicable), entry composite score, current P&L, aggregate Greeks when available.
+
+Banner **PAPER TRADE** for `paper_funded` accounts. Escape closes; focus trap; `role="dialog"` + labelled title. Close/Roll actions optional; certificate itself is read-only.
+
+## Brokerage & data provider safety
+
+- Secrets **only** from environment (`.env`, never committed). See `.env.example`.
+- Alpaca keys for market data and paper fills; SnapTrade for real brokerage (encrypted at rest).
+- Missing keys → empty states, not fabricated quotes. `ALLOW_OPTIONS_SIMULATOR=true` for offline demo only.
+- Real brokerage mode rejects `starting_balance` in signup schema and UI.
+- Rotate any key pasted in chat; treat as burned.
+
+## Code touchpoints
+
+| Area | Path |
+|------|------|
+| Strategy selection | `backend/app/services/strategy_engine.py` |
+| Scan orchestration | `backend/app/services/scan_engine.py` |
+| Options gates | `backend/app/analysis/options_rules.py` |
+| Thresholds | `backend/app/analysis/layers.py` |
+| Order certificate | `frontend/src/components/OrderConfirmationCertificate.tsx` |
+| Contract | `docs/CONTRACT.md` |
+
+When implementing encyclopedia logic, add tests for scoring, gating, APEX Strategy rejections, undefined-risk exclusion, settings persistence, and account deletion.

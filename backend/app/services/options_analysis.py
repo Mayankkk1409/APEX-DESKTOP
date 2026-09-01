@@ -20,6 +20,7 @@ from app.analysis.options_rules import (
     build_uoa_reference,
     evaluate_chain,
 )
+from app.analysis.volatility import iv_rank_proxy
 from app.schemas.market import OptionChain, OptionContract
 from app.services.strategy_engine import select_strategy
 
@@ -87,12 +88,10 @@ def strategy_selection_bucket(
         return "buy", "call"
     if "Bear Put" in selected_strategy:
         return "buy", "put"
-    if "Gamma Trampoline" in selected_strategy:
+    if "APEX Strategy" in selected_strategy:
         return "buy", "put" if direction == "bearish" else "call"
     if "Benchmark Greeks" in selected_strategy:
         return "buy", "put" if direction == "bearish" else "call"
-    if "Married Call" in selected_strategy:
-        return "buy", "call"
     if "Married Put" in selected_strategy:
         return "buy", "put"
     if "Bull Put" in selected_strategy:
@@ -258,11 +257,18 @@ INFEASIBLE_SCENARIO_MSG = (
 )
 
 
-def execution_tier(score: float | None) -> str:
-    """Map composite score to chain / risk-review execution bands."""
+def execution_tier(
+    score: float | None,
+    *,
+    auto_exec_threshold: float = COMPOSITE_THRESHOLD_FULL_DOC,
+) -> str:
+    """Map composite score to execution bands.
+
+    < 50 blocked · 50..threshold-1 caution (manual) · >= threshold auto_exec candidate.
+    """
     if score is None or score <= EXECUTION_SCORE_BLOCKED_MAX:
         return "blocked"
-    if score >= COMPOSITE_THRESHOLD_FULL_DOC:
+    if score >= auto_exec_threshold:
         return "auto_exec"
     return "caution"
 
@@ -274,9 +280,10 @@ def apply_execution_score_tiers(
     selected_strategy: str,
     direction: str = "neutral",
     vol_signal: str = "fair",
+    auto_exec_threshold: float = COMPOSITE_THRESHOLD_FULL_DOC,
 ) -> dict[str, Any]:
-    """Apply §8 score bands: block below 50, highlight 50–72, auto-exec above 72."""
-    tier = execution_tier(composite_score)
+    """Apply score bands: block below 50, manual 50..threshold-1, auto-exec at/above threshold."""
+    tier = execution_tier(composite_score, auto_exec_threshold=auto_exec_threshold)
     payload["execution_score"] = composite_score
     payload["execution_tier"] = tier
 
@@ -339,7 +346,7 @@ def build_chain_analysis(
     dte = 0 if dte is None else max(dte, 0)
     atm_strike = _atm_strike(contracts, spot)
     atm_iv = _atm_iv(contracts, atm_strike)
-    iv_rank = _iv_rank_proxy(atm_iv, hv)
+    iv_rank = iv_rank_proxy(atm_iv, hv)
     catalyst, catalyst_reason = _catalyst_environment(atm_iv, hv, iv_rank, thresholds)
     uoa_reference, uoa_basis = build_uoa_reference(contracts)
 
@@ -438,14 +445,8 @@ def _atm_iv(contracts: list[OptionContract], atm_strike: float | None) -> float 
 
 
 def _iv_rank_proxy(atm_iv: float | None, hv: float | None) -> float | None:
-    """IV vs realised vol scaled into a 0-100 band.
-
-    Documented IVR needs a 52-week IV history, which this feed does not provide. This is an
-    explicit proxy and every card that uses it says so.
-    """
-    if atm_iv is None or not hv or hv <= 0:
-        return None
-    return round(min(100.0, max(0.0, (atm_iv / hv) * 40.0)), 1)
+    """Delegate to shared ``iv_rank_proxy`` in volatility module."""
+    return iv_rank_proxy(atm_iv, hv)
 
 
 def _catalyst_environment(
@@ -1254,10 +1255,10 @@ def _cards(
             "Vega measures sensitivity to a 1-point change in implied volatility. Pre-catalyst, high Vega is dangerous "
             "for buyers because a post-event IV crush can erase premium even when the underlying moves the right way. "
             "§5.3 therefore applies a Vega cap: long Vega positions in catalyst environments require an explicit "
-            "override or a Gamma Trampoline structure.",
+            "override or an APEX Strategy structure.",
             f"Catalyst assessment: {ctx.catalyst_reason}. The cap is "
             + ("ARMED" if ctx.catalyst_environment else "not armed")
-            + f" on this scan. Override is {'GRANTED' if ctx.vega_cap_override else 'not granted'} and Gamma Trampoline "
+            + f" on this scan. Override is {'GRANTED' if ctx.vega_cap_override else 'not granted'} and APEX Strategy "
             f"structure is {'selected' if ctx.structure_absorbs_gamma else 'not selected'}"
             + (
                 f", so long premium is blocked on all {len(blocked)} strikes carrying Vega until one of those two "
@@ -1296,7 +1297,7 @@ def _cards(
             "bearish" if gamma_flagged else "neutral",
             f"Gamma is the rate of change of Delta per $1 move and it accelerates rapidly near expiration. §5.4 flags "
             f"high-Gamma risk for positions within {t.gamma_dte_flag} days of expiration unless the structure accounts "
-            "for it (Gamma Trampoline).",
+            "for it (APEX Strategy).",
             f"This expiry is {ctx.dte} days out, so the {t.gamma_dte_flag}-day window is "
             + (
                 f"OPEN and {len(gamma_flagged)} contracts carry the flag."
@@ -1304,7 +1305,7 @@ def _cards(
                 else "closed — convexity is present but is not yet the dominant risk."
             )
             + (
-                " Gamma Trampoline structure is selected, which is the documented exception, so the flag is satisfied structurally."
+                " APEX Strategy structure is selected, which is the documented exception, so the flag is satisfied structurally."
                 if ctx.structure_absorbs_gamma
                 else ""
             ),

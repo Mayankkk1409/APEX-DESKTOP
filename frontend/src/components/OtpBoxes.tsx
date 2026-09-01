@@ -69,7 +69,7 @@ export function OtpBoxes({ value, onChange, autofill, onAutofillComplete }: Prop
           inputMode="numeric"
           maxLength={1}
           aria-label={`Digit ${i + 1}`}
-          className="h-12 w-10 rounded-md border border-line bg-ink text-center font-mono text-lg text-champagne focus:border-gold focus:outline-none"
+          className="h-12 w-10 rounded-md border border-line bg-ink text-center font-mono text-lg text-champagne focus-visible:border-gold"
           value={shown[i] ?? ""}
           onChange={(e) => setAt(i, e.target.value.replace(/\D/g, "").slice(-1))}
           onKeyDown={(e) => {

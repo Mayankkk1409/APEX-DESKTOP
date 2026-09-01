@@ -40,7 +40,7 @@ export function VolAnalysisCards({ cards }: { cards: VolCard[] }) {
 
   if (!cards.length) {
     return (
-      <p className="text-sm text-white/40" data-testid="vol-cards-empty">
+      <p className="text-sm text-faint" data-testid="vol-cards-empty">
         Volatility analysis cards are unavailable for this snapshot.
       </p>
     );

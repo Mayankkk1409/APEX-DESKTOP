@@ -7,9 +7,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.deps import current_user, get_adapter
-from app.models.trading import Order, Position
+from app.models.trading import Order, Position, Scan, Scan
 from app.models.user import User
 from app.services.fills import execute_market_fill, execute_strategy_legs
+from app.strategies.validator import validate_strategy_output
 from app.services.orders import account_impact, estimate_order_cost
 from app.services.portfolio_pnl import account_baseline, pnl_history_points, symbol_pnl_rows
 
@@ -48,7 +49,26 @@ def _position_row(pos: Position) -> dict:
         "unrealized_pl": pos.unrealized_pl,
         "market_value": pos.market_value,
         "asset_class": pos.asset_class,
+        "strategy_name": pos.strategy_name,
     }
+
+
+def _position_certificate(pos: Position, scan: Scan | None = None) -> dict:
+    cert = dict(pos.certificate or {})
+    if scan and not cert.get("entry_composite_breakdown"):
+        apex = (scan.layers or {}).get("apex_score") or {}
+        strategy = (scan.layers or {}).get("strategy") or {}
+        cert.setdefault("strategy_name", strategy.get("selected_strategy") or pos.strategy_name)
+        cert.setdefault("entry_composite_score", scan.composite_score)
+        cert.setdefault("entry_composite_breakdown", apex.get("weights"))
+        metrics = strategy.get("metrics") or {}
+        cert.setdefault("legs", metrics.get("legs") or [])
+        cert.setdefault("max_loss", metrics.get("max_loss"))
+        cert.setdefault("max_profit", metrics.get("max_profit"))
+        cert.setdefault("breakevens", metrics.get("breakevens") or [])
+        cert.setdefault("greeks", cert.get("greeks") or {})
+    cert.setdefault("strategy_name", pos.strategy_name)
+    return cert
 
 
 @router.get("/portfolio")
@@ -156,6 +176,46 @@ async def positions(user: User = Depends(current_user), db: AsyncSession = Depen
     return {"positions": out}
 
 
+@router.get("/positions/{position_id}")
+async def position_detail(
+    position_id: str,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+    adapter=Depends(get_adapter),
+) -> dict:
+    pos = await db.scalar(select(Position).where(Position.id == position_id, Position.user_id == user.id))
+    if not pos:
+        raise HTTPException(404, "Position not found")
+    q = await adapter.quote(pos.symbol)
+    if q.price is not None:
+        pos.current_price = q.price
+    scan = None
+    order = await db.scalar(
+        select(Order)
+        .where(Order.user_id == user.id, Order.symbol == pos.symbol, Order.scan_id.isnot(None))
+        .order_by(Order.created_at.desc())
+    )
+    if order and order.scan_id:
+        scan = await db.get(Scan, order.scan_id)
+    cert = _position_certificate(pos, scan)
+    await db.commit()
+    return {
+        "position": _position_row(pos),
+        "certificate": {
+            "strategy_name": cert.get("strategy_name"),
+            "legs": cert.get("legs") or [],
+            "entry_composite_score": cert.get("entry_composite_score"),
+            "entry_composite_breakdown": cert.get("entry_composite_breakdown"),
+            "greeks": cert.get("greeks") or {},
+            "max_loss": cert.get("max_loss"),
+            "max_profit": cert.get("max_profit"),
+            "breakevens": cert.get("breakevens") or [],
+            "net_debit_credit": cert.get("net_debit_credit"),
+            "net_type": cert.get("net_type"),
+        },
+    }
+
+
 @router.post("/positions/{position_id}/close")
 async def close_position(
     position_id: str,
@@ -227,6 +287,39 @@ async def place_order(
         raise HTTPException(400, "Thesis checkbox required before submitting a scanned order")
 
     if body.legs:
+        strategy_name: str | None = None
+        certificate: dict | None = None
+        equity_legs: list[dict] | None = None
+        if body.scan_id:
+            scan = await db.get(Scan, body.scan_id)
+            if scan and scan.user_id == user.id:
+                layers = scan.layers or {}
+                strategy_layer = layers.get("strategy") or {}
+                strategy_name = strategy_layer.get("selected_strategy")
+                apex = layers.get("apex_score") or {}
+                metrics = strategy_layer.get("metrics") or {}
+                certificate = {
+                    "strategy_name": strategy_name,
+                    "entry_composite_score": scan.composite_score,
+                    "entry_composite_breakdown": apex.get("weights"),
+                    "legs": metrics.get("legs") or [],
+                    "max_loss": metrics.get("max_loss"),
+                    "max_profit": metrics.get("max_profit"),
+                    "breakevens": metrics.get("breakevens") or [],
+                }
+                if strategy_name and not strategy_layer.get("tradeable", True):
+                    raise HTTPException(400, "Strategy layer is not tradeable — validation blocked this structure")
+                if strategy_name:
+                    validation = validate_strategy_output(
+                        strategy_name,
+                        metrics,
+                        scan.symbol,
+                        order_legs=[leg.model_dump() for leg in body.legs],
+                    )
+                    if not validation.valid:
+                        detail = validation.errors[0].to_log_dict() if validation.errors else {"check": "validation"}
+                        raise HTTPException(400, f"Strategy validation failed: {detail}")
+                equity_legs = (layers.get("risk_review") or {}).get("equity_legs") or []
         try:
             orders = await execute_strategy_legs(
                 user=user,
@@ -235,6 +328,9 @@ async def place_order(
                 legs=[leg.model_dump() for leg in body.legs],
                 scan_id=body.scan_id,
                 contracts_per_leg=body.contracts_per_leg,
+                strategy_name=strategy_name,
+                certificate=certificate,
+                equity_legs=equity_legs if body.scan_id else None,
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc

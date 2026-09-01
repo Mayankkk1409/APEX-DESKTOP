@@ -128,10 +128,12 @@ def compute_all(highs: list[float], lows: list[float], closes: list[float], volu
     r = rsi(closes)
     bb = bollinger(closes)
     stack = last_ema_stack(closes)
-    aligned = list(stack.values()) == sorted(stack.values(), reverse=True)
+    aligned_bull = list(stack.values()) == sorted(stack.values(), reverse=True)
+    aligned_bear = list(stack.values()) == sorted(stack.values())
     return {
         "ema": stack,
-        "ema_aligned_bullish": aligned,
+        "ema_aligned_bullish": aligned_bull,
+        "ema_aligned_bearish": aligned_bear and not aligned_bull,
         "macd": {"line": m["line"][-1], "signal": m["signal"][-1], "histogram": m["histogram"][-1]},
         "rsi": r[-1],
         "bollinger": {
@@ -140,11 +142,15 @@ def compute_all(highs: list[float], lows: list[float], closes: list[float], volu
             "lower": bb["lower"][-1],
             "width": bb["width"][-1],
         },
+        "bollinger_series": bb,
+        "macd_series": m,
+        "rsi_series": r,
         "supertrend": {
             "value": st[-1].supertrend if st else closes[-1],
             "direction": "bullish" if st and st[-1].direction == 1 else "bearish",
             "atr": st[-1].atr if st else 0.0,
         },
+        "supertrend_series": st,
         "volume": {
             "last": volumes[-1] if volumes else 0.0,
             "avg": (sum(volumes[-20:]) / min(len(volumes), 20)) if volumes else 0.0,

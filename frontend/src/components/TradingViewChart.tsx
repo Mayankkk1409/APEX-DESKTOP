@@ -173,7 +173,7 @@ export function TradingViewChart({
       )}
       <div
         ref={hostRef}
-        className={`apex-chart-body tv-host relative min-h-0 flex-1 overflow-hidden rounded-xl border border-line bg-[#131722] ${chrome === "frozen" ? "tv-host--frozen" : ""}`}
+        className={`apex-chart-body tv-host relative min-h-0 flex-1 overflow-hidden rounded-xl border border-line bg-chart-panel ${chrome === "frozen" ? "tv-host--frozen" : ""}`}
         data-testid="chart"
         data-chart-engine="tradingview"
         data-tv-symbol={mapped}
@@ -192,7 +192,7 @@ export function TradingViewChart({
         )}
         <div className="tv-logo-cover" aria-hidden />
         {barsQ.isLoading && !bars.length && (
-          <p className="pointer-events-none absolute inset-0 z-[4] flex items-center justify-center text-sm text-white/40">Loading chart…</p>
+          <p className="pointer-events-none absolute inset-0 z-[4] flex items-center justify-center text-sm text-faint">Loading chart…</p>
         )}
       </div>
     </div>

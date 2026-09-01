@@ -63,9 +63,9 @@ export function CatalystCalendar({
             </button>
           </div>
           {loading ? (
-            <p className="text-sm text-white/40">Loading live calendars…</p>
+            <p className="text-sm text-faint">Loading live calendars…</p>
           ) : rows.length === 0 ? (
-            <p className="text-sm text-white/40" data-testid="catalyst-empty">
+            <p className="text-sm text-faint" data-testid="catalyst-empty">
               No live events returned for this window. Sources never invent placeholders.
             </p>
           ) : (
@@ -76,13 +76,13 @@ export function CatalystCalendar({
                     <span className="font-mono text-bronze">{e.event_date}</span>
                     {e.event_time ? ` · ${e.event_time}` : ""} — {e.title}
                   </p>
-                  <p className="text-xs text-white/50">{e.detail}</p>
+                  <p className="text-xs text-subtle">{e.detail}</p>
                 </li>
               ))}
             </ul>
           )}
           {notes?.length ? (
-            <ul className="mt-3 space-y-1 text-[10px] text-white/35">
+            <ul className="mt-3 space-y-1 text-[10px] text-faint">
               {notes.map((n, i) => (
                 <li key={i}>{n}</li>
               ))}

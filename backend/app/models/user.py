@@ -32,6 +32,10 @@ class User(Base):
     watchlist: Mapped[list["WatchlistItem"]] = relationship(back_populates="user")  # noqa: F821
     positions: Mapped[list["Position"]] = relationship(back_populates="user")  # noqa: F821
     orders: Mapped[list["Order"]] = relationship(back_populates="user")  # noqa: F821
+    trading_settings: Mapped[Optional["UserTradingSettings"]] = relationship(  # noqa: F821
+        back_populates="user", uselist=False
+    )
+    balance_audits: Mapped[list["PaperBalanceAudit"]] = relationship(back_populates="user")  # noqa: F821
 
 
 class RefreshToken(Base):

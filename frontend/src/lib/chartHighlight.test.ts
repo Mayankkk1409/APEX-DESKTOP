@@ -65,15 +65,15 @@ describe("scoreTier", () => {
     expect(scoreTier(50)).toBe("blocked");
   });
 
-  it("cautions between 51 and 71", () => {
-    expect(scoreTier(51)).toBe("caution");
-    expect(scoreTier(71)).toBe("caution");
+  it("cautions between 51 and threshold-1", () => {
+    expect(scoreTier(51, 85)).toBe("caution");
+    expect(scoreTier(84, 85)).toBe("caution");
   });
 
-  it("auto-execs at 72 and above", () => {
-    expect(scoreTier(72)).toBe("auto_exec");
-    expect(scoreTier(72.1)).toBe("auto_exec");
-    expect(scoreTier(90)).toBe("auto_exec");
+  it("auto-execs at user threshold and above", () => {
+    expect(scoreTier(85, 85)).toBe("auto_exec");
+    expect(scoreTier(90, 85)).toBe("auto_exec");
+    expect(scoreTier(72, 72)).toBe("auto_exec");
   });
 });
 

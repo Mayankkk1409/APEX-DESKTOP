@@ -296,17 +296,33 @@ export interface StrategyLeg {
   expiry?: string;
   mid?: number | null;
   symbol?: string;
+  quantity?: number;
 }
+
+/** Calendar spreads may return a breakeven band instead of a single strike. */
+export interface BreakevenRange {
+  type: "range";
+  lower: number;
+  upper: number;
+  iv_assumption?: boolean;
+}
+
+export type BreakevenValue = number | BreakevenRange;
 
 export interface StrategyMetrics {
   max_loss: number | null;
   max_profit: number | null;
   net_debit_credit: number | null;
   net_type: string | null;
-  breakevens: number[];
+  breakevens: BreakevenValue[];
   legs: StrategyLeg[];
   per_contract_multiplier?: number;
   notes?: string;
+  /** When true, breakeven range depends on IV assumptions (calendar spreads). */
+  breakeven_iv_assumption?: boolean;
+  breakeven_assumption_note?: string;
+  /** Registry allows unlimited max profit display (long call, straddle, APEX Strategy). */
+  max_profit_unlimited_allowed?: boolean;
 }
 
 export interface StrategyLayer {
@@ -319,8 +335,11 @@ export interface StrategyLayer {
   direction?: string;
   vol_signal?: string;
   recommended_contract?: RecommendedContract | null;
+  equity_required?: boolean;
+  equity_overlay_only?: boolean;
   what_is_this: string;
   why_recommended: string;
+  selection_rationale?: string | null;
   how_to_execute: string;
   metrics: StrategyMetrics;
   narrative: string;
@@ -346,6 +365,7 @@ export interface PositionRow {
   /** Intraday P&L when provided by brokerage or computed from quote change. */
   day_pl?: number | null;
   asset_class?: string;
+  strategy_name?: string | null;
 }
 
 export interface OrderHistoryRow {

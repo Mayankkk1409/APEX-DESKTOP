@@ -31,6 +31,8 @@ class Position(Base):
     qty: Mapped[float] = mapped_column(Float)
     avg_cost: Mapped[float] = mapped_column(Float)
     current_price: Mapped[float] = mapped_column(Float, default=0.0)
+    strategy_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    certificate: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

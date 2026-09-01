@@ -168,7 +168,8 @@ describe("StrategyScan", () => {
         }}
       />,
     );
-    expect(html).toContain("Not tradeable in current situation");
+    expect(html).toContain("No Trade / Insufficient Conviction");
+    expect(html).toContain("Composite score is below 50");
     expect(html).toContain('data-testid="strategy-not-tradeable"');
     expect(html).not.toContain('data-testid="strategy-metrics"');
   });

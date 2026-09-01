@@ -12,12 +12,12 @@ from app.services.strategy_engine import (
 )
 
 CONTRACTS = [
-    {"side": "call", "strike": 100.0, "bid": 3.8, "ask": 4.0, "symbol": "C100"},
-    {"side": "call", "strike": 105.0, "bid": 1.8, "ask": 2.0, "symbol": "C105"},
-    {"side": "call", "strike": 110.0, "bid": 0.8, "ask": 1.0, "symbol": "C110"},
-    {"side": "put", "strike": 95.0, "bid": 0.7, "ask": 0.9, "symbol": "P95"},
-    {"side": "put", "strike": 100.0, "bid": 1.9, "ask": 2.1, "symbol": "P100"},
-    {"side": "put", "strike": 105.0, "bid": 3.8, "ask": 4.0, "symbol": "P105"},
+    {"side": "call", "strike": 100.0, "bid": 3.8, "ask": 4.0, "symbol": "XYZ260701C00100000", "expiry": "2026-07-01"},
+    {"side": "call", "strike": 105.0, "bid": 1.8, "ask": 2.0, "symbol": "XYZ260701C00105000", "expiry": "2026-07-01"},
+    {"side": "call", "strike": 110.0, "bid": 0.8, "ask": 1.0, "symbol": "XYZ260701C00110000", "expiry": "2026-07-01"},
+    {"side": "put", "strike": 95.0, "bid": 0.7, "ask": 0.9, "symbol": "XYZ260701P00095000", "expiry": "2026-07-01"},
+    {"side": "put", "strike": 100.0, "bid": 1.9, "ask": 2.1, "symbol": "XYZ260701P00100000", "expiry": "2026-07-01"},
+    {"side": "put", "strike": 105.0, "bid": 3.8, "ask": 4.0, "symbol": "XYZ260701P00105000", "expiry": "2026-07-01"},
 ]
 
 
@@ -45,21 +45,53 @@ def test_scan_slide_layers_match_user_facing_carousel() -> None:
     assert SCAN_SLIDE_LAYERS.index("strategy") < SCAN_SLIDE_LAYERS.index("risk_review")
 
 
-def test_select_strategy_not_hardcoded_iron_condor_on_low_score() -> None:
+def test_select_strategy_no_trade_on_low_composite() -> None:
     label = select_strategy(
-        composite=65.0,
+        composite=45.0,
         direction="neutral",
         vol_signal="sell_premium",
         rsi=50.0,
-        iv=0.35,
-        hv=0.25,
+        iv=0.30,
+        hv=0.28,
         ivr=60.0,
         tech_score=70.0,
     )
     assert label == "NO TRADE — Insufficient Conviction"
 
 
-def test_select_strategy_gamma_trampoline_on_catalyst() -> None:
+def test_select_strategy_shows_playbook_in_manual_band() -> None:
+    label = select_strategy(
+        composite=55.0,
+        direction="neutral",
+        vol_signal="sell_premium",
+        rsi=50.0,
+        iv=0.30,
+        hv=0.28,
+        ivr=60.0,
+        tech_score=70.0,
+    )
+    assert label != "NO TRADE — Insufficient Conviction"
+
+
+def test_select_strategy_apex_strategy_on_catalyst() -> None:
+    from app.analysis.layers import APEX_STRATEGY_NAME
+    from app.services.apex_strategy import ApexStrategyInput
+
+    apex_input = ApexStrategyInput(
+        catalyst_days=7,
+        term_structure_inverted=True,
+        front_iv=0.45,
+        back_iv=0.35,
+        front_ivr=75.0,
+        four_leg_structure=True,
+        legs_same_strikes=True,
+        call_delta=0.20,
+        put_delta=0.20,
+        front_premium_offset_pct=0.55,
+        adv=5_000_000,
+        open_interest=2000,
+        spread_pct=5.0,
+    )
     label = select_strategy(
         composite=78.0,
         direction="neutral",
@@ -70,8 +102,10 @@ def test_select_strategy_gamma_trampoline_on_catalyst() -> None:
         ivr=75.0,
         tech_score=75.0,
         catalyst_active=True,
+        confirmed_pattern_count=1,
+        apex_input=apex_input,
     )
-    assert label == "Gamma Trampoline™"
+    assert label == APEX_STRATEGY_NAME
 
 
 def test_bull_call_spread_metrics() -> None:
@@ -80,6 +114,8 @@ def test_bull_call_spread_metrics() -> None:
         spot=100.0,
         contracts=CONTRACTS,
         recommended={"strike": 100.0, "side": "call", "expiry": "2026-07-01"},
+        front_expiry="2026-07-01",
+        ticker="XYZ",
     )
     assert metrics["net_type"] == "debit"
     assert metrics["net_debit_credit"] is not None
@@ -95,6 +131,8 @@ def test_iron_condor_metrics_credit() -> None:
         spot=100.0,
         contracts=CONTRACTS,
         recommended=None,
+        front_expiry="2026-07-01",
+        ticker="XYZ",
     )
     assert metrics["net_type"] in {"credit", "debit"}
     assert len(metrics["legs"]) >= 2
@@ -238,14 +276,17 @@ def test_build_strategy_layer_includes_playbook_and_metrics() -> None:
         direction="bullish",
         vol_signal="buy_premium",
         chain_analysis={
+            "symbol": "XYZ",
             "spot": 100.0,
+            "expiry": "2026-07-01",
             "recommendedContract": {"strike": 100.0, "side": "call", "expiry": "2026-07-01"},
             "contracts": CONTRACTS,
         },
-        vol_layer={"iv_rank": 40},
+        vol_layer={"iv_rank": 40, "iv": 0.25},
         sentiment_layer={"bias": "bullish", "score_0_100": 68},
         fundamentals_layer={"score": 62},
         tech_score=84.0,
+        ticker="XYZ",
     )
     assert layer["selected_strategy"] == "Bull Call Spread"
     assert layer["what_is_this"]
@@ -254,3 +295,52 @@ def test_build_strategy_layer_includes_playbook_and_metrics() -> None:
     assert layer["metrics"]["net_type"] == "debit"
     assert layer["metrics"]["max_loss"] is not None
     assert layer["metrics"]["breakevens"]
+
+
+def test_calendar_spread_metrics_use_dedicated_payoff() -> None:
+    front = [
+        {"side": "call", "strike": 100.0, "bid": 2.8, "ask": 3.0, "expiry": "2026-08-01", "symbol": "AAPL260801C00100000"},
+    ]
+    back = [
+        {"side": "call", "strike": 100.0, "bid": 4.8, "ask": 5.0, "expiry": "2026-09-01", "symbol": "AAPL260901C00100000"},
+    ]
+    metrics = compute_strategy_metrics(
+        "Calendar Spread",
+        spot=100.0,
+        contracts=front,
+        recommended={"strike": 100.0, "side": "call", "expiry": "2026-08-01"},
+        back_month_contracts=back,
+        front_expiry="2026-08-01",
+        back_expiry="2026-09-01",
+        iv=0.28,
+    )
+    assert len(metrics["legs"]) == 2
+    assert metrics["net_type"] == "debit"
+    assert metrics["max_profit"] is not None
+    assert metrics["max_loss"] is not None
+    assert len(metrics["breakevens"]) >= 1
+    assert metrics.get("max_profit_iv_assumption_dependent") is True
+
+
+def test_build_strategy_layer_blocks_invalid_calendar() -> None:
+    layer = build_strategy_layer(
+        strategy_name="Calendar Spread",
+        composite=80.0,
+        direction="neutral",
+        vol_signal="fair",
+        chain_analysis={
+            "spot": 100.0,
+            "symbol": "AAPL",
+            "expiry": "2026-08-01",
+            "recommendedContract": {"strike": 100.0, "side": "call", "expiry": "2026-08-01"},
+            "contracts": [
+                {"side": "call", "strike": 100.0, "bid": 2.8, "ask": 3.0, "expiry": "2026-08-01", "symbol": "AAPL260801C00100000"},
+            ],
+        },
+        vol_layer={"iv": 0.28},
+        sentiment_layer={},
+        fundamentals_layer={"score": 60},
+        tech_score=70.0,
+    )
+    assert layer["tradeable"] is False
+    assert layer["validation_errors"]

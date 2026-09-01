@@ -4,6 +4,8 @@ import { Link, useNavigate } from "react-router-dom";
 import { api, getAccessToken } from "../api";
 import { BrokerageConnectionPanel } from "../components/BrokerageConnectionPanel";
 import { LogoutButton } from "../components/LogoutButton";
+import { PositionCertificateModal } from "../components/PositionCertificateModal";
+import { SettingsGearLink } from "../components/SettingsGearLink";
 import { TradingViewChart } from "../components/TradingViewChart";
 import { ApexLogo } from "../components/ApexLogo";
 import { LegalFooter } from "../components/LegalFooter";
@@ -11,6 +13,7 @@ import { WatchlistToggle } from "../components/WatchlistToggle";
 import { captureChartState, getChartState, subscribeChartState } from "../chartCapture";
 import { DEFAULT_SYMBOL, SNAPSHOT_STUDIES, WS_BASE } from "../constants";
 import { useBrokerage } from "../hooks/useBrokerage";
+import { defaultAccountLabel, usePositionCertificate } from "../hooks/usePositionCertificate";
 import { resolvePositionDayPl } from "../lib/positionDayPl";
 import { useSession } from "../store";
 import type { Fundamentals, PositionRow, Quote, SentimentRow, WatchItem } from "../types";
@@ -119,6 +122,10 @@ export function Dashboard() {
   const watch = useQuery({ queryKey: ["watch"], queryFn: () => api.watchlist() });
   const sentiment = useQuery({ queryKey: ["sent"], queryFn: () => api.sentiment() });
   const brokerage = useBrokerage();
+  const cert = usePositionCertificate({
+    isPaper: !brokerage.usingBrokerage,
+    accountLabel: defaultAccountLabel(user, !brokerage.usingBrokerage),
+  });
   const portfolio = useQuery({ queryKey: ["port"], queryFn: () => api.portfolio(), enabled: !brokerage.usingBrokerage });
   const positions = useQuery({ queryKey: ["pos"], queryFn: () => api.positions(), enabled: !brokerage.usingBrokerage });
   // Keep the picker on a live expiry for the current underlying. On symbol change
@@ -267,7 +274,7 @@ export function Dashboard() {
   const fRaw = fundamentals.data as Fundamentals | undefined;
   const f = fRaw && chartReady ? fRaw : undefined;
   const change = q?.change ?? null;
-  const changeCls = change == null ? "text-white/40" : change >= 0 ? "num-up" : "num-down";
+  const changeCls = change == null ? "text-faint" : change >= 0 ? "num-up" : "num-down";
   const quoteStatus = q?.status ?? (quote.isError ? "unavailable" : undefined);
   const liveName = q?.name || (activeSymbol === DEFAULT_SYMBOL ? "S&P 500 INDEX" : activeSymbol);
   const avgVolume = f?.avg_volume ?? q?.avg_volume;
@@ -381,6 +388,7 @@ export function Dashboard() {
           >
             Portfolio
           </Link>
+          <SettingsGearLink />
           <LogoutButton />
         </div>
       </header>
@@ -399,13 +407,13 @@ export function Dashboard() {
           <p className="font-display text-2xl">{activeSymbol}</p>
           <p className="text-xs text-bronze">{liveName}</p>
           {!chartReady || (quote.isLoading && !q) ? (
-            <p className="mt-2 text-sm text-white/40" data-testid="quote-loading">
+            <p className="mt-2 text-sm text-faint" data-testid="quote-loading">
               Loading live quote…
             </p>
           ) : quoteStatus === "unavailable" || quote.isError ? (
             <div className="mt-2" data-testid="quote-unavailable">
-              <p className="font-mono text-3xl text-white/35">—</p>
-              <p className="mt-1 text-xs text-white/50">Live data unavailable. No placeholder values shown.</p>
+              <p className="font-mono text-3xl text-faint">—</p>
+              <p className="mt-1 text-xs text-subtle">Live data unavailable. No placeholder values shown.</p>
             </div>
           ) : (
             <>
@@ -431,11 +439,11 @@ export function Dashboard() {
             <Row k="Expense Ratio" v={expenseRatio != null ? `${(expenseRatio * 100).toFixed(3)}%` : "—"} />
             <Row k="Beta (5Y)" v={beta5y != null ? Number(beta5y).toFixed(2) : "—"} />
           </dl>
-          <p className="mt-3 text-[10px] text-white/30" data-testid="quote-source">
+          <p className="mt-3 text-[10px] text-faint" data-testid="quote-source">
             {quoteSourceLabel(q?.source, q?.secondary_source, f?.source)}
           </p>
           {q?.as_of && (
-            <p className="text-[10px] text-white/25" data-testid="quote-asof">
+            <p className="text-[10px] text-faint" data-testid="quote-asof">
               As of {q.as_of}
             </p>
           )}
@@ -451,7 +459,7 @@ export function Dashboard() {
               <p className="font-mono" data-testid="day-pl-summary">
                 Day P&L {fmt(dayPl)} · {dayPl == null || dayPct == null ? "—" : `${dayPct.toFixed(2)}%`}
               </p>
-              <p className="text-xs text-white/40">
+              <p className="text-xs text-faint">
                 Top movers: {((portfolio.data?.top_movers as { symbol: string }[]) ?? []).map((m) => m.symbol).join(", ") || "—"}
               </p>
             </div>
@@ -475,28 +483,29 @@ export function Dashboard() {
             Open positions <span aria-hidden>{posOpen ? "▾" : "▸"}</span>
           </button>
           {posOpen && (
-            <table className="w-full border-t border-line px-4 text-left text-sm" data-testid="positions">
-              <thead className="text-bronze">
+            <div className="apex-table-wrap border-t border-line">
+            <table className="apex-table" data-testid="positions">
+              <thead>
                 <tr>
-                  <th className="px-4 py-2">Symbol</th>
-                  <th>Qty</th>
-                  <th>Avg cost</th>
-                  <th>Current</th>
-                  <th>Daily P/L</th>
-                  <th>Unrealized P&L</th>
-                  <th className="px-4">Market value</th>
+                  <th className="px-4">Symbol</th>
+                  <th className="apex-num">Qty</th>
+                  <th className="apex-num">Avg cost</th>
+                  <th className="apex-num">Current</th>
+                  <th className="apex-num">Daily P/L</th>
+                  <th className="apex-num">Unrealized P&L</th>
+                  <th className="apex-num px-4">Market value</th>
                 </tr>
               </thead>
               <tbody>
                 {positionsLoading ? (
                   <tr>
-                    <td colSpan={7} className="px-4 py-3 text-white/40">
+                    <td colSpan={7} className="px-4 py-3 text-faint">
                       Loading positions…
                     </td>
                   </tr>
                 ) : displayPositions.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-4 py-3 text-white/40">
+                    <td colSpan={7} className="px-4 py-3 text-faint">
                       No open positions.
                     </td>
                   </tr>
@@ -504,22 +513,37 @@ export function Dashboard() {
                   displayPositions.map((p) => {
                     const positionDayPl = resolvePositionDayPl(p, quoteBySymbol.get(p.symbol));
                     return (
-                    <tr key={p.id} className="border-t border-line">
-                      <td className="px-4 py-2">{p.symbol}</td>
-                      <td>{p.qty}</td>
-                      <td>{fmt(p.avg_cost)}</td>
-                      <td>{fmt(p.current)}</td>
-                      <td className={positionDayPl == null ? "text-white/40" : positionDayPl >= 0 ? "num-up" : "num-down"}>
+                    <tr
+                      key={p.id}
+                      className="cursor-pointer"
+                      data-testid={`position-row-${p.id}`}
+                      tabIndex={0}
+                      role="button"
+                      aria-label={`View certificate for ${p.symbol}`}
+                      onClick={() => cert.openPosition(p)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          cert.openPosition(p);
+                        }
+                      }}
+                    >
+                      <td className="px-4 font-mono">{p.symbol}</td>
+                      <td className="apex-num">{p.qty}</td>
+                      <td className="apex-num">{fmt(p.avg_cost)}</td>
+                      <td className="apex-num">{fmt(p.current)}</td>
+                      <td className={`apex-num ${positionDayPl == null ? "text-faint" : positionDayPl >= 0 ? "num-up" : "num-down"}`}>
                         {fmt(positionDayPl)}
                       </td>
-                      <td className={p.unrealized_pl >= 0 ? "num-up" : "num-down"}>{fmt(p.unrealized_pl)}</td>
-                      <td className="px-4">{fmt(p.market_value)}</td>
+                      <td className={`apex-num ${p.unrealized_pl >= 0 ? "num-up" : "num-down"}`}>{fmt(p.unrealized_pl)}</td>
+                      <td className="apex-num px-4">{fmt(p.market_value)}</td>
                     </tr>
                     );
                   })
                 )}
               </tbody>
             </table>
+            </div>
           )}
         </div>
 
@@ -537,7 +561,7 @@ export function Dashboard() {
             {watchOpen && (
               <ul className="border-t border-line px-3 py-2 text-sm" data-testid="watch-list">
                 {((watch.data?.items as WatchItem[]) ?? []).length === 0 ? (
-                  <li className="py-2 text-white/40" data-testid="watch-empty">
+                  <li className="py-2 text-faint" data-testid="watch-empty">
                     Watchlist is empty — search a ticker and add it.
                   </li>
                 ) : (
@@ -546,7 +570,7 @@ export function Dashboard() {
                       <button className="text-left" onClick={() => applyTicker(w.symbol)}>
                         {w.symbol}
                       </button>
-                      <span className={w.change_pct == null ? "text-white/40" : w.change_pct >= 0 ? "num-up" : "num-down"}>
+                      <span className={w.change_pct == null ? "text-faint" : w.change_pct >= 0 ? "num-up" : "num-down"}>
                         {fmt(w.price)} ({fmtPct(w.change_pct)})
                       </span>
                     </li>
@@ -568,7 +592,7 @@ export function Dashboard() {
             {sentOpen && (
               <ul className="max-h-56 space-y-3 overflow-auto border-t border-line px-3 py-3 text-sm">
                 {((sentiment.data?.items as SentimentRow[]) ?? []).length === 0 ? (
-                  <li className="text-xs text-white/40">
+                  <li className="text-xs text-faint">
                     {(sentiment.data as { caveat?: string } | undefined)?.caveat ||
                       "No live sentiment rows. Open Deep Scan for news flow and chain positioning."}
                   </li>
@@ -576,7 +600,7 @@ export function Dashboard() {
                   ((sentiment.data?.items as SentimentRow[]) ?? []).map((s, i) => (
                     <li key={i}>
                       <p className="text-champagne">{s.headline}</p>
-                      <p className="text-xs text-white/50">{s.blurb}</p>
+                      <p className="text-xs text-subtle">{s.blurb}</p>
                       <p className="text-[10px] text-bronze">
                         {s.source} · {s.published_at}
                       </p>
@@ -589,11 +613,15 @@ export function Dashboard() {
         </div>
       </section>
 
+      {cert.selected ? (
+        <PositionCertificateModal details={cert.selected} onDismiss={cert.dismiss} />
+      ) : null}
+
       {showConnectModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" data-testid="connect-modal">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--apex-backdrop)]" data-testid="connect-modal">
           <div className="w-full max-w-md rounded-2xl border border-line bg-panel p-6">
             <h2 className="font-display text-2xl">Connect brokerage</h2>
-            <p className="mt-2 text-sm text-white/60">Connect now, or continue and connect later. Later leaves a dismissible banner.</p>
+            <p className="mt-2 text-sm text-subtle">Connect now, or continue and connect later. Later leaves a dismissible banner.</p>
             <div className="mt-6 flex gap-3">
               <button className="flex-1 rounded-md bg-gold py-2 text-ink" onClick={() => now.mutate()}>
                 Connect brokerage now
@@ -623,7 +651,7 @@ function Stat({ label, value, testid }: { label: string; value: number; testid: 
 function Row({ k, v }: { k: string; v: string }) {
   return (
     <div className="flex justify-between">
-      <dt className="text-white/40">{k}</dt>
+      <dt className="text-faint">{k}</dt>
       <dd className="font-mono">{v}</dd>
     </div>
   );

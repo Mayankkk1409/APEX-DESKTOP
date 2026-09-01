@@ -297,7 +297,7 @@ class DemoAdapter:
                 prev = max(round(mid / (1.0 + 0.04 * (1 if side == "call" else -1)), 2), 0.01)
                 contracts.append(
                     OptionContract(
-                        symbol=f"{symbol}{expiry.replace('-', '')}{side[0].upper()}{int(strike * 1000):08d}",
+                        symbol=f"{symbol}{expiry.replace('-', '')[2:]}{side[0].upper()}{int(strike * 1000):08d}",
                         strike=strike,
                         side=side,  # type: ignore[arg-type]
                         bid=bid,

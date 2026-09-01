@@ -3,6 +3,69 @@ import { supportResistance, type OhlcBar } from "./ta";
 
 export type CatalystBias = "bullish" | "bearish";
 
+/** Backend PatternSignal from scan API — source of truth when present. */
+export type BackendPatternSignal = {
+  id: string;
+  name: string;
+  family: string;
+  direction: "bullish" | "bearish" | "neutral";
+  status: "forming" | "confirmed" | "invalidated";
+  strength: number;
+  reliability_tier: "high" | "medium" | "low";
+  confirmation_evidence?: string[];
+  invalidation?: string[];
+  bar_index?: number;
+  invalidation_price?: number;
+};
+
+function _familyKind(family: string): Catalyst["kind"] {
+  if (/chart|reversal_chart|continuation_chart/.test(family)) return "structure";
+  if (/momentum|trend_structure/.test(family)) return "momentum";
+  if (/sr_pivot|volume|volatility/.test(family)) return "level";
+  return "candle";
+}
+
+/** Convert backend confirmed patterns to chart catalysts (prefer over local heuristics). */
+export function backendPatternsToCatalysts(
+  patterns: BackendPatternSignal[],
+  bars: OhlcBar[],
+): Catalyst[] {
+  return patterns
+    .filter((p) => p.status === "confirmed" && p.strength >= 65 && p.reliability_tier !== "low")
+    .map((p) => {
+      const i = p.bar_index != null && p.bar_index >= 0 ? Math.min(p.bar_index, bars.length - 1) : bars.length - 1;
+      const b = bars[i] ?? bars[bars.length - 1];
+      const bias: CatalystBias = p.direction === "bearish" ? "bearish" : "bullish";
+      const explain =
+        (p.confirmation_evidence?.length ? p.confirmation_evidence.join(". ") + "." : "") ||
+        `${p.name} confirmed on captured window (${p.family.replace(/_/g, " ")}).`;
+      return {
+        id: `backend-${p.id}-${i}`,
+        name: p.name,
+        bias: p.direction === "neutral" ? (bias as CatalystBias) : bias,
+        kind: _familyKind(p.family),
+        barIndex: i,
+        price: p.invalidation_price ?? b.l,
+        price2: b.h,
+        explain,
+        confidence: Math.min(0.98, p.strength / 100),
+      };
+    });
+}
+
+/** Merge backend patterns (preferred) with local detection fallback. */
+export function resolveCatalysts(
+  bars: OhlcBar[],
+  series?: PlotSeries,
+  backendPatterns?: BackendPatternSignal[],
+): Catalyst[] {
+  if (backendPatterns?.length) {
+    const fromBackend = filterStrongestConfirmedPatterns(backendPatternsToCatalysts(backendPatterns, bars));
+    if (fromBackend.length) return fromBackend;
+  }
+  return filterStrongestConfirmedPatterns(detectCatalysts(bars, series));
+}
+
 export type MarkPoint = { i: number; price: number };
 
 export type Catalyst = {
@@ -23,6 +86,16 @@ export type Catalyst = {
 export function patternUsesBoxMark(c: Catalyst): boolean {
   if (c.kind !== "structure") return false;
   return /head\s*&\s*shoulders|inverse head|flag|channel|double top|double bottom|rounding bottom/i.test(c.name);
+}
+
+/** Keep only the strongest confirmed patterns for chart highlight and carousel. */
+export function filterStrongestConfirmedPatterns(catalysts: Catalyst[]): Catalyst[] {
+  const drawable = catalysts.filter((c) => catalystIsDrawableOnChart(c));
+  if (!drawable.length) return [];
+  const minConfidence = 0.75;
+  const strong = drawable.filter((c) => c.confidence >= minConfidence);
+  const pool = strong.length ? strong : [drawable.reduce((a, b) => (b.confidence > a.confidence ? b : a))];
+  return pool.sort((a, b) => b.confidence - a.confidence).slice(0, 3);
 }
 
 /** Catalysts that receive a visible mark when their analysis card is active. */

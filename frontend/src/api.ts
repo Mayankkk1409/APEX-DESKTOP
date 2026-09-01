@@ -143,6 +143,23 @@ export const api = {
   pnlHistory: () => req<import("./types").PnlHistory>("/api/portfolio/pnl-history"),
   overallPnl: () => req<{ rows: import("./types").OverallPnlRow[] }>("/api/portfolio/overall-pnl"),
   positions: () => req<{ positions: import("./types").PositionRow[] }>("/api/positions"),
+  positionDetail: (positionId: string) =>
+    req<{
+      position: import("./types").PositionRow;
+      certificate: {
+        strategy_name?: string | null;
+        entry_composite_score?: number | null;
+        greeks?: { delta?: number | null; gamma?: number | null; theta?: number | null; vega?: number | null };
+        legs?: import("./types").StrategyLeg[];
+        breakevens?: import("./types").BreakevenValue[];
+        breakeven_iv_assumption?: boolean;
+        breakeven_assumption_note?: string;
+        max_loss?: number | null;
+        max_profit?: number | null;
+        net_debit_credit?: number | null;
+        net_type?: string | null;
+      };
+    }>(`/api/positions/${encodeURIComponent(positionId)}`),
   closePosition: (positionId: string) =>
     req<{ ok: boolean; balance: number; buying_power: number; portfolio_value: number }>(
       `/api/positions/${encodeURIComponent(positionId)}/close`,
@@ -188,4 +205,30 @@ export const api = {
     ),
   brokerageDisconnect: (accountId: string) =>
     req(`/api/brokerage/accounts/${encodeURIComponent(accountId)}`, { method: "DELETE" }),
+  /** Persist user preferences — falls back to localStorage when endpoint is unavailable. */
+  syncSettings: (body: Record<string, unknown>) =>
+    req<{ ok: boolean }>("/api/settings/trading", {
+      method: "PATCH",
+      body: JSON.stringify({
+        auto_execution_threshold: body.autoExecMinScore,
+        risk_profile: body.riskProfile,
+        max_risk_per_trade_pct: body.maxRiskPerTradePct,
+        max_positions: body.maxPositions,
+        theme_preference: body.theme,
+      }),
+    }).catch(() => ({ ok: false })),
+  getSettings: () => req<Record<string, unknown>>("/api/settings/trading").catch(() => null),
+  resetPaperBalance: (starting_balance: number) =>
+    req<import("./types").User>("/api/settings/paper-balance", {
+      method: "PATCH",
+      body: JSON.stringify({ balance: starting_balance, reason: "User reset from settings" }),
+    }).then(async (res) => {
+      const me = await req<import("./types").User>("/auth/me");
+      return me;
+    }),
+  deleteAccount: (password?: string) =>
+    req<{ ok: boolean; deleted: boolean }>("/api/settings/account/delete", {
+      method: "POST",
+      body: JSON.stringify({ password: password ?? "" }),
+    }),
 };

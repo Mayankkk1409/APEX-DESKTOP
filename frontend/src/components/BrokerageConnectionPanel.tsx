@@ -90,6 +90,12 @@ export function BrokerageConnectionPanel() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-xs uppercase tracking-wider text-bronze">Account data source</p>
+          <span
+            className={`apex-badge mt-1 ${connected ? "apex-badge-live" : "apex-badge-offline"}`}
+            data-testid="brokerage-status-badge"
+          >
+            {connected ? "Connected" : "Not connected"}
+          </span>
         </div>
         {!connected ? (
           <button
@@ -145,7 +151,7 @@ export function BrokerageConnectionPanel() {
           )}
         </select>
         {portfolioViewMode === "paper" && (
-          <p className="text-xs text-white/40" data-testid="portfolio-view-paper-hint">
+          <p className="text-xs text-faint" data-testid="portfolio-view-paper-hint">
             Paper account is always available — ${paperBalance.toLocaleString(undefined, { maximumFractionDigits: 0 })} simulated balance.
           </p>
         )}
@@ -182,7 +188,7 @@ export function BrokerageConnectionPanel() {
             ))}
           </select>
           {lastSynced && (
-            <p className="text-xs text-white/40" data-testid="brokerage-last-synced">
+            <p className="text-xs text-faint" data-testid="brokerage-last-synced">
               Last synced {new Date(lastSynced).toLocaleString()}
               {syncPending ? " · updating…" : ""}
             </p>
@@ -196,16 +202,16 @@ export function BrokerageConnectionPanel() {
       )}
 
       {!connected && (
-        <p className="mt-2 text-xs text-white/40">
+        <p className="mt-2 text-xs text-faint">
           Connect via SnapTrade for live read-only account data. Paper trading remains available without a connection.
         </p>
       )}
 
       {disclosureOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" data-testid="brokerage-disclosure">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--apex-backdrop)]" data-testid="brokerage-disclosure">
           <div className="w-full max-w-md rounded-2xl border border-line bg-panel p-6">
             <h2 className="font-display text-xl">Connect your brokerage</h2>
-            <p className="mt-3 text-sm text-white/70">
+            <p className="mt-3 text-sm text-champagne/70">
               You&apos;ll be redirected to {brokerLabel}&apos;s official login page. APEX does not receive or store your
               brokerage username or password. This connection is read-only — APEX cannot place trades on your behalf.
             </p>
@@ -229,10 +235,10 @@ export function BrokerageConnectionPanel() {
       )}
 
       {disconnectOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" data-testid="brokerage-disconnect-modal">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--apex-backdrop)]" data-testid="brokerage-disconnect-modal">
           <div className="w-full max-w-md rounded-2xl border border-line bg-panel p-6">
             <h2 className="font-display text-xl">Disconnect brokerage?</h2>
-            <p className="mt-2 text-sm text-white/60">APEX will remove this read-only connection and stop syncing data.</p>
+            <p className="mt-2 text-sm text-subtle">APEX will remove this read-only connection and stop syncing data.</p>
             <div className="mt-6 flex gap-3">
               <button
                 type="button"

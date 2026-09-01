@@ -53,3 +53,23 @@ BOLLINGER_STD = 2.0
 COMPOSITE_THRESHOLD_FULL_DOC = 72
 COMPOSITE_THRESHOLD_PROJECT = 85
 EXECUTION_SCORE_BLOCKED_MAX = 50
+
+# APEX Composite Score weights (encyclopedia §8)
+APEX_COMPOSITE_WEIGHTS: dict[str, float] = {
+    "technical": 0.35,
+    "options_iv": 0.20,
+    "liquidity": 0.15,
+    "catalyst_fundamental": 0.10,
+    "payoff_risk": 0.10,
+    "cross_tf": 0.05,
+    "data_freshness": 0.05,
+}
+
+# Strategy recommendation score tiers
+SCORE_TIER_NO_TRADE_MAX = 59
+SCORE_TIER_WATCHLIST_MAX = 71
+SCORE_TIER_CANDIDATE_MIN = 72
+DEFAULT_AUTO_EXEC_THRESHOLD = 85
+
+# APEX Strategy (formerly Gamma Trampoline) display name
+APEX_STRATEGY_NAME = "APEX Strategy"

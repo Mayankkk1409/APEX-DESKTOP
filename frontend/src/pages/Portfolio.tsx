@@ -5,8 +5,11 @@ import { api } from "../api";
 import { ApexLogo } from "../components/ApexLogo";
 import { LegalFooter } from "../components/LegalFooter";
 import { LogoutButton } from "../components/LogoutButton";
+import { PositionCertificateModal } from "../components/PositionCertificateModal";
+import { SettingsGearLink } from "../components/SettingsGearLink";
 import { PnlChart } from "../components/PnlChart";
 import { useBrokerage } from "../hooks/useBrokerage";
+import { defaultAccountLabel, usePositionCertificate } from "../hooks/usePositionCertificate";
 import { filterPnlPoints, type PnlTimeframe } from "../lib/pnlTimeframe";
 import { assetLabel, fmtBalance, fmtMoney, fmtPlain, fmtTs } from "../lib/portfolioFormat";
 import { useSession } from "../store";
@@ -33,7 +36,7 @@ function Collapsible({
         onClick={() => setOpen((v) => !v)}
       >
         {title}
-        <span aria-hidden className="text-sm text-white/50">
+        <span aria-hidden className="text-sm text-subtle">
           {open ? "▾" : "▸"}
         </span>
       </button>
@@ -58,6 +61,10 @@ export function Portfolio() {
   const qc = useQueryClient();
   const { user, setUser } = useSession();
   const brokerage = useBrokerage();
+  const cert = usePositionCertificate({
+    isPaper: !brokerage.usingBrokerage,
+    accountLabel: defaultAccountLabel(user, !brokerage.usingBrokerage),
+  });
   const [chartTimeframe, setChartTimeframe] = useState<PnlTimeframe>("MAX");
 
   const usingBrokerage = brokerage.usingBrokerage;
@@ -156,7 +163,7 @@ export function Portfolio() {
     null;
 
   return (
-    <div className="min-h-screen bg-[#07070a] text-white" data-testid="portfolio-page">
+    <div className="min-h-screen bg-ink text-champagne" data-testid="portfolio-page">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3">
         <div className="flex flex-wrap items-center gap-3">
           <ApexLogo size={36} className="shrink-0" />
@@ -165,29 +172,32 @@ export function Portfolio() {
             Dashboard
           </Link>
         </div>
-        <LogoutButton />
+        <div className="flex items-center gap-2">
+          <SettingsGearLink />
+          <LogoutButton />
+        </div>
       </header>
 
       <main className="mx-auto max-w-5xl space-y-6 px-4 py-6">
         <div>
           <h1 className="font-display text-2xl">Portfolio</h1>
-          <p className="mt-1 text-sm text-white/50" data-testid="portfolio-header-balance">
+          <p className="mt-1 text-sm text-subtle" data-testid="portfolio-header-balance">
             {headerLabel} {fmtBalance(headerBalance)}
           </p>
           {usingBrokerage && brokerage.activeAccount && (
-            <p className="mt-1 text-xs text-white/40" data-testid="portfolio-brokerage-account">
+            <p className="mt-1 text-xs text-faint" data-testid="portfolio-brokerage-account">
               {brokerage.activeAccount.account_name} · {brokerage.activeAccount.broker_name}
             </p>
           )}
           {!usingBrokerage && (
-            <p className="mt-1 text-xs text-white/40" data-testid="portfolio-paper-context">
+            <p className="mt-1 text-xs text-faint" data-testid="portfolio-paper-context">
               Paper trading account
             </p>
           )}
         </div>
 
-        {loadError && (
-          <p className="rounded-md border border-red-500/40 bg-red-950/30 px-3 py-2 text-sm text-red-300" role="alert">
+          {loadError && (
+          <p className="apex-alert apex-alert-error" role="alert">
             Could not load portfolio: {loadError}. Check that you are signed in and the API is running.
           </p>
         )}
@@ -201,46 +211,61 @@ export function Portfolio() {
             valueLabel={usingBrokerage ? "Equity" : "Portfolio value"}
           />
           {historyQuery.isFetching && !historyQuery.data && (
-            <p className="mt-2 text-xs text-white/40" data-testid="portfolio-chart-loading">
+            <p className="mt-2 text-xs text-faint" data-testid="portfolio-chart-loading">
               Loading portfolio history…
             </p>
           )}
         </section>
 
         <Collapsible title="Current Portfolio" testId="portfolio-positions-section">
-          <p className="mt-2 text-xs text-white/40">
+          <p className="mt-2 text-xs text-faint">
             {usingBrokerage
               ? "Open positions from your connected brokerage — read-only, synced with the dashboard."
               : "Open positions from your desk — same data as the dashboard table."}
           </p>
           {positionsLoading ? (
-            <p className="mt-3 text-sm text-white/40">Loading positions…</p>
+            <p className="mt-3 text-sm text-faint">Loading positions…</p>
           ) : openPositions.length === 0 ? (
-            <p className="mt-3 text-sm text-white/40">No open positions.</p>
+            <p className="mt-3 text-sm text-faint">No open positions.</p>
           ) : (
-            <table className="mt-3 w-full text-left text-sm" data-testid="portfolio-positions">
-              <thead className="text-bronze">
+            <div className="apex-table-wrap">
+            <table className="apex-table mt-3" data-testid="portfolio-positions">
+              <thead>
                 <tr>
-                  <th className="py-2">Symbol</th>
+                  <th>Symbol</th>
                   <th>Type</th>
-                  <th>Qty</th>
-                  <th>Avg cost</th>
-                  <th>Current</th>
-                  <th>Unrealized P&amp;L</th>
-                  <th>Market value</th>
+                  <th className="apex-num">Qty</th>
+                  <th className="apex-num">Avg cost</th>
+                  <th className="apex-num">Current</th>
+                  <th className="apex-num">Unrealized P&amp;L</th>
+                  <th className="apex-num">Market value</th>
                   {!usingBrokerage && <th className="text-right">Action</th>}
                 </tr>
               </thead>
               <tbody>
                 {openPositions.map((p) => (
-                  <tr key={p.id} className="border-t border-line">
-                    <td className="py-2">{p.symbol}</td>
+                  <tr
+                    key={p.id}
+                    className="cursor-pointer"
+                    data-testid={`position-row-${p.id}`}
+                    tabIndex={0}
+                    role="button"
+                    aria-label={`View certificate for ${p.symbol}`}
+                    onClick={() => cert.openPosition(p)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        cert.openPosition(p);
+                      }
+                    }}
+                  >
+                    <td className="font-mono">{p.symbol}</td>
                     <td>{assetLabel(p.asset_class ?? "us_equity")}</td>
-                    <td>{fmtPlain(p.qty)}</td>
-                    <td>{fmtPlain(p.avg_cost)}</td>
-                    <td>{fmtPlain(p.current)}</td>
-                    <td className={p.unrealized_pl >= 0 ? "num-up" : "num-down"}>{fmtMoney(p.unrealized_pl)}</td>
-                    <td>{fmtMoney(p.market_value)}</td>
+                    <td className="apex-num">{fmtPlain(p.qty)}</td>
+                    <td className="apex-num">{fmtPlain(p.avg_cost)}</td>
+                    <td className="apex-num">{fmtPlain(p.current)}</td>
+                    <td className={`apex-num ${p.unrealized_pl >= 0 ? "num-up" : "num-down"}`}>{fmtMoney(p.unrealized_pl)}</td>
+                    <td className="apex-num">{fmtMoney(p.market_value)}</td>
                     {!usingBrokerage && (
                       <td className="text-right">
                         <button
@@ -248,7 +273,10 @@ export function Portfolio() {
                           className="rounded border border-line px-2 py-1 text-xs text-gold hover:bg-gold/10 disabled:opacity-40"
                           data-testid={`close-position-${p.id}`}
                           disabled={close.isPending}
-                          onClick={() => close.mutate(p.id)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            close.mutate(p.id);
+                          }}
                         >
                           Close
                         </button>
@@ -258,79 +286,93 @@ export function Portfolio() {
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </Collapsible>
 
         <Collapsible title="Order History" testId="portfolio-orders-section" defaultOpen={false}>
           {ordersLoading ? (
-            <p className="mt-3 text-sm text-white/40">Loading orders…</p>
+            <p className="mt-3 text-sm text-faint">Loading orders…</p>
           ) : orderRows.length === 0 ? (
-            <p className="mt-3 text-sm text-white/40">
+            <p className="mt-3 text-sm text-faint">
               {usingBrokerage ? "No recent brokerage orders." : "No orders yet."}
             </p>
           ) : (
-            <table className="mt-3 w-full text-left text-sm" data-testid="portfolio-orders">
-              <thead className="text-bronze">
+            <div className="apex-table-wrap">
+            <table className="apex-table mt-3" data-testid="portfolio-orders">
+              <thead>
                 <tr>
-                  <th className="py-2">Time</th>
+                  <th>Time</th>
                   <th>Side</th>
                   <th>Symbol</th>
-                  <th>Qty</th>
-                  <th>Fill</th>
+                  <th className="apex-num">Qty</th>
+                  <th className="apex-num">Fill</th>
                   <th>Status</th>
                 </tr>
               </thead>
               <tbody>
                 {orderRows.map((o) => (
-                  <tr key={o.id} className="border-t border-line">
-                    <td className="py-2 text-white/60">{fmtTs(o.filled_at ?? o.created_at)}</td>
+                  <tr key={o.id}>
+                    <td className="text-subtle">{fmtTs(o.filled_at ?? o.created_at)}</td>
                     <td>{o.side.toUpperCase()}</td>
-                    <td>{o.symbol}</td>
-                    <td>{fmtPlain(o.qty)}</td>
-                    <td>{fmtPlain(o.fill_price)}</td>
+                    <td className="font-mono">{o.symbol}</td>
+                    <td className="apex-num">{fmtPlain(o.qty)}</td>
+                    <td className="apex-num">{fmtPlain(o.fill_price)}</td>
                     <td>{o.status}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </Collapsible>
 
         <Collapsible title="Overall P&amp;L" testId="portfolio-overall-section" defaultOpen={false}>
           {overallLoading ? (
-            <p className="mt-3 text-sm text-white/40">Loading P&amp;L breakdown…</p>
+            <p className="mt-3 text-sm text-faint">Loading P&amp;L breakdown…</p>
           ) : overallRows.length === 0 ? (
-            <p className="mt-3 text-sm text-white/40">No trade history yet.</p>
+            <p className="mt-3 text-sm text-faint">No trade history yet.</p>
           ) : (
-            <table className="mt-3 w-full text-left text-sm">
-              <thead className="text-bronze">
+            <div className="apex-table-wrap">
+            <table className="apex-table mt-3">
+              <thead>
                 <tr>
-                  <th className="py-2">Symbol</th>
+                  <th>Symbol</th>
                   <th>Type</th>
-                  <th>Qty</th>
-                  <th>Realized</th>
-                  <th>Unrealized</th>
-                  <th>Total</th>
+                  <th className="apex-num">Qty</th>
+                  <th className="apex-num">Realized</th>
+                  <th className="apex-num">Unrealized</th>
+                  <th className="apex-num">Total</th>
                   <th>Status</th>
                 </tr>
               </thead>
               <tbody>
                 {overallRows.map((r) => (
-                  <tr key={r.symbol} className="border-t border-line">
-                    <td className="py-2">{r.symbol}</td>
+                  <tr key={r.symbol}>
+                    <td className="font-mono">{r.symbol}</td>
                     <td>{assetLabel(r.asset_class)}</td>
-                    <td>{fmtPlain(r.qty)}</td>
-                    <td className={r.realized_pl >= 0 ? "num-up" : "num-down"}>{fmtMoney(r.realized_pl)}</td>
-                    <td className={r.unrealized_pl >= 0 ? "num-up" : "num-down"}>{fmtMoney(r.unrealized_pl)}</td>
-                    <td className={r.total_pl >= 0 ? "num-up" : "num-down"}>{fmtMoney(r.total_pl)}</td>
+                    <td className="apex-num">{fmtPlain(r.qty)}</td>
+                    <td className={`apex-num ${r.realized_pl >= 0 ? "num-up" : "num-down"}`}>{fmtMoney(r.realized_pl)}</td>
+                    <td className={`apex-num ${r.unrealized_pl >= 0 ? "num-up" : "num-down"}`}>{fmtMoney(r.unrealized_pl)}</td>
+                    <td className={`apex-num ${r.total_pl >= 0 ? "num-up" : "num-down"}`}>{fmtMoney(r.total_pl)}</td>
                     <td>{r.is_open ? "Open" : "Closed"}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </Collapsible>
       </main>
+
+      {cert.selected ? (
+        <PositionCertificateModal
+          details={cert.selected}
+          onDismiss={cert.dismiss}
+          onClosePosition={!usingBrokerage ? (id) => close.mutate(id) : undefined}
+          closing={close.isPending}
+        />
+      ) : null}
 
       <LegalFooter className="px-4 pb-6" />
     </div>

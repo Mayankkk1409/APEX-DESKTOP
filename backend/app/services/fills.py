@@ -9,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.trading import Order, Position
 from app.models.user import User
 from app.services.orders import account_impact, estimate_order_cost
+from app.strategies.registry import get_strategy_spec, resolve_strategy_id
+from app.strategies.validator import validate_strategy_output
 from app.ws.hub import hub
 
 
@@ -42,6 +44,8 @@ async def execute_market_fill(
     order_type: str = "market",
     limit_price: float | None = None,
     scan_id: str | None = None,
+    strategy_name: str | None = None,
+    certificate: dict[str, Any] | None = None,
 ) -> Order:
     quote = await adapter.quote(symbol)
     px = limit_price if order_type == "limit" and limit_price is not None else quote.price
@@ -91,6 +95,10 @@ async def execute_market_fill(
             pos.avg_cost = (pos.avg_cost * pos.qty + fill_px * order.qty) / new_qty
             pos.qty = new_qty
             pos.current_price = fill_px
+            if strategy_name and not pos.strategy_name:
+                pos.strategy_name = strategy_name
+            if certificate and not pos.certificate:
+                pos.certificate = certificate
         else:
             pos.qty = new_qty
             pos.current_price = fill_px
@@ -103,6 +111,8 @@ async def execute_market_fill(
                 avg_cost=fill_px,
                 current_price=fill_px,
                 asset_class=asset_class,
+                strategy_name=strategy_name,
+                certificate=certificate,
             )
         )
 
@@ -137,14 +147,64 @@ async def execute_strategy_legs(
     legs: list[dict[str, Any]],
     scan_id: str | None = None,
     contracts_per_leg: float = 1,
+    strategy_name: str | None = None,
+    certificate: dict[str, Any] | None = None,
+    equity_legs: list[dict[str, Any]] | None = None,
 ) -> list[Order]:
-    """Fill each recommended options leg as a separate us_option market order."""
-    if not legs:
-        raise ValueError("Strategy legs are required for options execution")
+    """Fill each recommended leg — options always; equity only when strategy requires it."""
+    if not legs and not equity_legs:
+        raise ValueError("Strategy legs are required for execution")
+    if strategy_name and certificate:
+        metrics = {
+            "legs": certificate.get("legs") or legs,
+            "max_profit": certificate.get("max_profit"),
+            "max_loss": certificate.get("max_loss"),
+            "breakevens": certificate.get("breakevens") or [],
+        }
+        ticker = str(certificate.get("symbol") or "")
+        if not ticker and legs:
+            occ = str(legs[0].get("symbol") or "")
+            ticker = occ[: occ.find(next((c for c in occ if c.isdigit()), ""))] if occ else "—"
+        validation = validate_strategy_output(
+            strategy_name,
+            metrics,
+            ticker or "—",
+            order_legs=legs,
+        )
+        if not validation.valid:
+            err = validation.errors[0]
+            raise ValueError(str(err))
+        spec = get_strategy_spec(strategy_name)
+        if spec and spec.equity_required and spec.equity_leg_spec:
+            overlay = spec.equity_leg_spec.entry_mode == "pre_existing"
+            if not overlay and not equity_legs:
+                raise ValueError("Equity-required strategy missing stock leg — execution blocked")
+        elif equity_legs:
+            raise ValueError("Equity legs submitted for options-only strategy — execution blocked")
     qty = contracts_per_leg
     if qty <= 0:
         raise ValueError("contracts_per_leg must be positive")
     orders: list[Order] = []
+    for eq in equity_legs or []:
+        symbol = str(eq.get("symbol") or "").upper()
+        side = str(eq.get("side") or "").lower()
+        eq_qty = float(eq.get("qty") or 100)
+        if not symbol or side not in {"buy", "sell"}:
+            raise ValueError("Each equity leg must include a ticker symbol and buy/sell side")
+        order = await execute_market_fill(
+            user=user,
+            db=db,
+            adapter=adapter,
+            symbol=symbol,
+            side=side,
+            qty=eq_qty,
+            asset_class="us_equity",
+            order_type="market",
+            scan_id=scan_id,
+            strategy_name=strategy_name,
+            certificate=certificate,
+        )
+        orders.append(order)
     for leg in legs:
         occ = str(leg.get("symbol") or "").upper()
         side = str(leg.get("side") or "").lower()
@@ -160,6 +220,8 @@ async def execute_strategy_legs(
             asset_class="us_option",
             order_type="market",
             scan_id=scan_id,
+            strategy_name=strategy_name,
+            certificate=certificate,
         )
         orders.append(order)
     return orders

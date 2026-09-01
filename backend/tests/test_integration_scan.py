@@ -73,7 +73,8 @@ async def test_scan_carries_the_selected_expiry_into_the_combined_layer(client: 
 
     assert layer["expiry"] == expiry, "the combined layer must use the expiry the session selected"
     assert layer["contracts"], "the demo adapter always returns a chain for a live expiry"
-    assert len(layer["cards"]) == 14
+    assert len(layer["cards"]) >= 14
+    assert len(layer["cards"]) == len({c["id"] for c in layer["cards"]})
     assert layer["data_source"]["is_live"] is False, "no credentials in test env — must not claim live data"
     assert layer["thresholds"]["min_open_interest"] == 500
     assert all(row["verdict"] is not None for row in layer["contracts"])

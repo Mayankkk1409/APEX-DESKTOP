@@ -1,5 +1,7 @@
 import { createChart, LineSeries, type IChartApi, type IPriceLine, type ISeriesApi, type Time } from "lightweight-charts";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffectiveTheme } from "../../hooks/useEffectiveTheme";
+import { ivHvChartLayoutOptions, readCssColor } from "../../lib/chartTheme";
 
 export type HvPoint = { t: string; hv: number | null };
 export type IvPoint = { t: string; iv: number | null };
@@ -67,6 +69,7 @@ export function IvHvChart({
   const [active, setActive] = useState<string[]>([]);
   const [hover, setHover] = useState<string>("");
   const [ivLineActive, setIvLineActive] = useState(false);
+  const theme = useEffectiveTheme();
 
   const ivLegend = contractLabel ?? "Contract IV";
   const ivPts = useMemo(() => toIvLineData(ivSeries ?? []), [ivSeries]);
@@ -90,27 +93,19 @@ export function IvHvChart({
     const el = hostRef.current;
     if (!el) return;
     const chart = createChart(el, {
+      ...ivHvChartLayoutOptions(),
       layout: {
-        background: { color: "#0b0d12" },
-        textColor: "rgba(206,191,156,0.75)",
+        ...ivHvChartLayoutOptions().layout,
         fontFamily: '"IBM Plex Mono", ui-monospace, monospace',
         fontSize: 11,
       },
-      grid: {
-        vertLines: { color: "rgba(240,243,250,0.05)" },
-        horzLines: { color: "rgba(240,243,250,0.05)" },
-      },
       rightPriceScale: {
-        borderColor: "rgba(240,243,250,0.1)",
+        ...ivHvChartLayoutOptions().rightPriceScale,
         scaleMargins: { top: 0.08, bottom: 0.08 },
       },
       timeScale: {
-        borderColor: "rgba(240,243,250,0.1)",
+        ...ivHvChartLayoutOptions().timeScale,
         timeVisible: false,
-      },
-      crosshair: {
-        vertLine: { color: "rgba(224,181,104,0.35)", labelBackgroundColor: "#2a2110" },
-        horzLine: { color: "rgba(224,181,104,0.35)", labelBackgroundColor: "#2a2110" },
       },
       width: el.clientWidth,
       height: 320,
@@ -148,6 +143,10 @@ export function IvHvChart({
   }, []);
 
   useEffect(() => {
+    chartRef.current?.applyOptions(ivHvChartLayoutOptions());
+  }, [theme]);
+
+  useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
 
@@ -168,7 +167,7 @@ export function IvHvChart({
       const pts = toLineData(hvSeries[win] ?? []);
       if (!pts.length) continue;
       const series = chart.addSeries(LineSeries, {
-        color: HV_COLORS[win] ?? "#cebf9c",
+        color: HV_COLORS[win] ?? readCssColor("--apex-text", "#cebf9c"),
         lineWidth: 2,
         title: `HV ${win}`,
         priceLineVisible: false,
@@ -182,7 +181,7 @@ export function IvHvChart({
 
     if (ivPtsLocal.length >= 2) {
       const ivApi = chart.addSeries(LineSeries, {
-        color: "#f2f4f8",
+        color: readCssColor("--apex-chart-text-strong", "#f2f4f8"),
         lineWidth: 2,
         lineStyle: 2,
         title: ivLegend,
@@ -198,7 +197,7 @@ export function IvHvChart({
       if (first) {
         const line = first.createPriceLine({
           price: currentIv * 100,
-          color: "rgba(242,244,248,0.85)",
+          color: readCssColor("--apex-subtle", "rgba(242,244,248,0.85)"),
           lineWidth: 1,
           lineStyle: 2,
           axisLabelVisible: true,

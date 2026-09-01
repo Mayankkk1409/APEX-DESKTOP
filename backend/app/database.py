@@ -48,6 +48,7 @@ async def init_db() -> None:
     from app.models import brokerage as _brokerage  # noqa: F401
     from app.models import trading as _trading  # noqa: F401
     from app.models import user as _user  # noqa: F401
+    from app.models import user_settings as _user_settings  # noqa: F401
 
     try:
         await asyncio.to_thread(_run_alembic_migrations)

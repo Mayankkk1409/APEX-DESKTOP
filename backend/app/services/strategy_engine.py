@@ -2,17 +2,37 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime, timezone
 from typing import Any, Literal
 
-from app.analysis.layers import COMPOSITE_THRESHOLD_FULL_DOC, EXECUTION_SCORE_BLOCKED_MAX
+from app.analysis.layers import (
+    APEX_COMPOSITE_WEIGHTS,
+    APEX_STRATEGY_NAME,
+    COMPOSITE_THRESHOLD_FULL_DOC,
+    DEFAULT_AUTO_EXEC_THRESHOLD,
+    EXECUTION_SCORE_BLOCKED_MAX,
+)
+from app.services.strategy_recommendation import (
+    MarketSnapshot,
+    TechnicalAnalysisResultRef,
+    recommend_strategy,
+)
+from app.strategies.payoffs import apex_strategy_payoff, calendar_spread_payoff, long_straddle_payoff
+from app.strategies.registry import STRATEGY_REGISTRY, get_strategy_spec, resolve_strategy_id
+from app.services.strategy_recommendation import selection_rationale_for
+from app.strategies.validator import assert_strategy_handler, validate_strategy_output
 
 NOT_TRADEABLE_COPY = "Not tradeable in current situation"
 
 
-def _execution_tier(composite: float) -> str:
+def _execution_tier(
+    composite: float,
+    *,
+    auto_exec_threshold: float = DEFAULT_AUTO_EXEC_THRESHOLD,
+) -> str:
     if composite <= EXECUTION_SCORE_BLOCKED_MAX:
         return "blocked"
-    if composite >= COMPOSITE_THRESHOLD_FULL_DOC:
+    if composite >= auto_exec_threshold:
         return "auto_exec"
     return "caution"
 
@@ -55,7 +75,7 @@ PLAYBOOK: dict[str, dict[str, str]] = {
             "Sell an OTM call (Δ ≤ 0.20). Buy a further OTM call for defined risk."
         ),
     },
-    "Gamma Trampoline™": {
+    APEX_STRATEGY_NAME: {
         "summary": "APEX proprietary catalyst structure: wide OTM strikes across front and back expirations.",
         "execution": (
             "Step 1 — Buy back-week OTM call (Strike A) and OTM put (Strike B). "
@@ -76,13 +96,6 @@ PLAYBOOK: dict[str, dict[str, str]] = {
         "execution": (
             "Own (or plan to own) shares. Buy a put slightly OTM at 30–45 DTE. "
             "Strike near pivot support; roll before expiry if thesis intact."
-        ),
-    },
-    "Married Call": {
-        "summary": "Long stock plus long call — leveraged upside participation with defined premium cost.",
-        "execution": (
-            "Own shares (or pair with simultaneous stock entry). Buy a call near Δ 0.55. "
-            "Acts as synthetic leverage while retaining dividend and voting rights on stock."
         ),
     },
     "Diagonal Spread (bullish)": {
@@ -131,12 +144,50 @@ def _pick_strike(contracts: list[dict[str, Any]], side: Literal["call", "put"], 
     return pool[0]
 
 
+def _contract_at_strike(contracts: list[dict[str, Any]], side: str, strike: float) -> dict[str, Any] | None:
+    return next(
+        (c for c in contracts if c.get("side") == side and c.get("strike") is not None and abs(float(c["strike"]) - strike) < 0.01),
+        None,
+    )
+
+
+def _nearest_strike_contract(contracts: list[dict[str, Any]], side: str, spot: float) -> dict[str, Any] | None:
+    pool = [c for c in contracts if c.get("side") == side and c.get("strike")]
+    if not pool:
+        return None
+    return min(pool, key=lambda c: abs(float(c["strike"]) - spot))
+
+
+def _dte_from_expiry(expiry: str | None, *, today: date | None = None) -> int | None:
+    if not expiry:
+        return None
+    try:
+        exp = date.fromisoformat(expiry)
+    except (TypeError, ValueError):
+        return None
+    ref = today or datetime.now(timezone.utc).date()
+    return max((exp - ref).days, 0)
+
+
+def _strategy_requires_back_month(strategy_name: str) -> bool:
+    if APEX_STRATEGY_NAME in strategy_name:
+        return True
+    if "Double Calendar" in strategy_name or "Double Diagonal" in strategy_name:
+        return True
+    return "Calendar" in strategy_name or "Diagonal" in strategy_name
+
+
 def compute_strategy_metrics(
     strategy_name: str,
     *,
     spot: float | None,
     contracts: list[dict[str, Any]],
     recommended: dict[str, Any] | None,
+    back_month_contracts: list[dict[str, Any]] | None = None,
+    front_expiry: str | None = None,
+    back_expiry: str | None = None,
+    iv: float | None = None,
+    ticker: str = "",
     contract_multiplier: int = 100,
 ) -> dict[str, Any]:
     """Return max loss, max profit, net debit/credit, breakevens for the named strategy."""
@@ -152,14 +203,39 @@ def compute_strategy_metrics(
     if "NO TRADE" in strategy_name or not contracts:
         return empty
 
+    from app.strategies.metrics_builder import from_display_name
+
+    registry_metrics = from_display_name(
+        strategy_name,
+        spot=spot or 0,
+        contracts=contracts,
+        back_month_contracts=back_month_contracts,
+        front_expiry=front_expiry,
+        back_expiry=back_expiry,
+        iv=iv,
+        ticker=ticker,
+        contract_multiplier=contract_multiplier,
+        recommended=recommended,
+    )
+    if registry_metrics is not None and registry_metrics.get("legs") is not None:
+        if registry_metrics.get("validation_blocked"):
+            return registry_metrics
+        if len(registry_metrics.get("legs") or []) > 0 or get_strategy_spec(strategy_name) is None:
+            spec = get_strategy_spec(strategy_name)
+            if spec and spec.leg_count == 0:
+                return empty
+            if spec and spec.payoff_function_ref:
+                return registry_metrics
+
     atm = spot or (recommended or {}).get("strike")
     if atm is None:
         return empty
 
     rec_side = (recommended or {}).get("side")
     rec_strike = (recommended or {}).get("strike")
+    resolved_front_expiry = front_expiry or (recommended or {}).get("expiry")
 
-    def leg(action: str, c: dict[str, Any] | None) -> dict[str, Any] | None:
+    def leg(action: str, c: dict[str, Any] | None, *, expiry: str | None = None) -> dict[str, Any] | None:
         if not c:
             return None
         m = _mid(c)
@@ -167,7 +243,7 @@ def compute_strategy_metrics(
             "action": action,
             "side": c.get("side"),
             "strike": c.get("strike"),
-            "expiry": c.get("expiry") or (recommended or {}).get("expiry"),
+            "expiry": expiry or c.get("expiry") or resolved_front_expiry,
             "mid": m,
             "symbol": c.get("symbol"),
         }
@@ -176,6 +252,7 @@ def compute_strategy_metrics(
     metrics = dict(empty)
 
     if "Iron Condor" in strategy_name:
+        assert_strategy_handler(strategy_name, resolve_strategy_id(strategy_name) or "short_iron_condor")
         short_put = _pick_strike(contracts, "put", atm, 0.20)
         long_put = min(
             (c for c in contracts if c.get("side") == "put" and short_put and c.get("strike", 0) < short_put["strike"]),
@@ -214,6 +291,7 @@ def compute_strategy_metrics(
         return metrics
 
     if "Bull Call" in strategy_name:
+        assert_strategy_handler(strategy_name, resolve_strategy_id(strategy_name) or "bull_call_spread")
         long_c = next((c for c in contracts if c.get("side") == "call" and c.get("strike") == rec_strike), None) or _pick_strike(
             contracts, "call", atm, 0.55
         )
@@ -244,6 +322,7 @@ def compute_strategy_metrics(
         return metrics
 
     if "Bear Put" in strategy_name and "Spread" in strategy_name:
+        assert_strategy_handler(strategy_name, resolve_strategy_id(strategy_name) or "bear_put_spread")
         long_p = next((c for c in contracts if c.get("side") == "put" and c.get("strike") == rec_strike), None) or _pick_strike(
             contracts, "put", atm, 0.55
         )
@@ -273,7 +352,211 @@ def compute_strategy_metrics(
         )
         return metrics
 
+    if "Bull Put" in strategy_name and "credit" in strategy_name.lower():
+        assert_strategy_handler(strategy_name, resolve_strategy_id(strategy_name) or "bull_put_spread_credit")
+        short_p = _pick_strike(contracts, "put", atm, 0.20)
+        long_p = min(
+            (c for c in contracts if c.get("side") == "put" and short_p and c.get("strike", 0) < short_p["strike"]),
+            key=lambda c: c["strike"],
+            default=None,
+        )
+        for action, c in [("sell", short_p), ("buy", long_p)]:
+            lg = leg(action, c)
+            if lg:
+                legs.append(lg)
+        credits = sum(l["mid"] or 0 for l in legs if l["action"] == "sell")
+        debits = sum(l["mid"] or 0 for l in legs if l["action"] == "buy")
+        net = credits - debits
+        width = (short_p["strike"] - long_p["strike"]) if short_p and long_p else 0
+        metrics.update(
+            {
+                "net_debit_credit": round(net, 2),
+                "net_type": "credit",
+                "max_profit": round(net * contract_multiplier, 2),
+                "max_loss": round((width - net) * contract_multiplier, 2) if width else None,
+                "breakevens": [round(short_p["strike"] - net, 2)] if short_p else [],
+                "legs": legs,
+            }
+        )
+        return metrics
+
+    if "Bear Call" in strategy_name and "credit" in strategy_name.lower():
+        assert_strategy_handler(strategy_name, resolve_strategy_id(strategy_name) or "bear_call_spread_credit")
+        short_c = _pick_strike(contracts, "call", atm, 0.20)
+        long_c = min(
+            (c for c in contracts if c.get("side") == "call" and short_c and c.get("strike", 0) > short_c["strike"]),
+            key=lambda c: c["strike"],
+            default=None,
+        )
+        for action, c in [("sell", short_c), ("buy", long_c)]:
+            lg = leg(action, c)
+            if lg:
+                legs.append(lg)
+        credits = sum(l["mid"] or 0 for l in legs if l["action"] == "sell")
+        debits = sum(l["mid"] or 0 for l in legs if l["action"] == "buy")
+        net = credits - debits
+        width = (long_c["strike"] - short_c["strike"]) if short_c and long_c else 0
+        metrics.update(
+            {
+                "net_debit_credit": round(net, 2),
+                "net_type": "credit",
+                "max_profit": round(net * contract_multiplier, 2),
+                "max_loss": round((width - net) * contract_multiplier, 2) if width else None,
+                "breakevens": [round(short_c["strike"] + net, 2)] if short_c else [],
+                "legs": legs,
+            }
+        )
+        return metrics
+
+    if "Long Straddle" in strategy_name:
+        assert_strategy_handler(strategy_name, resolve_strategy_id(strategy_name) or "long_straddle")
+        call_c = _nearest_strike_contract(contracts, "call", float(atm))
+        put_c = _nearest_strike_contract(contracts, "put", float(atm))
+        strike = call_c["strike"] if call_c else (put_c["strike"] if put_c else atm)
+        call_c = call_c or _contract_at_strike(contracts, "call", float(strike))
+        put_c = put_c or _contract_at_strike(contracts, "put", float(strike))
+        for action, c in [("buy", call_c), ("buy", put_c)]:
+            lg = leg(action, c)
+            if lg:
+                legs.append(lg)
+        call_mid = _mid(call_c) or 0
+        put_mid = _mid(put_c) or 0
+        net = call_mid + put_mid
+        payoff = long_straddle_payoff(call_premium=call_mid, put_premium=put_mid, strike=float(strike), contract_multiplier=contract_multiplier)
+        metrics.update(
+            {
+                "net_debit_credit": round(net, 2),
+                "net_type": "debit",
+                "max_loss": payoff["max_loss"],
+                "max_profit": payoff["max_profit"],
+                "breakevens": payoff["breakevens"],
+                "legs": legs,
+            }
+        )
+        return metrics
+
+    if "Calendar" in strategy_name and "Double" not in strategy_name:
+        sid = resolve_strategy_id(strategy_name) or "calendar_spread"
+        assert_strategy_handler(strategy_name, sid)
+        option_side: Literal["call", "put"] = "put" if "put" in strategy_name.lower() else (rec_side or "call")  # type: ignore[assignment]
+        strike_val = rec_strike
+        if strike_val is None:
+            nearest = _nearest_strike_contract(contracts, option_side, float(atm))
+            strike_val = nearest.get("strike") if nearest else atm
+        strike_f = float(strike_val)
+        front_c = _contract_at_strike(contracts, option_side, strike_f) or _nearest_strike_contract(contracts, option_side, strike_f)
+        back_pool = back_month_contracts or []
+        back_c = _contract_at_strike(back_pool, option_side, strike_f)
+        if front_c:
+            lg_front = leg("sell", front_c, expiry=resolved_front_expiry)
+            if lg_front:
+                legs.append(lg_front)
+        if back_c and back_expiry:
+            lg_back = leg("buy", back_c, expiry=back_expiry)
+            if lg_back:
+                legs.append(lg_back)
+        legs = [lg for lg in legs if lg.get("symbol")]
+        if len(legs) != 2:
+            metrics.update({"legs": legs, "validation_blocked": True, "validation_error": "Calendar spread requires front-month sell and back-month buy at the same strike"})
+            return metrics
+        front_mid = legs[0].get("mid") or 0
+        back_mid = legs[1].get("mid") or 0
+        net_debit = back_mid - front_mid
+        front_dte = _dte_from_expiry(resolved_front_expiry) or 30
+        back_dte = _dte_from_expiry(back_expiry) or (front_dte + 30)
+        vol = iv if iv and iv > 0 else 0.25
+        payoff = calendar_spread_payoff(
+            spot=float(atm),
+            strike=strike_f,
+            net_debit=net_debit,
+            front_dte_days=front_dte,
+            back_dte_days=back_dte,
+            iv=vol,
+            side=option_side,
+            contract_multiplier=contract_multiplier,
+        )
+        metrics.update(
+            {
+                "net_debit_credit": round(net_debit, 2),
+                "net_type": "debit",
+                "max_loss": payoff["max_loss"],
+                "max_profit": payoff["max_profit"],
+                "breakevens": payoff["breakevens"],
+                "legs": legs,
+                "max_profit_iv_assumption_dependent": payoff.get("max_profit_iv_assumption_dependent", True),
+                "payoff_notes": payoff.get("payoff_notes"),
+            }
+        )
+        return metrics
+
+    if "Diagonal" in strategy_name:
+        sid = "diagonal_spread_bullish" if "bullish" in strategy_name.lower() else "diagonal_spread_bearish"
+        assert_strategy_handler(strategy_name, sid)
+        bullish = "bullish" in strategy_name.lower()
+        option_side: Literal["call", "put"] = "call" if bullish else "put"
+        back_pool = back_month_contracts or contracts
+        long_c = _pick_strike(back_pool, option_side, float(atm), 0.55)
+        if not long_c:
+            long_c = _nearest_strike_contract(back_pool, option_side, float(atm))
+        short_c = None
+        if long_c:
+            if bullish:
+                short_c = min(
+                    (c for c in contracts if c.get("side") == "call" and c.get("strike", 0) > long_c["strike"]),
+                    key=lambda c: c["strike"],
+                    default=None,
+                )
+            else:
+                short_c = max(
+                    (c for c in contracts if c.get("side") == "put" and c.get("strike", 0) < long_c["strike"]),
+                    key=lambda c: c["strike"],
+                    default=None,
+                )
+        if long_c:
+            lg_long = leg("buy", long_c, expiry=back_expiry)
+            if lg_long:
+                legs.append(lg_long)
+        if short_c:
+            lg_short = leg("sell", short_c, expiry=resolved_front_expiry)
+            if lg_short:
+                legs.append(lg_short)
+        legs = [lg for lg in legs if lg.get("symbol")]
+        if len(legs) != 2:
+            metrics.update({"legs": legs, "validation_blocked": True, "validation_error": "Diagonal spread requires long back-month and short front-month legs"})
+            return metrics
+        debits = sum(l.get("mid") or 0 for l in legs if l["action"] == "buy")
+        credits = sum(l.get("mid") or 0 for l in legs if l["action"] == "sell")
+        net_debit = debits - credits
+        strike_f = float(long_c["strike"]) if long_c else float(atm)
+        front_dte = _dte_from_expiry(resolved_front_expiry) or 30
+        back_dte = _dte_from_expiry(back_expiry) or (front_dte + 30)
+        vol = iv if iv and iv > 0 else 0.25
+        payoff = calendar_spread_payoff(
+            spot=float(atm),
+            strike=strike_f,
+            net_debit=net_debit,
+            front_dte_days=front_dte,
+            back_dte_days=back_dte,
+            iv=vol,
+            side=option_side,
+            contract_multiplier=contract_multiplier,
+        )
+        metrics.update(
+            {
+                "net_debit_credit": round(net_debit, 2),
+                "net_type": "debit" if net_debit >= 0 else "credit",
+                "max_loss": payoff["max_loss"],
+                "max_profit": payoff["max_profit"],
+                "breakevens": payoff["breakevens"],
+                "legs": legs,
+                "max_profit_iv_assumption_dependent": True,
+                "payoff_notes": payoff.get("payoff_notes"),
+            }
+        )
+        return metrics
+
     if "Married Put" in strategy_name:
+        assert_strategy_handler(strategy_name, resolve_strategy_id(strategy_name) or "married_put")
         prot = _pick_strike(contracts, "put", atm, 0.30)
         lg = leg("buy", prot)
         if lg:
@@ -283,7 +566,7 @@ def compute_strategy_metrics(
                 {
                     "net_debit_credit": round(prem, 2),
                     "net_type": "debit",
-                    "max_loss": None,
+                    "max_loss": round(prem * contract_multiplier, 2),
                     "max_profit": None,
                     "breakevens": [round(atm - prem, 2)] if atm else [],
                     "legs": legs,
@@ -291,50 +574,91 @@ def compute_strategy_metrics(
             )
         return metrics
 
-    if "Married Call" in strategy_name or "Benchmark Greeks" in strategy_name:
-        focus = next(
-            (c for c in contracts if c.get("side") == rec_side and c.get("strike") == rec_strike),
-            _pick_strike(contracts, rec_side or "call", atm, 0.55),
+    if APEX_STRATEGY_NAME in strategy_name or "APEX Strategy" in strategy_name:
+        assert_strategy_handler(strategy_name, "apex_strategy")
+        front_call = _pick_strike(contracts, "call", float(atm), 0.20)
+        front_put = _pick_strike(contracts, "put", float(atm), 0.20)
+        back_pool = back_month_contracts or []
+        back_call = (
+            _contract_at_strike(back_pool, "call", float(front_call["strike"]))
+            if front_call and front_call.get("strike") is not None
+            else None
         )
-        lg = leg("buy", focus)
-        if lg:
-            legs.append(lg)
-            prem = lg["mid"] or 0
-            be = (focus["strike"] + prem) if focus.get("side") == "call" else (focus["strike"] - prem)
-            metrics.update(
-                {
-                    "net_debit_credit": round(prem, 2),
-                    "net_type": "debit",
-                    "max_loss": round(prem * contract_multiplier, 2),
-                    "max_profit": None,
-                    "breakevens": [round(be, 2)],
-                    "legs": legs,
-                }
-            )
-        return metrics
-
-    if "Gamma Trampoline" in strategy_name:
-        call_a = _pick_strike(contracts, "call", atm, 0.25)
-        put_b = _pick_strike(contracts, "put", atm, 0.25)
-        for action, c in [("buy", call_a), ("buy", put_b)]:
-            lg = leg(action, c)
+        back_put = (
+            _contract_at_strike(back_pool, "put", float(front_put["strike"]))
+            if front_put and front_put.get("strike") is not None
+            else None
+        )
+        leg_plan: list[tuple[str, dict[str, Any] | None, str | None]] = [
+            ("buy", back_call, back_expiry),
+            ("buy", back_put, back_expiry),
+            ("sell", front_call, resolved_front_expiry),
+            ("sell", front_put, resolved_front_expiry),
+        ]
+        for action, contract, expiry in leg_plan:
+            lg = leg(action, contract, expiry=expiry)
             if lg:
                 legs.append(lg)
-        debits = sum(l["mid"] or 0 for l in legs)
+        legs = [lg for lg in legs if lg.get("symbol")]
+        if len(legs) != 4:
+            metrics.update(
+                {
+                    "legs": legs,
+                    "validation_blocked": True,
+                    "validation_error": (
+                        "APEX Strategy requires 4 legs: sell front-week call/put and buy back-week "
+                        "call/put at matching OTM strikes"
+                    ),
+                }
+            )
+            return metrics
+        call_strike = float(front_call["strike"]) if front_call else float(atm)
+        put_strike = float(front_put["strike"]) if front_put else float(atm)
+        front_prem = sum(l.get("mid") or 0 for l in legs if l["action"] == "sell")
+        back_prem = sum(l.get("mid") or 0 for l in legs if l["action"] == "buy")
+        net_debit = back_prem - front_prem
+        front_dte = _dte_from_expiry(resolved_front_expiry) or 7
+        back_dte = _dte_from_expiry(back_expiry) or (front_dte + 14)
+        vol = iv if iv and iv > 0 else 0.35
+        payoff = apex_strategy_payoff(
+            spot=float(atm),
+            call_strike=call_strike,
+            put_strike=put_strike,
+            net_debit=net_debit,
+            front_dte_days=front_dte,
+            back_dte_days=back_dte,
+            iv=vol,
+            contract_multiplier=contract_multiplier,
+        )
         metrics.update(
             {
-                "net_debit_credit": round(debits * 0.45, 2),
-                "net_type": "debit",
-                "max_loss": round(debits * 0.45 * contract_multiplier, 2),
-                "max_profit": None,
-                "breakevens": [round(atm, 2)],
+                "net_debit_credit": round(net_debit, 2),
+                "net_type": "debit" if net_debit >= 0 else "credit",
+                "max_loss": payoff["max_loss"],
+                "max_profit": payoff["max_profit"],
+                "breakevens": payoff["breakevens"],
                 "legs": legs,
-                "notes": "Front-week shorts subsidize ~50–70% of back-week longs per §10.2; net shown is estimated post-subsidy.",
+                "max_profit_iv_assumption_dependent": payoff.get("max_profit_iv_assumption_dependent", True),
+                "max_profit_unlimited_allowed": payoff.get("max_profit_unlimited_allowed", True),
+                "payoff_notes": payoff.get("payoff_notes"),
+                "front_premium_offset_pct": round(front_prem / back_prem, 4) if back_prem > 0 else None,
             }
         )
         return metrics
 
-    # Single-leg or calendar/diagonal fallback from recommended contract
+    # Registered strategies must not silently fall back to single-leg logic.
+    spec = get_strategy_spec(strategy_name)
+    if spec and spec.tradeable and spec.leg_count > 0:
+        metrics.update(
+            {
+                "validation_blocked": True,
+                "validation_error": f"No payoff handler implemented for registered strategy {strategy_name}",
+                "legs": legs,
+            }
+        )
+        return metrics
+
+    # Unregistered legacy fallback — only for labels outside the encyclopedia registry.
     focus = next(
         (c for c in contracts if c.get("side") == rec_side and c.get("strike") == rec_strike),
         contracts[0] if contracts else None,
@@ -371,49 +695,49 @@ def select_strategy(
     sentiment_score: float | None = None,
     catalyst_active: bool = False,
     delta_theta_ratio: float | None = None,
+    symbol: str = "",
+    spot: float | None = None,
+    spread_pct: float | None = None,
+    data_fresh: bool = True,
+    confirmed_pattern_count: int = 0,
+    auto_exec_threshold: float = DEFAULT_AUTO_EXEC_THRESHOLD,
+    apex_input: Any = None,
+    back_month_available: bool = False,
 ) -> StrategyName:
-    """Eligibility matrix from Full Document §9.1 — not a hardcoded iron condor."""
-    if composite < COMPOSITE_THRESHOLD_FULL_DOC:
+    """Eligibility matrix from Full Document §9.1 — deterministic rule-based selection."""
+    from app.services.apex_strategy import ApexStrategyInput
+
+    market = MarketSnapshot(
+        symbol=symbol or "—",
+        spot=spot,
+        direction=direction if direction in {"bullish", "bearish", "neutral"} else "neutral",  # type: ignore[arg-type]
+        data_fresh=data_fresh,
+        spread_pct=spread_pct,
+    )
+    technical = TechnicalAnalysisResultRef(
+        score=tech_score or composite,
+        direction=direction,
+        confirmed_pattern_count=confirmed_pattern_count,
+    )
+    rec = recommend_strategy(
+        market=market,
+        technical=technical,
+        composite=composite,
+        vol_signal=vol_signal,
+        rsi=rsi,
+        iv=iv,
+        hv=hv,
+        ivr=ivr,
+        sentiment_score=sentiment_score,
+        catalyst_active=catalyst_active,
+        delta_theta_ratio=delta_theta_ratio,
+        apex_input=apex_input if isinstance(apex_input, ApexStrategyInput) else None,
+        auto_exec_threshold=auto_exec_threshold,
+        back_month_available=back_month_available,
+    )
+    if rec.best_match == "No Trade / Insufficient Conviction":
         return "NO TRADE — Insufficient Conviction"
-
-    if iv and hv and iv > hv * 1.35:
-        return "NO TRADE — Wait for IV Crush"
-
-    rsi_v = rsi if rsi is not None else 50.0
-    tech = tech_score or composite
-    iv_cheap = iv is not None and hv is not None and (hv - iv) > 0.10
-    iv_rich = vol_signal == "sell_premium" or (iv is not None and hv is not None and (iv - hv) > 0.10)
-
-    if catalyst_active and ivr is not None and ivr > 70 and iv and hv and iv > hv:
-        return "Gamma Trampoline™"
-
-    if iv_cheap:
-        if tech > 80 and direction == "bullish":
-            if delta_theta_ratio and delta_theta_ratio >= 10:
-                return "APEX Benchmark Greeks Strategy"
-            return "Bull Call Spread"
-        if tech > 80 and direction == "bearish":
-            return "Bear Put Spread"
-        if direction == "neutral":
-            return "Long Straddle"
-        if direction == "bullish" and sentiment_score and sentiment_score > 60:
-            return "Married Call"
-        if direction == "bullish":
-            return "Married Put"
-
-    if iv_rich:
-        if 40 <= rsi_v <= 60:
-            return "Short Iron Condor"
-        if direction == "bullish":
-            return "Bull Put Spread (credit)"
-        if direction == "bearish":
-            return "Bear Call Spread (credit)"
-
-    if direction == "bullish":
-        return "Diagonal Spread (bullish)"
-    if direction == "bearish":
-        return "Diagonal Spread (bearish)"
-    return "Calendar Spread"
+    return rec.best_match
 
 
 def _risk_score(composite: float, chain_analysis: dict[str, Any]) -> float:
@@ -958,7 +1282,7 @@ def _fundamentals_apex_section(
     if fund_score >= 65 and rev_yoy is not None and float(rev_yoy) > 10:
         action = (
             "Actionable view: fundamentals support holding-period structures; still respect earnings "
-            "blackout unless using Gamma Trampoline with explicit catalyst rules."
+            "blackout unless using APEX Strategy with explicit catalyst rules."
         )
     elif calendar.get("days_until") is not None and int(calendar.get("days_until", 99)) <= 7:
         action = (
@@ -1015,7 +1339,7 @@ def _risk_apex_section(
         "Risk is advisory (0% composite weight) but gates execution: composite score maps to blocked (≤50), "
         "caution (51–72), or auto-exec (>72). Liquidity penalties subtract from a synthesis score when spread "
         "gates fail. Hard rules: reject legs wider than 10% of mid, vega cap blocks, 7-DTE gamma flags, "
-        "position sizing 2–5% of capital, earnings blackout unless Gamma Trampoline is explicitly selected."
+        "position sizing 2–5% of capital, earnings blackout unless APEX Strategy is explicitly selected."
     )
 
     score_meaning = (
@@ -1094,60 +1418,82 @@ def build_apex_score_layer(
     direction: str,
     technical_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    weights = {"technicals": 0.30, "volatility": 0.25, "options": 0.20, "sentiment": 0.15, "fundamentals": 0.10}
+    weights = dict(APEX_COMPOSITE_WEIGHTS)
+    # Map encyclopedia keys to section builders (legacy section ids preserved for API)
+    section_weights = {
+        "technicals": weights["technical"],
+        "options": weights["options_iv"],
+        "liquidity": weights["liquidity"],
+        "catalyst_fundamental": weights["catalyst_fundamental"],
+        "payoff_risk": weights["payoff_risk"],
+        "cross_tf": weights["cross_tf"],
+        "data_freshness": weights["data_freshness"],
+    }
+    liquidity_score = float(chain_analysis.get("summary", {}).get("liquidity_score") or greek_score)
+    cross_tf_score = float(technical_context.get("cross_tf_score") or tech_score) if technical_context else tech_score
+    data_freshness_score = float(chain_analysis.get("data_freshness_score") or 85.0)
+    payoff_risk_score = risk_score
+    catalyst_fund_score = fund_score
     sections = [
         _technicals_apex_section(
             tech_score=tech_score,
-            weight=weights["technicals"],
+            weight=section_weights["technicals"],
             direction=direction,
             technical_narrative=technical_narrative,
             technical_context=technical_context,
         ),
         _options_apex_section(
             greek_score=greek_score,
-            weight=weights["options"],
+            weight=section_weights["options"],
             chain_analysis=chain_analysis,
         ),
         _volatility_apex_section(
             vol_score=vol_score,
-            weight=weights["volatility"],
+            weight=section_weights["options"] * 0.5,
             vol_layer=vol_layer,
         ),
         _sentiment_apex_section(
             sentiment_score=sentiment_score,
-            weight=weights["sentiment"],
+            weight=section_weights["catalyst_fundamental"] * 0.5,
             sentiment_layer=sentiment_layer,
         ),
         _fundamentals_apex_section(
-            fund_score=fund_score,
-            weight=weights["fundamentals"],
+            fund_score=catalyst_fund_score,
+            weight=section_weights["catalyst_fundamental"] * 0.5,
             fundamentals_layer=fundamentals_layer,
         ),
         _risk_apex_section(
-            risk_score=risk_score,
+            risk_score=payoff_risk_score,
             composite=composite,
             chain_analysis=chain_analysis,
         ),
     ]
 
-    tech_contrib = round(tech_score * weights["technicals"], 1)
-    vol_contrib = round(vol_score * weights["volatility"], 1)
-    opt_contrib = round(greek_score * weights["options"], 1)
-    sent_contrib = round(sentiment_score * weights["sentiment"], 1)
-    fund_contrib = round(fund_score * weights["fundamentals"], 1)
+    tech_contrib = round(tech_score * section_weights["technicals"], 1)
+    opt_contrib = round(greek_score * section_weights["options"], 1)
+    liq_contrib = round(liquidity_score * section_weights["liquidity"], 1)
+    cat_contrib = round(catalyst_fund_score * section_weights["catalyst_fundamental"], 1)
+    payoff_contrib = round(payoff_risk_score * section_weights["payoff_risk"], 1)
+    cross_contrib = round(cross_tf_score * section_weights["cross_tf"], 1)
+    fresh_contrib = round(data_freshness_score * section_weights["data_freshness"], 1)
+    vol_contrib = round(vol_score * section_weights["options"] * 0.5, 1)
+    sent_contrib = round(sentiment_score * section_weights["catalyst_fundamental"] * 0.5, 1)
+    fund_contrib = round(fund_score * section_weights["catalyst_fundamental"] * 0.5, 1)
     clears = composite >= COMPOSITE_THRESHOLD_FULL_DOC
 
     synthesis_parts = [
         (
-            f"APEX Composite Score {composite}/100 synthesizes five weighted pillars from the captured scan: "
-            f"technicals {tech_score} ({tech_contrib} pts), volatility {vol_score} ({vol_contrib} pts), "
-            f"options/Greeks {greek_score} ({opt_contrib} pts), sentiment {sentiment_score} ({sent_contrib} pts), "
-            f"and fundamentals {fund_score} ({fund_contrib} pts). Risk is advisory and does not add points."
+            f"APEX Composite Score {composite}/100 synthesizes weighted pillars: "
+            f"technicals {tech_score} ({tech_contrib} pts), options/IV {greek_score} ({opt_contrib} pts), "
+            f"liquidity {liquidity_score:.0f} ({liq_contrib} pts), catalyst/fundamental {catalyst_fund_score:.0f} ({cat_contrib} pts), "
+            f"payoff/risk {payoff_risk_score:.0f} ({payoff_contrib} pts), cross-TF {cross_tf_score:.0f} ({cross_contrib} pts), "
+            f"data freshness {data_freshness_score:.0f} ({fresh_contrib} pts)."
         ),
         (
-            f"Full Document §8 execution threshold is ≥ {COMPOSITE_THRESHOLD_FULL_DOC}; Project APEX stretch "
-            f"target is 85. Directional bias on this scan is {direction}. "
-            f"Composite formula: 30% technical + 25% vol + 20% Greeks quality + 15% sentiment + 10% fundamentals."
+            f"Full Document §8 execution threshold is ≥ {COMPOSITE_THRESHOLD_FULL_DOC}; auto-exec default "
+            f"threshold is {DEFAULT_AUTO_EXEC_THRESHOLD}. Directional bias on this scan is {direction}. "
+            f"Composite formula: 35% technical + 20% options/IV + 15% liquidity + 10% catalyst/fundamental "
+            f"+ 10% payoff/risk + 5% cross-TF + 5% data freshness."
         ),
     ]
     if clears:
@@ -1182,6 +1528,27 @@ def build_apex_score_layer(
     }
 
 
+def _anchor_from_metrics_legs(
+    metrics: dict[str, Any],
+    recommended: dict[str, Any] | None,
+    symbol: str,
+) -> dict[str, Any] | None:
+    """Single source of truth: primary option leg from metrics drives anchor display."""
+    option_legs = [leg for leg in (metrics.get("legs") or []) if leg.get("side") in {"call", "put"}]
+    if not option_legs:
+        return recommended
+    primary = option_legs[0]
+    base = dict(recommended or {})
+    return {
+        **base,
+        "symbol": symbol,
+        "strike": primary.get("strike"),
+        "side": primary.get("side"),
+        "expiry": primary.get("expiry"),
+        "contract_id": primary.get("symbol"),
+    }
+
+
 def build_strategy_layer(
     *,
     strategy_name: StrategyName,
@@ -1193,8 +1560,18 @@ def build_strategy_layer(
     sentiment_layer: dict[str, Any],
     fundamentals_layer: dict[str, Any],
     tech_score: float,
+    auto_exec_threshold: float = DEFAULT_AUTO_EXEC_THRESHOLD,
+    back_month_contracts: list[dict[str, Any]] | None = None,
+    back_expiry: str | None = None,
+    ticker: str = "",
 ) -> dict[str, Any]:
-    tier = _execution_tier(composite)
+    from app.analysis.score_bounds import validate_scan_scores
+
+    sid = resolve_strategy_id(strategy_name)
+    if sid and sid in STRATEGY_REGISTRY:
+        strategy_name = STRATEGY_REGISTRY[sid].display_name  # type: ignore[assignment]
+
+    tier = _execution_tier(composite, auto_exec_threshold=auto_exec_threshold)
     empty_metrics = {
         "max_loss": None,
         "max_profit": None,
@@ -1233,15 +1610,64 @@ def build_strategy_layer(
 
     recommended = chain_analysis.get("recommendedContract")
     contracts = chain_analysis.get("contracts") or []
+    sym = ticker or chain_analysis.get("symbol") or ""
     metrics = compute_strategy_metrics(
         strategy_name,
         spot=chain_analysis.get("spot"),
         contracts=contracts,
         recommended=recommended,
+        back_month_contracts=back_month_contracts,
+        front_expiry=chain_analysis.get("expiry"),
+        back_expiry=back_expiry,
+        iv=vol_layer.get("iv") if isinstance(vol_layer.get("iv"), (int, float)) else None,
+        ticker=sym,
     )
+    recommended = _anchor_from_metrics_legs(metrics, recommended, sym)
+    scan_scores = {
+        "iv_rank": vol_layer.get("iv_rank"),
+        "iv_percentile": vol_layer.get("iv_percentile"),
+        "composite": composite,
+        "technical": tech_score,
+        "sentiment": sentiment_layer.get("score_0_100"),
+        "fundamentals": fundamentals_layer.get("score"),
+        "hv_rank": vol_layer.get("hv_rank"),
+    }
+    try:
+        validate_scan_scores(**scan_scores)
+    except ValueError as exc:
+        metrics = {**metrics, "validation_blocked": True, "validation_error": str(exc)}
+    spec = get_strategy_spec(strategy_name)
+    validation = validate_strategy_output(
+        strategy_name,
+        metrics,
+        sym,
+        recommended_contract=recommended,
+        scan_scores=scan_scores,
+        spot=chain_analysis.get("spot") if isinstance(chain_analysis.get("spot"), (int, float)) else None,
+    )
+    validation_blocked = bool(metrics.get("validation_blocked")) or not validation.valid
+    validation_errors = [e.to_log_dict() for e in validation.errors]
+    if metrics.get("validation_error"):
+        validation_errors.append(
+            {
+                "strategy_id": validation.strategy_id or strategy_name,
+                "ticker": sym,
+                "check": "handler",
+                "expected": "complete leg structure",
+                "actual": str(metrics.get("validation_error")),
+            }
+        )
+    if validation_errors:
+        validation_blocked = True
+    max_profit_unlimited_allowed = bool(spec and spec.max_profit_type == "unlimited")
+    if metrics.get("max_profit_unlimited_allowed") is not None:
+        max_profit_unlimited_allowed = bool(metrics.get("max_profit_unlimited_allowed"))
+    metrics = {**metrics, "max_profit_unlimited_allowed": max_profit_unlimited_allowed}
     playbook = PLAYBOOK.get(strategy_name, {"summary": "", "execution": ""})
     why_parts = [
-        f"Composite {composite}/100 {'meets' if composite >= COMPOSITE_THRESHOLD_FULL_DOC else 'is below'} the 72 auto-execution gate.",
+        f"Composite {composite}/100 — manual review required below your auto-execution threshold ({auto_exec_threshold:.0f})."
+        if tier == "caution"
+        else f"Composite {composite}/100 meets your auto-execution threshold ({auto_exec_threshold:.0f}).",
         f"Technical bias {direction} (score {tech_score}).",
         f"Volatility regime: {vol_signal} (IV rank {vol_layer.get('iv_rank', '—')}).",
     ]
@@ -1250,22 +1676,39 @@ def build_strategy_layer(
     if fundamentals_layer.get("score") is not None:
         why_parts.append(f"Fundamentals score {fundamentals_layer.get('score')}.")
 
+    selection_rationale = selection_rationale_for(
+        strategy_name,
+        direction=direction,
+        tech_score=tech_score,
+        vol_signal=vol_signal,
+    )
+    if selection_rationale:
+        why_parts.append(selection_rationale)
+
     return {
         "title": "Strategy playbook",
-        "tradeable": True,
+        "tradeable": not validation_blocked,
         "execution_tier": tier,
-        "selected_strategy": strategy_name,
+        "selected_strategy": strategy_name if not validation_blocked else NOT_TRADEABLE_COPY,
         "composite_score": composite,
-        "clears_threshold": composite >= COMPOSITE_THRESHOLD_FULL_DOC,
+        "clears_threshold": composite > EXECUTION_SCORE_BLOCKED_MAX,
         "direction": direction,
         "vol_signal": vol_signal,
         "recommended_contract": recommended,
+        "equity_required": bool(spec and spec.equity_required),
+        "equity_overlay_only": bool(
+            spec and spec.equity_required and spec.equity_leg_spec and spec.equity_leg_spec.entry_mode == "pre_existing"
+        ),
         "what_is_this": playbook.get("summary", ""),
         "why_recommended": " ".join(why_parts),
+        "selection_rationale": selection_rationale,
         "how_to_execute": playbook.get("execution", ""),
         "metrics": metrics,
+        "validation_errors": validation_errors,
         "narrative": (
             f"Recommended: {strategy_name}. {playbook.get('summary', '')} "
             f"{playbook.get('execution', '')}"
+            if not validation_blocked
+            else f"{NOT_TRADEABLE_COPY}. Strategy validation failed — {validation_errors[0]['check'] if validation_errors else 'leg mismatch'}."
         ),
     }

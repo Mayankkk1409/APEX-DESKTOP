@@ -5,6 +5,7 @@ import { Dashboard } from "./pages/Dashboard";
 import { DeepScan } from "./pages/DeepScan";
 import { Login } from "./pages/Login";
 import { Portfolio } from "./pages/Portfolio";
+import { Settings } from "./pages/Settings";
 import { Signup } from "./pages/Signup";
 import { Splash } from "./pages/Splash";
 import { useSession } from "./store";
@@ -71,6 +72,14 @@ export default function App() {
         element={
           <Guard>
             <Portfolio />
+          </Guard>
+        }
+      />
+      <Route
+        path="/settings"
+        element={
+          <Guard>
+            <Settings />
           </Guard>
         }
       />

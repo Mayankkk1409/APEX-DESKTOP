@@ -9,6 +9,8 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
+from app.analysis.score_bounds import assert_score_in_bounds
+
 
 #: Common HV lookbacks in trading days (approx calendar windows labeled in the UI).
 HV_WINDOWS: dict[str, int] = {
@@ -91,7 +93,12 @@ def range_rank(series: Sequence[float], value: float) -> float | None:
     lo, hi = min(clean), max(clean)
     if hi <= lo:
         return None
-    return 100.0 * (value - lo) / (hi - lo)
+    if value <= lo:
+        return assert_score_in_bounds("range_rank", 0.0)
+    if value >= hi:
+        return assert_score_in_bounds("range_rank", 100.0)
+    raw = 100.0 * (value - lo) / (hi - lo)
+    return assert_score_in_bounds("range_rank", raw)
 
 
 def expected_move(spot: float | None, iv: float | None, dte: int | None) -> dict[str, float | None]:
@@ -144,8 +151,41 @@ def iv_rank_from_history(iv_history: Sequence[float], current_iv: float | None) 
     if current_iv is None:
         return {"iv_rank": None, "iv_percentile": None, "history_points": 0.0}
     clean = [x for x in iv_history if x is not None and math.isfinite(x)]
+    rank = range_rank(clean, current_iv)
+    pct = percentile_rank(clean, current_iv)
+    if pct is not None:
+        pct = assert_score_in_bounds("iv_percentile", pct)
     return {
-        "iv_rank": range_rank(clean, current_iv),
-        "iv_percentile": percentile_rank(clean, current_iv),
+        "iv_rank": rank,
+        "iv_percentile": pct,
         "history_points": float(len(clean)),
+    }
+
+
+def iv_rank_proxy(atm_iv: float | None, hv: float | None) -> float | None:
+    """Documented IV/HV proxy when no IV history exists — always [0, 100] or None."""
+    if atm_iv is None or not hv or hv <= 0:
+        return None
+    scaled = (float(atm_iv) / float(hv)) * 40.0
+    bounded = min(100.0, max(0.0, scaled))
+    return assert_score_in_bounds("iv_rank_proxy", round(bounded, 1))
+
+
+def compute_iv_rank(
+    iv_history: Sequence[float],
+    current_iv: float | None,
+    *,
+    atm_iv: float | None = None,
+    hv: float | None = None,
+) -> dict[str, float | None]:
+    """Single entry point for IV Rank — history-based first, proxy fallback, always bounded."""
+    bundle = iv_rank_from_history(iv_history, current_iv)
+    if bundle.get("iv_rank") is not None:
+        return bundle
+    proxy = iv_rank_proxy(current_iv if current_iv is not None else atm_iv, hv)
+    return {
+        "iv_rank": proxy,
+        "iv_percentile": bundle.get("iv_percentile"),
+        "history_points": bundle.get("history_points", 0.0),
+        "proxy": 1.0 if proxy is not None else 0.0,
     }

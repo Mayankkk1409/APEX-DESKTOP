@@ -115,11 +115,11 @@ export function Signup() {
           </div>
         ) : null}
 
-        {err && <p className="mt-3 text-sm text-red-400">{err}</p>}
+        {err && <p className="mt-3 apex-alert apex-alert-error" role="alert">{err}</p>}
         <button type="submit" className="mt-6 w-full rounded-md bg-gold py-2.5 font-medium text-ink" data-testid="signup-submit">
           Create account
         </button>
-        <p className="mt-4 text-center text-sm text-white/50">
+        <p className="mt-4 text-center text-sm text-subtle">
           Already registered?{" "}
           <Link to="/login" className="text-gold">
             Sign in

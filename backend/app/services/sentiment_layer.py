@@ -18,6 +18,7 @@ from typing import Any
 from loguru import logger
 
 from app.analysis.news_nlp import score_articles
+from app.analysis.score_bounds import assert_score_in_bounds
 from app.config import Settings
 from app.schemas.market import OptionChain
 
@@ -509,7 +510,8 @@ async def build_sentiment_layer(
     if notional_skew:
         flow["notional_skew"] = notional_skew
 
-    score_0_100 = round((composite + 100.0) / 2.0, 1) if composite is not None else 50.0
+    score_0_100_raw = round((composite + 100.0) / 2.0, 1) if composite is not None else 50.0
+    score_0_100 = assert_score_in_bounds("sentiment_score", score_0_100_raw) or score_0_100_raw
     band = _sentiment_band(composite)
     bias = band.lower().replace(" ", "-")
     earnings = _earnings_alert(fundamentals)

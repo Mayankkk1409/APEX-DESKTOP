@@ -55,7 +55,7 @@ describe("options chain score tier highlighting", () => {
   });
 
   it("highlights the recommended leg in the auto-exec band", () => {
-    expect(scoreTier(85)).toBe("auto_exec");
+    expect(scoreTier(85, 85)).toBe("auto_exec");
     const ladder = buildLadder([row(100, "call"), row(105, "call")], 100, recommended);
     expect(ladder.find((r) => r.strike === 100)?.isRecommended).toBe(true);
   });

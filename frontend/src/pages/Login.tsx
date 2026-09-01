@@ -261,19 +261,19 @@ export function Login() {
             />
           </div>
         )}
-        {err && <p className="mb-3 text-sm text-red-400">{err}</p>}
+        {err && <p className="mb-3 apex-alert apex-alert-error" role="alert">{err}</p>}
         <button type="submit" className="w-full rounded-md bg-gold py-2.5 font-medium text-ink" data-testid="login-submit">
           {submitLabel}
         </button>
         {isRecovery ? (
-          <p className="mt-4 text-center text-sm text-white/50">
+          <p className="mt-4 text-center text-sm text-subtle">
             Remember your password?{" "}
             <button type="button" className="text-gold underline" data-testid="back-to-login" onClick={backToLogin}>
               Back to sign in
             </button>
           </p>
         ) : (
-          <p className="mt-4 text-center text-sm text-white/50">
+          <p className="mt-4 text-center text-sm text-subtle">
             New desk?{" "}
             <Link to="/signup" className="text-gold">
               Create account

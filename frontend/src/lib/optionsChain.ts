@@ -171,7 +171,7 @@ const FLAG_CHAIN_WIDE_NOTES: Record<string, string> = {
   gamma_risk_7dte:
     "§5.4 Gamma flag applies to every strike: this expiry is inside 7 days, so Delta reprices violently on any move.",
   vega_cap_blocked:
-    "§5.3 Vega cap is blocking long premium on every strike: this is a catalyst environment with no override and no Gamma Trampoline structure.",
+    "§5.3 Vega cap is blocking long premium on every strike: this is a catalyst environment with no override and no APEX Strategy structure.",
   rule1_buy: "Every graded strike fits the §5.1 buy-side Delta profile.",
   rule2_sell: "Every graded strike fits the §5.1 short-leg Delta profile.",
   spread_near_cap: "Every strike is quoting within a whisker of the §5.5 spread cap.",

@@ -1,4 +1,4 @@
-import { detectCatalysts, type Catalyst } from "./patterns";
+import { detectCatalysts, filterStrongestConfirmedPatterns, resolveCatalysts, type BackendPatternSignal, type Catalyst } from "./patterns";
 import { computeSeries, sliceSeries, type PlotSeries } from "./plotChart";
 import { supportResistance, type OhlcBar } from "./ta";
 
@@ -16,6 +16,8 @@ export type AnalysisContext = {
   contextBars?: OhlcBar[];
   /** Daily series for daily-based pivot values. */
   dailyBars?: OhlcBar[];
+  /** Backend-confirmed patterns from scan API (preferred over local heuristics). */
+  backendPatterns?: BackendPatternSignal[];
 };
 
 function fmt(n: number | null | undefined, d = 2) {
@@ -74,7 +76,7 @@ export function buildAnalysisCards(
       series,
     };
   }
-  const catalysts = detectCatalysts(bars, series);
+  const catalysts = resolveCatalysts(bars, series, ctx.backendPatterns);
   const i = bars.length - 1;
   const b = bars[i];
   const px = b.c;

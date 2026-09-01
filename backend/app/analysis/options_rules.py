@@ -535,7 +535,7 @@ def evaluate_contract(contract: OptionContract, ctx: ChainContext) -> ContractVe
                 id="vega_cap",
                 label="Vega cap",
                 status="unknown",
-                rule="long Vega in a catalyst environment requires explicit override or Gamma Trampoline structure",
+                rule="long Vega in a catalyst environment requires explicit override or APEX Strategy structure",
                 observed="Vega not available",
                 detail="IV-crush exposure cannot be sized without Vega.",
             )
@@ -546,7 +546,7 @@ def evaluate_contract(contract: OptionContract, ctx: ChainContext) -> ContractVe
                 id="vega_cap",
                 label="Vega cap",
                 status="pass",
-                rule="long Vega in a catalyst environment requires explicit override or Gamma Trampoline structure",
+                rule="long Vega in a catalyst environment requires explicit override or APEX Strategy structure",
                 observed=f"Vega {contract.vega:.4f} per IV point; cap inactive",
                 detail=(
                     f"A 1-point IV move is worth {contract.vega:.4f} of premium"
@@ -565,11 +565,11 @@ def evaluate_contract(contract: OptionContract, ctx: ChainContext) -> ContractVe
                 id="vega_cap",
                 label="Vega cap",
                 status="pass" if satisfied else "fail",
-                rule="long Vega in a catalyst environment requires explicit override or Gamma Trampoline structure",
+                rule="long Vega in a catalyst environment requires explicit override or APEX Strategy structure",
                 observed=f"Vega {contract.vega:.4f} per IV point"
                 + (f" = {_pct(vega_pct)} of mid" if vega_pct else "")
                 + f"; override {'granted' if ctx.vega_cap_override else 'not granted'}"
-                + (", Gamma Trampoline structure selected" if ctx.structure_absorbs_gamma else ""),
+                + (", APEX Strategy structure selected" if ctx.structure_absorbs_gamma else ""),
                 detail=(
                     f"Catalyst environment detected ({ctx.catalyst_reason}). Long Vega of {contract.vega:.4f} per IV point"
                     + (
@@ -581,10 +581,10 @@ def evaluate_contract(contract: OptionContract, ctx: ChainContext) -> ContractVe
                     + (
                         "Override is in force, so this exposure is accepted deliberately."
                         if ctx.vega_cap_override
-                        else "Gamma Trampoline structure absorbs the crush, so the cap is satisfied structurally."
+                        else "APEX Strategy structure absorbs the crush, so the cap is satisfied structurally."
                         if ctx.structure_absorbs_gamma
                         else "The §5.3 Vega cap therefore blocks a long-premium entry here until an explicit override is "
-                        "granted or the position is expressed as a Gamma Trampoline. The cap constrains the long side "
+                        "granted or the position is expressed as a APEX Strategy. The cap constrains the long side "
                         "only: selling this contract is short Vega, so the same crush works in the seller's favour."
                     )
                 ),
@@ -644,7 +644,7 @@ def evaluate_contract(contract: OptionContract, ctx: ChainContext) -> ContractVe
                         else ". "
                     )
                     + (
-                        "The selected structure accounts for it (Gamma Trampoline), so the flag is satisfied."
+                        "The selected structure accounts for it (APEX Strategy), so the flag is satisfied."
                         if absorbed
                         else "Gamma risk is flagged: short premium here can lose faster than Theta collects, and long "
                         "premium needs the move immediately rather than eventually."

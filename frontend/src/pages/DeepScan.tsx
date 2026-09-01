@@ -13,6 +13,8 @@ import { TaSnapshot } from "../components/TaSnapshot";
 import { VolatilityScan } from "../components/volatility/VolatilityScan";
 import { CAROUSEL_LAYERS, SCAN_SLIDE_LAYERS, SNAPSHOT_STUDIES } from "../constants";
 import { scoreTier } from "../lib/chartHighlight";
+import { normalizeStrategyName } from "../lib/strategyDisplay";
+import { readUserSettings } from "../lib/userSettings";
 import { formatOrderAccountLabel, formatOrderType, buildOrderConfirmationDetails } from "../lib/orderFormat";
 import type { OhlcBar } from "../lib/ta";
 import { useSession } from "../store";
@@ -104,6 +106,9 @@ export function DeepScan() {
     setRecommendedContract(pick);
   }, [scan.data, setRecommendedContract]);
 
+  const userSettings = useMemo(() => readUserSettings(), []);
+  const autoExecMinScore = userSettings.autoExecMinScore;
+
   const compositeScore = scan.data?.composite_score ?? null;
   const riskReview = scan.data?.layer_data?.risk_review as
     | {
@@ -111,6 +116,7 @@ export function DeepScan() {
         auto_submit_on_ack?: boolean;
         requires_place_order?: boolean;
         allows_execution?: boolean;
+        auto_execution_threshold?: number;
         strategy_legs?: Array<{
           symbol: string;
           side: string;
@@ -122,15 +128,21 @@ export function DeepScan() {
         contracts_per_leg?: number;
       }
     | undefined;
-  const executionTier = riskReview?.execution_tier ?? scoreTier(compositeScore);
+  const scanAutoThreshold = riskReview?.auto_execution_threshold ?? autoExecMinScore;
+  const executionTier = riskReview?.execution_tier ?? scoreTier(compositeScore, scanAutoThreshold);
   const strategyLegs = riskReview?.strategy_legs ?? [];
   const allowsExecution = riskReview?.allows_execution ?? (executionTier !== "blocked" && strategyLegs.length > 0);
-  const autoSubmitOnAck = Boolean(riskReview?.auto_submit_on_ack) && executionTier === "auto_exec";
-  const requiresPlaceOrder = Boolean(riskReview?.requires_place_order) || executionTier === "caution";
+  const autoSubmitOnAck =
+    Boolean(riskReview?.auto_submit_on_ack) &&
+    executionTier === "auto_exec" &&
+    userSettings.autoExecEnabled;
+  const requiresPlaceOrder =
+    executionTier === "caution" ||
+    (executionTier === "auto_exec" && !userSettings.autoExecEnabled);
   const orderAssetClass = (riskReview as { asset_class?: string } | undefined)?.asset_class ?? "us_option";
   const orderTypeLabel = formatOrderType("market", orderAssetClass);
   const strategyName =
-    (scan.data?.layer_data?.strategy as StrategyLayer | undefined)?.selected_strategy ?? "Recommended strategy";
+    (scan.data?.layer_data?.strategy as StrategyLayer | undefined)?.selected_strategy ?? "";
 
   function confirmationFromResult(result: OrderPlacementResult): OrderConfirmationDetails {
     return buildOrderConfirmationDetails(result, {
@@ -394,7 +406,8 @@ export function DeepScan() {
                       </button>
                     ) : (
                       <p className="text-sm text-champagne/70" data-testid="auto-exec-hint">
-                        Composite ≥72 — acknowledging the thesis will auto-submit these options legs.
+                        Composite ≥{scanAutoThreshold} — acknowledging the thesis will auto-submit these options
+                        legs.
                       </p>
                     )}
                     {msg && <p className="text-sm">{msg}</p>}

@@ -21,7 +21,8 @@ export function LogoutButton() {
     <button
       type="button"
       data-testid="logout-btn"
-      className="shrink-0 rounded-md border border-line bg-panel px-3 py-1.5 text-sm text-white/70 hover:bg-white/5"
+      aria-label="Log out"
+      className="shrink-0 rounded-md border border-line bg-panel px-3 py-1.5 text-sm text-subtle hover:bg-champagne/5"
       onClick={() => void logout()}
     >
       Logout

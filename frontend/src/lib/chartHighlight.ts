@@ -3,16 +3,20 @@ import { catalystIsDrawableOnChart, patternUsesBoxMark, type Catalyst } from "./
 import { PLOT_COLORS, type PlotLayout, type PlotSeries } from "./plotChart";
 import type { OhlcBar } from "./ta";
 
+import { DEFAULT_USER_SETTINGS } from "./userSettings";
+
 /** Composite / chain execution score bands (Full Document §8). */
 export const SCORE_TIER_BLOCKED_MAX = 50;
-export const SCORE_TIER_AUTO_EXEC_MIN = 72;
 
 export type ScoreTier = "blocked" | "caution" | "auto_exec";
 
-export function scoreTier(score: number | null | undefined): ScoreTier {
+export function scoreTier(
+  score: number | null | undefined,
+  autoExecMin: number = DEFAULT_USER_SETTINGS.autoExecMinScore,
+): ScoreTier {
   if (score == null || !Number.isFinite(score)) return "caution";
   if (score <= SCORE_TIER_BLOCKED_MAX) return "blocked";
-  if (score >= SCORE_TIER_AUTO_EXEC_MIN) return "auto_exec";
+  if (score >= autoExecMin) return "auto_exec";
   return "caution";
 }
 

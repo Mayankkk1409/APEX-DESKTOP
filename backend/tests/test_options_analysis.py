@@ -122,12 +122,12 @@ def test_full_chain_produces_every_card_and_a_row_per_contract() -> None:
         "chain-iv",
         "chain-positioning",
         "chain-vs-technical",
+        "candidates-buy",
+        "candidates-sell",
         "chain-gates",
     ):
         assert expected in ids, expected
-    assert "candidates-buy" in ids or "candidates-sell" in ids
-    assert "candidates-buy" not in ids or "candidates-sell" not in ids
-    assert len(ids) == 14
+    assert len(ids) == 15
     assert len(ids) == len(set(ids))
     # Cards must be substantive, not one-liners.
     assert all(len(c["body"]) > 200 for c in out["cards"])
@@ -139,10 +139,10 @@ def test_cards_quote_the_live_values_rather_than_a_template() -> None:
     assert "XYZ" in body["chain-provenance"] and EXPIRY in body["chain-provenance"]
     assert "100.00" in body["chain-spread"] or "5.00%" in body["chain-spread"]  # spread on 2.00 mid
     assert "500" in body["chain-liquidity"]  # documented OI floor
-    rec = out["recommendedContract"]
-    assert rec is not None
-    assert f"{rec['strike']:g}" in body["greeks-delta"]
-    assert "recommended" in body["greeks-delta"].lower()
+    # Without a selected strategy the engine stays chain-wide and does not pick a leg.
+    assert out["recommendedContract"] is None
+    assert "buy band" in body["greeks-delta"].lower()
+    assert "100" in body["greeks-delta"]  # ATM strike referenced on chain-wide card
     assert "OPEN" in body["greeks-gamma"] or "closed" in body["greeks-gamma"]
 
 
@@ -550,7 +550,7 @@ async def test_demo_chain_is_always_labelled_simulated() -> None:
     assert all(x.greeks_source == "model" for x in c.contracts)
     out = build_chain_analysis(c, symbol="AAPL", expiry=c.expiry, hv=0.28)
     assert out["data_source"]["is_live"] is False
-    assert len(out["cards"]) == 14
+    assert len(out["cards"]) == 15
 
 
 @pytest.mark.asyncio
@@ -815,8 +815,10 @@ def test_execution_tier_bands() -> None:
     assert execution_tier(40) == "blocked"
     assert execution_tier(50) == "blocked"
     assert execution_tier(51) == "caution"
-    assert execution_tier(72) == "auto_exec"
-    assert execution_tier(71) == "caution"
+    assert execution_tier(72, auto_exec_threshold=72) == "auto_exec"
+    assert execution_tier(71, auto_exec_threshold=72) == "caution"
+    assert execution_tier(85, auto_exec_threshold=85) == "auto_exec"
+    assert execution_tier(84, auto_exec_threshold=85) == "caution"
 
 
 def test_blocked_tier_strips_recommended_contract_and_surfaces_message() -> None:
@@ -856,6 +858,7 @@ def test_auto_exec_tier_keeps_recommended_for_full_doc_strategy() -> None:
         selected_strategy="Bull Call Spread",
         direction="bullish",
         vol_signal="buy_premium",
+        auto_exec_threshold=72,
     )
     assert out["execution_tier"] == "auto_exec"
     assert out["recommendedContract"] is not None

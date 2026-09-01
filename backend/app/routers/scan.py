@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.alpaca import _is_cash_index
@@ -13,10 +14,12 @@ from app.database import get_db
 from app.deps import current_user, get_adapter
 from app.models.trading import Scan
 from app.models.user import User
+from app.models.user_settings import UserTradingSettings
 from app.schemas.market import ChartSnapshot
 from app.services.fundamentals_layer import build_fundamentals_layer
 from app.services.scan_engine import build_layers
 from app.services.sentiment_layer import build_sentiment_layer
+from app.strategies.expiry_utils import next_expiry_after
 
 router = APIRouter(prefix="/scan", tags=["scan"])
 
@@ -29,7 +32,7 @@ class ScanIn(BaseModel):
     spread_max_pct: float | None = Field(default=None, ge=0.01, le=0.15)
     #: §5.3 explicit override for long Vega in a catalyst environment.
     vega_cap_override: bool = False
-    #: §5.4 / §9.2 Gamma Trampoline structure selected, which absorbs the Gamma flag.
+    #: §5.4 / §9.2 APEX Strategy structure selected, which absorbs the Gamma flag.
     structure_absorbs_gamma: bool = False
 
 
@@ -54,8 +57,15 @@ async def create_scan(
     bars = await adapter.bars(snap.symbol, snap.timeframe, 180)
     daily_bars = await adapter.bars(snap.symbol, "1D", 400)
     chain = None
+    back_month_chain = None
     if body.expiry:
         chain = await adapter.option_chain(snap.symbol, body.expiry)
+        if chain and chain.expiry_valid:
+            expirations = await adapter.expirations(snap.symbol)
+            exp_dates = [e.date for e in expirations]
+            back_exp = next_expiry_after(exp_dates, body.expiry)
+            if back_exp:
+                back_month_chain = await adapter.option_chain(snap.symbol, back_exp)
     elif _is_cash_index(snap.symbol):
         # Cash indexes have no listed equity-options chain and no dashboard expiry.
         # Still probe so the options slide reports unsupported_underlying instead of
@@ -72,6 +82,11 @@ async def create_scan(
         fundamentals=fundamentals,
     )
 
+    trading_settings = await db.scalar(select(UserTradingSettings).where(UserTradingSettings.user_id == user.id))
+    auto_exec_threshold = (
+        trading_settings.auto_execution_threshold if trading_settings else 85.0
+    )
+
     layers = build_layers(
         snap,
         quote,
@@ -85,6 +100,8 @@ async def create_scan(
         structure_absorbs_gamma=body.structure_absorbs_gamma,
         sentiment_layer=sentiment,
         fundamentals_layer=fundamentals,
+        auto_execution_threshold=auto_exec_threshold,
+        back_month_chain=back_month_chain,
     )
     score = layers["apex_score"]["composite_score"]
     scan = Scan(user_id=user.id, symbol=snap.symbol.upper(), snapshot=snap.model_dump(), layers=layers, composite_score=score)

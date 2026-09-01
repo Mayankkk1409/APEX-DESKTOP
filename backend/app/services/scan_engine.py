@@ -3,17 +3,31 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from app.analysis.composite_score import compute_apex_composite_score
+from app.analysis.score_bounds import assert_score_in_bounds, validate_scan_scores
+from app.analysis.volatility import compute_iv_rank, iv_rank_proxy
 from app.analysis.indicators import compute_all, historical_vol, pivot_points
 from app.analysis.layers import (
+    APEX_STRATEGY_NAME,
     COMPOSITE_THRESHOLD_FULL_DOC,
+    DEFAULT_AUTO_EXEC_THRESHOLD,
     DEEP_SCAN_LAYERS,
     EXECUTION_SCORE_BLOCKED_MAX,
     DeepScanLayer,
     EMA_PERIODS,
 )
+from app.analysis.technical_analysis import analyze_technicals
 from app.schemas.market import ChartSnapshot, OptionChain, Quote
+from app.services.apex_strategy import build_apex_strategy_input_from_scan
 from app.services.options_analysis import apply_execution_score_tiers, build_chain_analysis, infer_strategy_label
-from app.services.strategy_engine import build_apex_score_layer, build_strategy_layer, select_strategy, _risk_score
+from app.services.strategy_engine import (
+    build_apex_score_layer,
+    build_strategy_layer,
+    select_strategy,
+    _risk_score,
+    _strategy_requires_back_month,
+)
+from app.services.strategy_recommendation import allows_auto_execution, selection_rationale_for
 from app.services.volatility_intel import build_volatility_payload
 
 
@@ -31,12 +45,16 @@ def build_layers(
     structure_absorbs_gamma: bool = False,
     sentiment_layer: dict[str, Any] | None = None,
     fundamentals_layer: dict[str, Any] | None = None,
+    auto_execution_threshold: float = DEFAULT_AUTO_EXEC_THRESHOLD,
+    back_month_chain: OptionChain | None = None,
 ) -> dict[str, Any]:
     """All layers reuse the captured bars/snapshot. Do not pull a different view."""
     highs = [float(b["h"]) for b in bars]
     lows = [float(b["l"]) for b in bars]
     closes = [float(b["c"]) for b in bars]
+    opens = [float(b.get("o", b["c"])) for b in bars]
     volumes = [float(b["v"]) for b in bars]
+    timestamps = [str(b.get("t", "")) for b in bars]
     ind = compute_all(highs, lows, closes, volumes)
     last = closes[-1] if closes else quote.price
     prev_high, prev_low, prev_close = (highs[-2], lows[-2], closes[-2]) if len(closes) > 1 else (quote.high, quote.low, last)
@@ -52,13 +70,21 @@ def build_layers(
         spot=last if isinstance(last, (int, float)) else quote.price,
     )
     iv = vol_layer.get("iv") or 0.0
-    ivr = vol_layer.get("iv_rank")
+    ivr_raw = vol_layer.get("iv_rank")
+    ivr: float | None = None
+    if ivr_raw is not None:
+        try:
+            ivr = assert_score_in_bounds("iv_rank", ivr_raw)
+        except ValueError:
+            ivr = None
+            vol_layer = {**vol_layer, "iv_rank": None, "iv_rank_invalid": ivr_raw}
     if ivr is None:
-        # Composite still needs a numeric vol leg; use documented IV/HV gap signal only —
-        # never label this number as IV Rank on the volatility slide.
-        ivr = 0.0
-        if vol_layer.get("iv") is not None and vol_layer.get("hv"):
-            ivr = min(100.0, max(0.0, (float(vol_layer["iv"]) / max(float(vol_layer["hv"]), 0.01)) * 40))
+        proxy_bundle = compute_iv_rank([], vol_layer.get("iv"), atm_iv=vol_layer.get("atm_iv"), hv=vol_layer.get("hv"))
+        ivr = proxy_bundle.get("iv_rank")
+        if ivr is None and vol_layer.get("iv") is not None and vol_layer.get("hv"):
+            ivr = iv_rank_proxy(vol_layer.get("iv"), vol_layer.get("hv"))
+        if ivr is not None:
+            vol_layer = {**vol_layer, "iv_rank": ivr}
     rsi_v = ind["rsi"]
     macd_v = ind["macd"]
     ema = ind["ema"]
@@ -66,24 +92,42 @@ def build_layers(
     bb = ind["bollinger"]
     vol = ind["volume"]
 
-    tech_score = 50
-    if ind["ema_aligned_bullish"]:
-        tech_score += 18
-    if st["direction"] == "bullish" and last > ema[200]:
-        tech_score += 12
-    if macd_v["histogram"] > 0:
-        tech_score += 8
-    if 40 <= rsi_v <= 60:
-        tech_score += 4
-    elif rsi_v >= 70 or rsi_v <= 30:
-        tech_score -= 6
-    tech_score = max(5, min(98, tech_score))
+    tech_analysis = analyze_technicals(
+        opens=opens,
+        closes=closes,
+        highs=highs,
+        lows=lows,
+        volumes=volumes,
+        timestamps=timestamps,
+        indicators={
+            "ema": ema,
+            "supertrend": st,
+            "macd": macd_v,
+            "rsi": rsi_v,
+            "bollinger": bb,
+            "volume": vol,
+            "pivots": pivots,
+            "ema_aligned_bullish": ind["ema_aligned_bullish"],
+            "ema_aligned_bearish": ind.get("ema_aligned_bearish", False),
+            "bollinger_series": ind.get("bollinger_series"),
+            "supertrend_series": ind.get("supertrend_series"),
+            "macd_series": ind.get("macd_series"),
+            "rsi_series": ind.get("rsi_series"),
+        },
+    )
+    tech_score = tech_analysis.score
+    annotations = [
+        {"pattern": p.name, "explain": ", ".join(p.confirmation_evidence) or p.family}
+        for p in tech_analysis.confirmed_patterns
+    ]
+    if not annotations:
+        annotations = _pattern_annotations()
 
     vol_signal = vol_layer.get("signal") or "fair"
     if vol_signal not in {"buy_premium", "sell_premium", "fair"}:
         vol_signal = "fair"
 
-    direction_pre = "bullish" if st["direction"] == "bullish" and macd_v["histogram"] >= 0 else "bearish" if st["direction"] == "bearish" else "neutral"
+    direction_pre = tech_analysis.direction
     chain_analysis = build_chain_analysis(
         chain,
         symbol=snapshot.symbol,
@@ -119,10 +163,41 @@ def build_layers(
     if sentiment_layer and isinstance(sentiment_layer.get("score_0_100"), (int, float)):
         sentiment_score = float(sentiment_layer["score_0_100"])
     vol_component = 80 if vol_signal == "buy_premium" else 55 if vol_signal == "fair" else 72
-    composite = round(
-        tech_score * 0.30 + vol_component * 0.25 + greek_score * 0.20 + sentiment_score * 0.15 + fund_score * 0.10,
-        1,
+    data_fresh = chain_analysis.get("status") not in {"stale", "unavailable"}
+    spread_fails = chain_analysis.get("summary", {}).get("gate_failures", {}).get("spread", 0)
+    median_spread = chain_analysis.get("summary", {}).get("median_spread_pct")
+    wide_spreads = bool(median_spread is not None and float(median_spread) > 10.0)
+    graded = chain_analysis["summary"].get("contract_count", 0) or 0
+    liquidity_score = round(max(20.0, min(95.0, 95.0 - spread_fails * 8)), 1) if graded else 50.0
+    catalyst_days = (sentiment_layer or {}).get("earnings_alert", {}).get("days_until")
+    catalyst_fund_score = fund_score
+    if catalyst_days is not None and 5 <= int(catalyst_days) <= 10:
+        catalyst_fund_score = min(95.0, fund_score + 8)
+    cross_tf_score = tech_analysis.layer_scores.get("cross_tf", tech_score)
+    composite_breakdown = compute_apex_composite_score(
+        technical_score=tech_score,
+        options_iv_score=greek_score,
+        liquidity_score=liquidity_score,
+        catalyst_fundamental_score=catalyst_fund_score,
+        payoff_risk_score=max(40.0, min(90.0, greek_score)),
+        cross_tf_score=cross_tf_score,
+        data_freshness_score=90.0 if data_fresh else 45.0,
+        direction_conflict=False,
+        stale_data=not data_fresh,
+        wide_spreads=wide_spreads,
     )
+    composite = composite_breakdown.composite
+    validate_scan_scores(
+        composite=composite,
+        technical=tech_score,
+        sentiment=sentiment_score,
+        fundamentals=fund_score,
+        iv_rank=ivr if isinstance(ivr, (int, float)) else vol_layer.get("iv_rank"),
+        iv_percentile=vol_layer.get("iv_percentile"),
+        hv_rank=vol_layer.get("hv_rank"),
+    )
+    chain_analysis.setdefault("summary", {})["liquidity_score"] = liquidity_score
+    chain_analysis["data_freshness_score"] = 90.0 if data_fresh else 45.0
 
     direction = direction_pre
     catalyst_active = bool((sentiment_layer or {}).get("earnings_alert", {}).get("active"))
@@ -133,6 +208,16 @@ def build_layers(
             dt = verdict.get("delta_theta_ratio")
             if isinstance(dt, (int, float)) and dt > best_delta_theta:
                 best_delta_theta = float(dt)
+    apex_input = build_apex_strategy_input_from_scan(
+        catalyst_days=int(catalyst_days) if catalyst_days is not None else None,
+        vol_layer=vol_layer,
+        chain_analysis=chain_analysis,
+        back_month_contracts=[c.model_dump() for c in back_month_chain.contracts]
+        if back_month_chain and back_month_chain.contracts
+        else None,
+    )
+    median_spread = chain_analysis.get("summary", {}).get("median_spread_pct")
+    back_month_ready = bool(back_month_chain and back_month_chain.contracts)
     strategy = select_strategy(
         composite=composite,
         direction=direction,
@@ -145,6 +230,14 @@ def build_layers(
         sentiment_score=sentiment_score,
         catalyst_active=catalyst_active,
         delta_theta_ratio=best_delta_theta or None,
+        symbol=snapshot.symbol,
+        spot=last if isinstance(last, (int, float)) else None,
+        spread_pct=float(median_spread) if median_spread is not None else None,
+        data_fresh=data_fresh,
+        confirmed_pattern_count=len(tech_analysis.confirmed_patterns),
+        apex_input=apex_input,
+        auto_exec_threshold=auto_execution_threshold,
+        back_month_available=back_month_ready,
     )
     # Caution band (51–71): still surface a full playbook structure for review even when composite < 72.
     if (
@@ -187,6 +280,7 @@ def build_layers(
         selected_strategy=strategy,
         direction=direction,
         vol_signal=vol_signal,
+        auto_exec_threshold=auto_execution_threshold,
     )
 
     recommended = chain_analysis.get("recommendedContract")
@@ -203,7 +297,6 @@ def build_layers(
         },
     )
 
-    annotations = _pattern_annotations(closes, highs, lows)
     sentiment_payload = sentiment_layer or {
         "title": "Sentiment (news / flow / social / P/C)",
         "score": None,
@@ -239,6 +332,11 @@ def build_layers(
         f"EMA stack {'aligned bullish' if ind['ema_aligned_bullish'] else 'not fully stacked'}."
     )
     risk_score_val = _risk_score(composite, chain_analysis)
+    back_month_rows: list[dict[str, Any]] = []
+    back_expiry: str | None = None
+    if back_month_chain and back_month_chain.contracts:
+        back_expiry = back_month_chain.expiry
+        back_month_rows = [c.model_dump() for c in back_month_chain.contracts]
     strategy_layer = build_strategy_layer(
         strategy_name=strategy,
         composite=composite,
@@ -249,17 +347,49 @@ def build_layers(
         sentiment_layer=sentiment_payload,
         fundamentals_layer=fundamentals_payload,
         tech_score=tech_score,
+        auto_exec_threshold=auto_execution_threshold,
+        back_month_contracts=back_month_rows if _strategy_requires_back_month(strategy) else None,
+        back_expiry=back_expiry,
+        ticker=snapshot.symbol,
     )
     execution_tier = (
         "blocked"
         if composite <= EXECUTION_SCORE_BLOCKED_MAX
         else "auto_exec"
-        if composite >= COMPOSITE_THRESHOLD_FULL_DOC
+        if composite >= auto_execution_threshold
         else "caution"
     )
     strategy_legs = []
+    equity_legs = []
+    strat_spec = None
     if strategy_layer.get("tradeable"):
+        from app.strategies.registry import get_strategy_spec, resolve_strategy_id
+
+        strat_spec = get_strategy_spec(strategy_layer.get("selected_strategy") or strategy)
+        overlay_only = bool(
+            strat_spec
+            and strat_spec.equity_required
+            and strat_spec.equity_leg_spec
+            and strat_spec.equity_leg_spec.entry_mode == "pre_existing"
+        )
+        simultaneous_equity = bool(
+            strat_spec and strat_spec.equity_required and not overlay_only
+        )
         for leg in (strategy_layer.get("metrics") or {}).get("legs") or []:
+            if leg.get("side") == "stock":
+                if not strat_spec or not strat_spec.equity_required:
+                    continue
+                if overlay_only:
+                    continue
+                equity_legs.append(
+                    {
+                        "symbol": leg.get("symbol") or snapshot.symbol.upper(),
+                        "side": leg.get("action") or "buy",
+                        "qty": leg.get("quantity") or 100,
+                        "asset_class": "us_equity",
+                    }
+                )
+                continue
             occ = leg.get("symbol")
             action = (leg.get("action") or "").lower()
             if not occ or action not in {"buy", "sell"}:
@@ -272,8 +402,26 @@ def build_layers(
                     "strike": leg.get("strike"),
                     "option_side": leg.get("side"),
                     "expiry": leg.get("expiry"),
+                    "asset_class": "us_option",
                 }
             )
+        if simultaneous_equity and not equity_legs:
+            strategy_layer = {
+                **strategy_layer,
+                "tradeable": False,
+                "selected_strategy": "Not tradeable in current situation",
+                "validation_errors": (strategy_layer.get("validation_errors") or [])
+                + [
+                    {
+                        "strategy_id": resolve_strategy_id(strategy) or strategy,
+                        "ticker": snapshot.symbol,
+                        "check": "equity_leg_required",
+                        "expected": "stock leg for simultaneous equity strategy",
+                        "actual": "missing",
+                    }
+                ],
+            }
+            strategy_legs = []
     layers: dict[str, Any] = {
         DeepScanLayer.TECHNICAL: {
             "title": "Technical — captured chart snapshot",
@@ -285,7 +433,8 @@ def build_layers(
                 "bollinger": bb,
                 "pivots": pivots,
             },
-            "patterns": annotations,
+            "patterns": tech_analysis.to_api_dict()["patterns"],
+            "pattern_analysis": tech_analysis.to_api_dict(),
             "hover_notes": annotations,
             "narrative": (
                 f"Snapshot locked at scan click: {snapshot.symbol} {snapshot.timeframe} "
@@ -382,11 +531,17 @@ def build_layers(
             "title": "Bollinger Bands (20 SMA, 2 SD)",
             **bb,
             "squeeze": bb["width"] < 0.04,
+            "squeeze_breakout_confirmed": (
+                bb["width"] < 0.04
+                and (
+                    (last > bb["upper"] and vol["last"] > vol["avg"] * 1.2)
+                    or (last < bb["lower"] and vol["last"] > vol["avg"] * 1.2)
+                )
+            ),
             "narrative": (
                 f"Mid {bb['mid']:.2f}, upper {bb['upper']:.2f}, lower {bb['lower']:.2f}, width {bb['width']:.4f}. "
-                f"{'SQUEEZE — imminent expansion.' if bb['width'] < 0.04 else 'Width is not compressed.'} "
-                f"Price at upper + RSI>70 = overbought warning; at lower + RSI<30 = bounce candidate. "
-                f"W-pattern / M-pattern rules from Project APEX §4 apply to this captured window."
+                f"{'Volatility squeeze — compression flag only; await confirmed breakout (close beyond band with ≥1.2× average volume).' if bb['width'] < 0.04 else 'Width is not compressed.'} "
+                f"Price at upper + RSI>70 = overbought context; at lower + RSI<30 = oversold context."
             ),
         },
         DeepScanLayer.PIVOT_POINTS: {
@@ -443,6 +598,8 @@ def build_layers(
                 "supertrend": st,
                 "bollinger": bb,
                 "ema_aligned_bullish": ind["ema_aligned_bullish"],
+                "cross_tf_score": cross_tf_score,
+                "composite_breakdown": composite_breakdown.to_api_dict(),
                 "volume": vol,
                 "pivots": pivots,
             },
@@ -451,18 +608,26 @@ def build_layers(
         DeepScanLayer.RISK_REVIEW: {
             "title": "Risk review — thesis, checkbox, order",
             "requires_checkbox": True,
-            "auto_submit_on_ack": execution_tier == "auto_exec",
+            "auto_submit_on_ack": allows_auto_execution(
+                strategy,
+                execution_tier=execution_tier,
+                composite=composite,
+                auto_exec_threshold=auto_execution_threshold,
+            ),
             "requires_place_order": execution_tier == "caution",
             "allows_execution": execution_tier != "blocked" and bool(strategy_legs),
             "execution_score": composite,
             "execution_tier": execution_tier,
+            "auto_execution_threshold": auto_execution_threshold,
             "strategy_legs": strategy_legs,
+            "equity_legs": equity_legs,
+            "equity_required": bool(strat_spec and strat_spec.equity_required),
             "contracts_per_leg": 1,
             "asset_class": "us_option",
             "position_sizing": "2–5% of declared account capital per trade (configurable)",
             "daily_loss_cap": "Configurable; trading auto-halts if breached",
             "bid_ask_hard_stop": "No trade if any leg spread exceeds 10% of mid",
-            "earnings_blackout": "No new positions within 1 day of earnings (exception: Gamma Trampoline)",
+            "earnings_blackout": f"No new positions within 1 day of earnings (exception: {APEX_STRATEGY_NAME})",
             "narrative": (
                 "Trader must accept the thesis before submit. Order review shows each options leg (OCC symbol), "
                 "side, contracts, type, estimated premium, and account impact. Paper funded submits via Alpaca "
@@ -474,26 +639,17 @@ def build_layers(
     return {layer.value: layers[layer] for layer in DEEP_SCAN_LAYERS}
 
 
-def _pattern_annotations(closes: list[float], highs: list[float], lows: list[float]) -> list[dict]:
-    if len(closes) < 3:
-        return []
-    o, c = closes[-2], closes[-1]
-    h, l = highs[-1], lows[-1]
-    body = abs(c - o)
-    wick_up = h - max(o, c)
-    wick_dn = min(o, c) - l
-    notes = []
-    if wick_dn > body * 2 and wick_up < body:
-        notes.append({"pattern": "Hammer", "explain": "Long lower wick at the last bar — bullish reversal candidate at support."})
-    if wick_up > body * 2 and wick_dn < body:
-        notes.append({"pattern": "Shooting Star", "explain": "Long upper wick — bearish reversal candidate at resistance."})
-    if abs(c - o) < (h - l) * 0.15:
-        notes.append({"pattern": "Doji / Spinning Top", "explain": "Small body relative to range — indecision; requires confirmation."})
-    if closes[-1] > closes[-2] > closes[-3]:
-        notes.append({"pattern": "Short-term higher highs", "explain": "Three rising closes in the captured window — continuation bias until invalidated."})
-    if not notes:
-        notes.append({"pattern": "No textbook print", "explain": "Last bars do not match a high-confidence documented candlestick; lean on EMA/SuperTrend alignment."})
-    return notes
+def _pattern_annotations() -> list[dict]:
+    """Fallback when no confirmed high/medium patterns pass the conviction floor."""
+    return [
+        {
+            "pattern": "No confirmed pattern",
+            "explain": (
+                "No high- or medium-reliability confirmed pattern on the captured window. "
+                "Lean on EMA stack, SuperTrend, and MACD alignment for directional context."
+            ),
+        }
+    ]
 
 
 def utcnow_iso() -> str:

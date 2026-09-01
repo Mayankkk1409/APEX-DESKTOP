@@ -1,5 +1,7 @@
-import { AreaSeries, ColorType, createChart, type IChartApi, type ISeriesApi, type Time } from "lightweight-charts";
+import { AreaSeries, createChart, type IChartApi, type ISeriesApi, type Time } from "lightweight-charts";
 import { useEffect, useRef } from "react";
+import { useEffectiveTheme } from "../hooks/useEffectiveTheme";
+import { pnlAreaSeriesColors, pnlChartLayoutOptions } from "../lib/chartTheme";
 import { fmtBalance } from "../lib/portfolioFormat";
 import { PNL_TIMEFRAMES, type PnlTimeframe } from "../lib/pnlTimeframe";
 
@@ -42,20 +44,17 @@ export function PnlChart({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const areaRef = useRef<ISeriesApi<"Area"> | null>(null);
+  const theme = useEffectiveTheme();
 
   useEffect(() => {
     if (!hostRef.current) return;
     const chart = createChart(hostRef.current, {
-      layout: { background: { type: ColorType.Solid, color: "#131722" }, textColor: "#9aa0b0" },
-      grid: { vertLines: { color: "rgba(240,243,250,0.06)" }, horzLines: { color: "rgba(240,243,250,0.06)" } },
-      rightPriceScale: { borderColor: "rgba(240,243,250,0.12)" },
-      timeScale: { borderColor: "rgba(240,243,250,0.12)" },
+      ...pnlChartLayoutOptions(),
       height: 280,
     });
+    const areaColors = pnlAreaSeriesColors();
     const area = chart.addSeries(AreaSeries, {
-      lineColor: "#e0b568",
-      topColor: "rgba(224,181,104,0.35)",
-      bottomColor: "rgba(224,181,104,0.02)",
+      ...areaColors,
       lineWidth: 2,
       priceFormat: { type: "price", precision: 2, minMove: 0.01 },
     });
@@ -74,6 +73,12 @@ export function PnlChart({
       areaRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    if (!chartRef.current || !areaRef.current) return;
+    chartRef.current.applyOptions(pnlChartLayoutOptions());
+    areaRef.current.applyOptions(pnlAreaSeriesColors());
+  }, [theme]);
 
   useEffect(() => {
     if (!areaRef.current || !chartRef.current) return;
@@ -105,7 +110,7 @@ export function PnlChart({
       <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
         <div>
           <p className="text-xs uppercase tracking-wider text-bronze">{valueLabel}</p>
-          <p className="font-mono text-2xl text-white" data-testid="pnl-chart-value">
+          <p className="font-mono text-2xl text-champagne" data-testid="pnl-chart-value">
             {fmtBalance(latest)}
           </p>
         </div>

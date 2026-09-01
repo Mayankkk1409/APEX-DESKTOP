@@ -318,7 +318,7 @@ def test_explicit_override_satisfies_the_vega_cap() -> None:
     assert v.verdict == "buy_candidate"
 
 
-def test_gamma_trampoline_structure_satisfies_the_vega_cap() -> None:
+def test_apex_strategy_structure_satisfies_the_vega_cap() -> None:
     v = evaluate_contract(
         contract(delta=0.60, theta=-0.05), ctx(catalyst_environment=True, structure_absorbs_gamma=True)
     )
@@ -344,11 +344,11 @@ def test_gamma_flag_boundary_at_seven_dte() -> None:
     assert gate(clear, "gamma_dte").status == "pass"
 
 
-def test_gamma_trampoline_absorbs_the_seven_dte_flag() -> None:
+def test_apex_strategy_absorbs_the_seven_dte_flag() -> None:
     v = evaluate_contract(contract(), ctx(dte=3, structure_absorbs_gamma=True))
     assert "gamma_risk_7dte" not in v.flags
     assert gate(v, "gamma_dte").status == "pass"
-    assert "Gamma Trampoline" in gate(v, "gamma_dte").detail
+    assert "APEX Strategy" in gate(v, "gamma_dte").detail
 
 
 def test_gamma_delta_shift_is_quantified_per_one_percent_move() -> None:

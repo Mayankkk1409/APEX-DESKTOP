@@ -4,12 +4,20 @@ export default {
   theme: {
     extend: {
       colors: {
-        ink: "#07070a",
-        panel: "#101014",
-        line: "#2a2418",
-        gold: "#c4a56a",
-        champagne: "#cebf9c",
-        bronze: "#a78d5d",
+        ink: "var(--color-ink)",
+        panel: "var(--color-panel)",
+        line: "var(--color-line)",
+        gold: "var(--color-gold)",
+        champagne: "var(--color-text)",
+        bronze: "var(--color-bronze)",
+        faint: "var(--color-faint)",
+        subtle: "var(--color-subtle)",
+        muted: "var(--color-muted)",
+        surface: "var(--apex-surface)",
+        "chart-bg": "var(--apex-chart-bg)",
+        "chart-panel": "var(--apex-chart-panel)",
+        bull: "var(--apex-bull)",
+        bear: "var(--apex-bear)",
       },
       fontFamily: {
         display: ["Newsreader", "Georgia", "serif"],
