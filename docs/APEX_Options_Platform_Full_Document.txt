@@ -1,0 +1,1172 @@
+
+
+===== PAGE 1/23 =====
+
+Prepared by: Mayank Kamaleshkumar & Partners
+Document Type: Mentor Pitch — Product Vision, Logic Architecture, User Flow & Technical
+Build Guide
+Version: 2.0 | June 2026
+Classification: Confidential — For Mentor Review Only
+APEX is a professional-grade, fully autonomous AI options trading platform. A trader types any
+U.S. equity ticker, selects a chart timeframe and options expiry from a dropdown, hits SCAN —
+and within 15 seconds the platform has:
+1. Run a 10-layer technical analysis on the price chart (MACD, RSI, EMA stack, SuperTrend,
+Bollinger Bands, Candlestick Patterns, Pivot Points, Support/Resistance)
+2. Loaded the live options chain and filtered every strike by Delta, Theta, Vega, Gamma, and
+bid/ask spread
+3. Compared Implied Volatility (IV) to Historical Volatility (HV) to determine whether to buy
+or sell premium
+4. Processed real-time sentiment from financial news and options flow
+5. Pulled a fundamental snapshot: earnings history, EPS trend, analyst consensus, revenue
+growth
+6. Synthesized all five layers into a single APEX Composite Score (0–100)
+7. Selected the optimal strategy from its approved playbook (Iron Condor, Bull Call Spread,
+Bear Put Spread, Gamma Trampoline™, and more)
+8. Presented a full trade brief in plain English — and executed autonomously when the score
+clears the 72/100 threshold
+APEX is not a signal dashboard. It is a full-cycle AI trading co-pilot that thinks like an expert
+options desk, executes with institutional discipline, and explains every decision in plain
+language.
+The platform's proprietary innovation is the Gamma Trampoline™ — an original options
+strategy that exploits IV inversion around catalyst events (earnings, product launches) to
+dramatically reduce the cost of a standard straddle while maintaining full long-gamma upside.
+Market Problem: Options trading at the professional level requires simultaneous evaluation of
+dozens of variables across multiple platforms. APEX collapses all of that into one 15-second
+APEX OPTIONS INTELLIGENCE PLATFORM
+AI-Driven Options Trading Intelligence — Full Product Pitch, User Flow &
+Development Guide
+EXECUTIVE SUMMARY
+
+
+===== PAGE 2/23 =====
+
+scan and one decisive recommendation.
+Technology Stack: Python (FastAPI backend) + React frontend + multi-model AI consensus
+(GPT-4, Claude, Gemini) + live market data APIs + NLP sentiment pipeline.
+Revenue Model: Subscription SaaS targeting professional traders, proprietary trading desks,
+and financial advisory firms.
+Modern options trading demands the simultaneous evaluation of dozens of variables: price
+action, momentum, volatility structure, time decay, directional bias, liquidity, sentiment, and
+fundamental context. Even experienced traders suffer from:
+Analysis Paralysis — Too many indicators across too many tabs, with no convergent signal
+Volatility Mispricing — Entering long positions when IV is already inflated, or selling when
+IV is historically cheap
+Greek Blindness — Opening positions without quantifying Theta drag, Gamma
+acceleration, or Vega exposure
+Execution Inconsistency — Excellent individual analysis but no structured, repeatable
+framework
+Strategy Mismatch — Applying income strategies in trending markets, or directional
+strategies in flat environments
+APEX solves all five — simultaneously, in under 15 seconds, on any publicly traded equity.
+"Every trade deserves institutional-grade analysis. APEX delivers that — automatically,
+transparently, and decisively."
+No single metric fires the trigger. All ten dimensions vote. The AI synthesizes consensus and
+acts.
+Dimension
+What APEX Measures
+1. Trend
+SuperTrend + EMA Stack (9/21/50/100/200) — is price in a confirmed trend?
+2. Momentum
+RSI (14) overbought/oversold + MACD crossovers and histogram divergences
+3. Volatility
+Bollinger Band width + IV vs. HV comparison + IVR (Implied Volatility Rank)
+4. Structure
+Candlestick pattern recognition — engulfing, doji, hammer, shooting star, morning/evening star
+SECTION 1 — THE PROBLEM WE ARE SOLVING
+SECTION 2 — PRODUCT VISION & THE THINK 10X
+FRAMEWORK
+Vision Statement
+The THINK 10X Engine
+
+
+===== PAGE 3/23 =====
+
+Dimension
+What APEX Measures
+5. Levels
+Pivot Points (PP, R1–R3, S1–S3) + dynamic support/resistance from volume clusters
+6. Greeks
+Delta, Theta, Vega, Gamma — option-level fitness scoring per strike
+7. Chain
+Options chain — OI, volume, bid/ask spread, put/call ratio, unusual activity alerts
+8. Sentiment
+News NLP + social media scoring + options flow direction
+9. Fundamentals
+P/E, EPS trend, earnings calendar, revenue growth, analyst consensus
+10. Strategy
+Final synthesis layer — selects and executes optimal strategy from the approved playbook
+User opens APEX in the browser (or desktop app wrapper).
+╔══════════════════════════════════════════════════════╗
+║                   APEX                               ║
+║          Options Intelligence Platform               ║
+║                                                      ║
+║   [ Email / Username ]                               ║
+║   [ Password        ]                                ║
+║                                                      ║
+║            [ LOG IN ]                                ║
+║                                                      ║
+║   Secured with 2FA | JWT Auth | AES-256 Encryption   ║
+╚══════════════════════════════════════════════════════╝
+After login, the user lands on the Main Dashboard
+Dashboard shows: watchlist tickers, market sentiment indicator (bullish/bearish/neutral),
+and any open positions being monitored
+User types a ticker into the search bar at the top of the screen.
+┌─────────────────────────────────────────────────────────────────────┐
+│  🔍  Enter Ticker:  [ NVDA             ]  ← Live autocomplete       │
+│                                                                     │
+│  NVIDIA Corporation (NVDA)                                          │
+│  Current Price: $1,082.30  │  52W High: $1,201.40  Low: $788.00   │
+│  Sector: Technology  │  Market Cap: $2.65T  │  P/E: 71.2           │
+│  Next Earnings: June 19, 2026 (6 days away) ⚠️ CATALYST FLAGGED    │
+│  Analyst Consensus: BUY — Avg Target: $1,200.00                    │
+└─────────────────────────────────────────────────────────────────────┘
+SECTION 3 — FULL TERMINAL USER EXPERIENCE
+(UX WALKTHROUGH)
+3.1 Application Launch & Login Screen
+3.2 Step 1 — Ticker Entry
+
+
+===== PAGE 4/23 =====
+
+What the system does automatically at this step:
+Pulls company name, logo, current OHLCV price data
+Flags upcoming earnings or known catalyst dates in orange
+Displays a pre-load fundamental card
+Populates the expiry dropdown with available options expirations
+Two dropdowns appear alongside the ticker.
+Timeframe:  [ Daily (1D)   ▼ ]    Expiry:  [ Jun 20, 2026 (7d) ▼ ]
+Timeframe Options:
+Code
+Label
+Best Use
+1m
+1 Minute
+Scalping / Day trading
+5m
+5 Minutes
+Active intraday
+15m
+15 Minutes
+Momentum intraday
+1H
+1 Hour
+Swing confirmation
+4H
+4 Hours
+Multi-day positioning
+1D
+Daily
+Standard swing / weekly options
+1W
+Weekly
+LEAPS / multi-month positions
+Expiry Options (pulled live from options chain API):
+Sorted chronologically: current week → next week → monthly → quarterly → LEAPS
+Upcoming earnings dates highlighted in amber
+Near-expiry (within 2 days) highlighted in red
+The interactive candlestick chart renders immediately with all indicators overlaid.
+┌──────────────────────────────────────────────────────────────────┐
+│  NVDA  │  DAILY  │  Jun 13, 2026                                 │
+│──────────────────────────────────────────────────────────────────│
+│                                                                  │
+│  [Candlestick Chart with overlaid indicators:]                   │
+│                                                                  │
+│  ═══ EMA 9   (fast — orange)                                     │
+│  ─── EMA 21  (light blue)                                        │
+│  ─── EMA 50  (green) ← primary swing filter                     │
+3.3 Step 2 — Select Timeframe & Expiry Date
+3.4 Step 3 — The Chart Loads
+
+
+===== PAGE 5/23 =====
+
+│  ─── EMA 100 (purple)                                            │
+│  ─── EMA 200 (red) ← major trend gate                           │
+│  ████ SuperTrend line (green below price = bullish)              │
+│  ···  Bollinger Bands (upper / mid / lower)                      │
+│  ─ ─  Pivot Levels (PP, R1, R2, S1, S2 as dashed lines)         │
+│  ░░░  Support/Resistance zones (shaded horizontal bands)         │
+│                                                                  │
+│  [Sub-panel 1: MACD histogram + signal line]                     │
+│  [Sub-panel 2: RSI line with 70/30 reference bands]              │
+└──────────────────────────────────────────────────────────────────┘
+All indicators are toggle-able via a sidebar. Defaults are all ON.
+This is the core event that triggers the entire APEX analysis engine.
+A progress panel appears on the right side of the screen, updating in real-time:
+┌──────────────────────────────────────────────────────┐
+│  APEX SCANNING: NVDA                                  │
+│──────────────────────────────────────────────────────│
+│  ✅ Technical Analysis         Analyzing... DONE      │
+│  ✅ Candlestick Patterns       Bullish Engulfing       │
+│  ✅ MACD                       Bullish Cross ↑         │
+│  ✅ RSI (14)                   51 — Neutral             │
+│  ✅ EMA Stack                  Aligned Bullish          │
+│  ✅ SuperTrend                 Bullish (Price Above)    │
+│  ✅ Bollinger Bands            Neutral Width            │
+│  ✅ Pivot Points               Near R1 — $1,095        │
+│  ✅ Support / Resistance       Strong S at $1,040       │
+│                                                        │
+│  ✅ Options Chain Loaded       Apr 20 — 248 Strikes    │
+│  ✅ Greeks Analysis            Filtered to 14 Strikes  │
+│                                                        │
+│  ✅ Volatility Engine          IV: 72% │ HV: 38%       │
+│     ↳ IV >> HV — SELL PREMIUM SIGNAL                  │
+│     ↳ IVR: 78 — Rich Premium Environment              │
+│     ↳ Front-Week IV > Back-Week: IV INVERSION ACTIVE  │
+│                                                        │
+│  ✅ Sentiment Analysis         Bullish (Score: 68/100) │
+│  ✅ Fundamental Score          Strong (Score: 74/100)  │
+│                                                        │
+│  ──────────────────────────────────────────────────    │
+│  ⚡ APEX COMPOSITE SCORE:      84 / 100 ✅             │
+│  ⚡ THRESHOLD MET — STRATEGY SELECTED                  │
+└──────────────────────────────────────────────────────┘
+3.5 Step 4 — User Clicks [ SCAN ]
+
+
+===== PAGE 6/23 =====
+
+After the scan completes, the recommendation card slides into view:
+╔═══════════════════════════════════════════════════════════════════╗
+║  APEX TRADE EXECUTION BRIEF                                        ║
+╠═══════════════════════════════════════════════════════════════════╣
+║  Ticker:     NVDA      │  Timeframe: 1D    │  Score: 84 / 100     ║
+║  Strategy:   GAMMA TRAMPOLINE™                                     ║
+║  Catalyst:   EARNINGS — 6 days away ⚠️                            ║
+╠═══════════════════════════════════════════════════════════════════╣
+║  THE FOUR LEGS:                                                    ║
+║  LEG 1 (Long):  Buy  NVDA Jun27 $1,100 Call  @  $18.40           ║
+║  LEG 2 (Long):  Buy  NVDA Jun27 $1,040 Put   @  $16.20           ║
+║  LEG 3 (Short): Sell NVDA Jun20 $1,100 Call  @  $11.80           ║
+║  LEG 4 (Short): Sell NVDA Jun20 $1,040 Put   @   $9.90           ║
+║                                            ─────────────           ║
+║  NET DEBIT:    $12.90 per spread                                   ║
+║  MAX LOSS:     $12.90    │    TARGET PROFIT: $38.00+               ║
+║  P.O.P (AI Estimate):  54%                                         ║
+╠═══════════════════════════════════════════════════════════════════╣
+║  WHY THIS STRATEGY:                                                ║
+║  "NVDA earnings in 6 days. Front-week IV (72%) significantly       ║
+║   exceeds back-week IV (38%) — IV inversion confirmed. RSI is      ║
+║   neutral at 51 with MACD bullish cross. Three consecutive EPS     ║
+║   beats with revenue +18% YoY. Gamma Trampoline selected to        ║
+║   exploit IV inversion: selling front-week volatility subsidizes   ║
+║   the back-week long options by ~65%. All legs pass bid/ask        ║
+║   filter (< 8% of mid). Net Delta ≈ zero. APEX Score: 84."         ║
+╠═══════════════════════════════════════════════════════════════════╣
+║  GREEKS SUMMARY:                                                   ║
+║  Net Delta: -0.02 (near neutral)  │  Net Theta: +$4.20/day        ║
+║  Net Vega:  +0.32                  │  Net Gamma: +0.08             ║
+╠═══════════════════════════════════════════════════════════════════╣
+║  BENCHMARK CHECKS:                                                 ║
+║  ✅ IV > HV by 34pts — Sell premium confirmed                     ║
+║  ✅ Front-week Delta < 0.25 on short legs                         ║
+║  ✅ Bid/Ask spread < 8% on all four legs                          ║
+║  ✅ OI > 500 on all strikes                                       ║
+║  ✅ No earnings within front-week expiry window                   ║
+╠═══════════════════════════════════════════════════════════════════╣
+║         [ MODIFY PARAMETERS ]       [ EXECUTE TRADE ]             ║
+╚═══════════════════════════════════════════════════════════════════╝
+After a trade executes, the Position Monitor activates automatically:
+┌──────────────────────────────────────────────────────────────────┐
+│  ACTIVE POSITION: NVDA — GAMMA TRAMPOLINE™                       │
+│──────────────────────────────────────────────────────────────────│
+│  Opened:  Jun 13, 2026  │  DTE: 7 days (front) / 14 (back)      │
+│  Net Debit: $12.90       │  Current P&L: +$3.40 (+26.4%)         │
+3.6 Step 5 — The APEX Trade Recommendation Card
+3.7 Step 6 — Post-Execution Monitoring Dashboard
+
+
+===== PAGE 7/23 =====
+
+│──────────────────────────────────────────────────────────────────│
+│  LIVE GREEK MONITOR:                                              │
+│  Delta:  -0.01 ✅   │  Theta: +$4.80/day ✅   │  Vega: +0.29 ✅  │
+│──────────────────────────────────────────────────────────────────│
+│  ALERTS ACTIVE:                                                   │
+│  🔔 Profit Target (40% of max): $15.48 — not yet reached         │
+│  🔔 Stop Loss (100% of debit):  -$12.90 — not triggered          │
+│  🔔 Earnings Day: Jun 19 — APEX monitoring for IV crush          │
+│  🔔 Bid/Ask Health: All legs within 8% spread ✅                 │
+└──────────────────────────────────────────────────────────────────┘
+Automated exit rules (AI-managed):
+Take profit at 40% of max gain (default)
+Cut loss at 100% of net debit (default)
+Close 1 day before expiry if still open
+Alert if IV crushes post-earnings and Vega exposure flips
+The AI computer vision module scans the most recent candle formations:
+Signal Type
+Pattern
+Meaning
+Bullish Reversal
+Hammer, Bullish Engulfing, Morning Star, Dragonfly Doji
+Buy signal at support
+Bearish Reversal
+Shooting Star, Bearish Engulfing, Evening Star, Dark Cloud Cover
+Sell signal at resistance
+Continuation
+Three White Soldiers, Three Black Crows
+Trend continuation
+Indecision
+Spinning Top, Standard Doji, Inside Bar
+Requires confirmation
+Standard configuration: 12-period EMA, 26-period EMA, 9-period signal line.
+Bullish: MACD crosses above signal; histogram turning positive; MACD rising from below
+zero
+Bearish: MACD crosses below signal; histogram expanding negatively
+Divergence: Price makes new high but MACD does not → bearish divergence (and vice
+versa) — flagged as high-confidence reversal
+SECTION 4 — DETAILED TECHNICAL ANALYSIS
+ENGINE
+4.1 Candlestick Pattern Recognition
+4.2 MACD Signals
+
+
+===== PAGE 8/23 =====
+
+RSI > 70: Overbought → favor puts or bearish spreads
+RSI < 30: Oversold → favor calls or bullish spreads
+RSI 40–60 (neutral): Range-bound → favor iron condors or premium selling
+Divergence between RSI and price → reversal signal
+EMA
+Period
+Role
+Fast
+9
+Short-term momentum
+Short
+21
+Trend confirmation for weekly options
+Mid
+50
+Primary swing trend filter
+Key
+100
+Institutional support/resistance
+Long
+200
+Major trend gate; SuperTrend baseline
+EMA Stacking Rule: When 9 > 21 > 50 > 100 > 200 (all aligned), APEX registers highest-conviction
+directional signal.
+Price above SuperTrend + above 200 EMA = confirmed bullish; only long signals considered
+Price below SuperTrend + below 200 EMA = confirmed bearish; only short signals
+considered
+Band squeeze = imminent volatility expansion; watch for breakout
+Price at upper band + RSI > 70 = overbought warning
+Price at lower band + RSI < 30 = oversold; potential bounce entry
+Standard Formula:
+PP = (High + Low + Close) / 3
+R1 = (PP × 2) – Low │ R2 = PP + (High – Low) │ R3 = High + 2 × (PP – Low)
+S1 = (PP × 2) – High │ S2 = PP – (High – Low) │ S3 = Low – 2 × (High – PP)
+Options strikes near pivot levels define natural stop placement and profit targets.
+4.3 RSI (14-period)
+4.4 EMA Stack Logic
+4.5 SuperTrend (ATR Length: 10, Factor: 3)
+4.6 Bollinger Bands (20 SMA, 2 SD)
+4.7 Pivot Points
+
+
+===== PAGE 9/23 =====
+
+Identified from high-volume price nodes (volume profile) over the last 52 weeks
+Options strikes near S/R zones flagged as natural anchors for spread legs
+Breakouts above resistance or below support trigger directional signal escalation
+For buying: Target Delta ≥ 0.50 (high directional leverage; higher ITM probability)
+For selling: Target Delta ≤ 0.25 on short legs (high probability of expiring OTM)
+Delta also serves as a probability proxy: 0.25 Delta short put ≈ 25% chance of finishing ITM
+For buyers: Low Theta relative to Delta = favorable (option retains value longer per
+premium dollar)
+For sellers: High Theta = favorable (time decay works in seller's favor daily)
+APEX Delta/Theta Ratio: Higher ratio = better buying value; lower ratio = better selling
+value
+Ratio > 10: Exceptional buying value
+Ratio < 3: Efficient selling candidate
+Vega measures sensitivity to a 1% change in IV
+Pre-catalyst: High Vega = dangerous for buyers if IV crushes post-event
+AI applies a Vega cap rule: long Vega positions in catalyst environments require explicit
+override or use of Gamma Trampoline structure
+Gamma measures rate of change in Delta per $1 move
+Near expiration: Gamma accelerates rapidly (Gamma risk)
+AI flags high-Gamma risk for positions within 7 days of expiration unless structure
+accounts for it (Gamma Trampoline)
+4.8 Dynamic Support & Resistance
+SECTION 5 — OPTIONS CHAIN ANALYSIS & GREEKS
+ENGINE
+5.1 Delta-Based Filtering
+5.2 Theta Filtering
+5.3 Vega Assessment
+5.4 Gamma Awareness
+
+
+===== PAGE 10/23 =====
+
+Hard reject: any option where bid/ask spread exceeds 10% of mid-price
+Wide spreads = hidden cost that destroys edge
+Threshold adjustable in settings (default: 10%; recommended max: 15% for illiquid names)
+Minimum OI: 500 contracts per strike
+Volume: must exceed 25% of OI on trade day
+Unusual Options Activity (UOA): volume > 3× average daily → flagged prominently
+Scenario
+Signal
+Action
+IV << HV (underprice by > 10pts)
+Options cheap — BUY premium
+Long calls/puts, debit spreads, Gamma Trampoline
+IV ≈ HV (within 5pts)
+Fair value
+Defined-risk spreads, diagonals
+IV >> HV (overpriced by > 10pts)
+Options rich — SELL premium
+Iron condors, credit spreads
+IV inversion (front > back)
+Catalyst environment
+Gamma Trampoline™
+IVR < 25: Cheap IV — buying premium favored
+IVR 25–50: Moderate — systematic income strategies
+IVR 50–75: Rich premium — selling preferred
+IVR > 75: High IV — elevated caution; investigate catalyst
+Source
+Weight
+Signal
+Financial News NLP
+40%
+Earnings surprises, upgrades/downgrades, macro
+Options Flow Direction
+35%
+Net call vs. put dollar flow (48hr window)
+Social Media (Reddit/X)
+15%
+StockTwits + WSB sentiment, scored -100 to +100
+Put/Call Ratio
+10%
+P/C > 1.2 = fear; P/C < 0.7 = aggressive bullish
+5.5 Bid/Ask Spread Filter
+5.6 Open Interest & Volume Gates
+SECTION 6 — VOLATILITY INTELLIGENCE MODULE
+6.1 IV vs. HV Decision Framework
+6.2 IVR (Implied Volatility Rank) Scoring
+SECTION 7 — SENTIMENT & FUNDAMENTAL LAYER
+7.1 Sentiment Analysis Sources
+
+
+===== PAGE 11/23 =====
+
+Metric
+Signal
+EPS Trend
+Consecutive beats + revisions upward = bullish boost
+Revenue Growth (YoY)
+> 15% = strong; < 5% = caution
+Earnings Calendar
+Days-to-earnings prominently flagged; strategy auto-adjusts
+Analyst Consensus
+Buy/Hold/Sell ratio + average price target vs. current price
+Sector Rotation
+Is capital flowing into or out of this sector this week?
+Dimension
+Weight
+Technical Score (0–100)
+30%
+Volatility Signal
+25%
+Greeks Quality Score (0–100)
+20%
+Sentiment Score (0–100)
+15%
+Fundamental Score (0–100)
+10%
+APEX Composite Score
+100%
+Execution Threshold: Score ≥ 72 / 100 required.
+If the score falls below 72, APEX displays:
+"Insufficient conviction. Conditions do not meet APEX execution threshold. Monitor for
+improved setup."
+IV Environment
+Direction
+Tech Strength
+Catalyst
+Strategy
+IV << HV
+Strong Bullish
+Score > 80
+No
+Long Call / Bull Call Spread
+IV << HV
+Strong Bearish
+Score > 80
+No
+Long Put / Bear Put Spread
+IV << HV
+Neutral
+Medium
+No
+Long Straddle / Strangle
+IV << HV
+Any
+Any
+Yes (5–10 days)
+Gamma Trampoline™
+IV ≈ HV
+Mild Bullish
+Medium
+No
+Diagonal Spread (bullish)
+7.2 Fundamental Screening
+SECTION 8 — APEX COMPOSITE SCORE &
+EXECUTION THRESHOLD
+8.1 Scoring Weights
+SECTION 9 — THE STRATEGY PLAYBOOK
+9.1 Strategy Eligibility Matrix
+
+
+===== PAGE 12/23 =====
+
+IV Environment
+Direction
+Tech Strength
+Catalyst
+Strategy
+IV ≈ HV
+Mild Bearish
+Medium
+No
+Diagonal Spread (bearish)
+IV ≈ HV
+Neutral
+Any
+No
+Calendar Spread
+IV >> HV
+Neutral
+Low–Medium
+No
+Short Iron Condor
+IV >> HV
+Mild Bullish
+Medium
+No
+Bull Put Spread (credit)
+IV >> HV
+Mild Bearish
+Medium
+No
+Bear Call Spread (credit)
+IV >>>> HV (extreme)
+Any
+Any
+Immediate
+NO TRADE — Wait for IV Crush
+Any
+Any
+Score < 72
+Any
+NO TRADE — Insufficient Conviction
+Rule 1 — Buy When Delta is High and Theta is Low:
+Condition: Technical + sentiment alignment is bullish/bearish AND IV < HV
+Filter: Delta ≥ 0.55 AND daily Theta < 0.05 per contract
+APEX Delta/Theta Ratio must exceed 10
+Additional gate: bid/ask spread < 8%
+Outcome: Maximum directional leverage with minimal daily time decay cost
+Rule 2 — Sell When IV is High, Delta is Low, and Spread is Tight:
+Condition: IVR > 50 AND RSI is neutral (40–60)
+Filter: Short option Delta ≤ 0.20
+Rationale: 80%+ probability of expiring OTM — consistent edge through volume
+Gate: bid/ask spread must be < 10% of mid-price or trade is rejected
+Outcome: Premium collection on high-probability, low-Delta positions
+The Gamma Trampoline™ is an original strategy developed by the APEX team to solve a specific
+market problem:
+The Problem: Around earnings, IV spikes so aggressively on front-week options that buying a
+standard straddle becomes prohibitively expensive — yet the move is expected to be large and
+direction unknown.
+The Innovation: Instead of buying both legs at the same expiration (straddle) or the same strike
+(calendar), the Gamma Trampoline uses wide OTM strikes across two different expirations
+simultaneously — creating a structure that:
+9.2 APEX Benchmark Greeks Strategy (Proprietary)
+SECTION 10 — THE GAMMA TRAMPOLINE™
+(PROPRIETARY STRATEGY)
+10.1 Origin & Design Philosophy
+
+
+===== PAGE 13/23 =====
+
+1. Subsidizes the cost of the long back-week options by selling front-week volatility at its peak
+2. Retains full long-gamma participation after the catalyst event expires
+3. Provides meaningful downside protection if the stock moves flat
+                    [ CATALYST EVENT (e.g., Earnings) ]
+     Front-Week Expiry                   Back-Week Expiry
+   (Day After Catalyst)               (Two Weeks Post-Catalyst)
+   ─────────────────────              ─────────────────────────
+   SELL OTM Call [Strike A]           BUY OTM Call [Strike A]
+   SELL OTM Put  [Strike B]           BUY OTM Put  [Strike B]
+   (Same strikes, different expirations — the key innovation)
+Step 1 — Buy the Back-Week Long Options
+Buy 1 OTM Call expiring two weeks after the catalyst at Strike A (above current price)
+Buy 1 OTM Put expiring two weeks after the catalyst at Strike B (below current price)
+These are your long-gamma anchors; they retain substantial time value through and
+beyond the event
+Step 2 — Sell the Front-Week Short Options
+Sell 1 OTM Call expiring the day after the catalyst at the same Strike A
+Sell 1 OTM Put expiring the day after the catalyst at the same Strike B
+These exploit the IV spike that panicked traders create before the event
+Net Effect: Premium from front-week shorts heavily subsidizes back-week longs (typically 50–
+70% offset), resulting in a net cost far below a conventional straddle while maintaining full
+long-gamma participation through the back week.
+Scenario A: Large Post-Earnings Move (The Trampoline Fires)
+Front-week short option is breached but expires the next day with minimal remaining time
+value
+Back-week long option (now deep ITM with a full week of time value) surges
+The stock "bounces" off the short strike and catapults the long option's profit
+The trade profits because long option value growth outpaces short option loss
+Scenario B: Flat Earnings
+Both front-week options expire worthless → full premium collected
+Back-week options now held at dramatically reduced cost
+10.2 The Mechanics
+10.3 Three Scenarios
+
+
+===== PAGE 14/23 =====
+
+Full additional week of optionality for exit at breakeven or small profit
+Scenario C: Moderate Move
+Front-week options expire with some residual value (manageable loss)
+Back-week options carry both time value and directional component
+Outcome depends on magnitude of move vs. strike distance — AI pre-calculates probability
+distribution at entry
+Condition
+Threshold
+Days to Catalyst
+5–10 calendar days
+Front-Week IVR
+> 70 (confirms rich front-week premium)
+IV Inversion
+Front-week IV must be significantly higher than back-week
+Stock Liquidity
+ADV > 5M shares; option OI > 1,000 per strike
+Stock Profile
+Highly liquid tech/growth with documented gap history
+Bid/Ask (all 4 legs)
+< 8% of mid
+Maximum Loss: Net debit paid (cost of back-week longs minus front-week premium
+collected)
+Maximum Gain: Theoretically unlimited (call side); substantial (put side)
+Break-even: Net cost relative to back-week strike distance
+Defined-risk: APEX confirms max loss before presenting the trade card
+Below is the complete categorized list of Python packages required to build APEX.
+Package
+Version
+Purpose
+fastapi
+0.115+
+Async REST API framework — core backend
+uvicorn[standard]
+0.30+
+ASGI server for FastAPI
+pydantic
+2.7+
+Data validation and settings management
+pydantic-settings
+2.3+
+Environment variable configuration
+10.4 Ideal Entry Conditions (AI Trigger Criteria)
+10.5 Risk Profile
+SECTION 11 — PYTHON TECHNICAL BUILD GUIDE
+11.1 Full Python Library & Package List
+A. Backend API Framework
+
+
+===== PAGE 15/23 =====
+
+Package
+Version
+Purpose
+python-multipart
+0.0.9+
+File upload handling
+httpx
+0.27+
+Async HTTP client for external API calls
+Install command:
+pip install fastapi uvicorn[standard] pydantic pydantic-settings python-multipart htt
+Package
+Version
+Purpose
+sqlalchemy
+2.0+
+ORM for PostgreSQL (async support)
+asyncpg
+0.29+
+Async PostgreSQL driver
+alembic
+1.13+
+Database migrations
+redis
+5.0+
+Redis client for real-time caching
+aioredis
+2.0+
+Async Redis operations
+Install command:
+pip install sqlalchemy asyncpg alembic redis aioredis
+Package
+Version
+Purpose
+yfinance
+0.2.38+
+Yahoo Finance: OHLCV, fundamentals, options chain
+pandas
+2.2+
+DataFrame operations for financial data
+numpy
+1.26+
+Numerical computations
+tradier
+custom
+Tradier broker API wrapper (options chain)
+alpaca-trade-api
+3.0+
+Alpaca broker API for execution
+ib_insync
+0.9.86+
+Interactive Brokers API wrapper
+polygon-api-client
+1.14+
+Polygon.io market data API
+pytz
+2024.1+
+Timezone handling for market hours
+pandas-market-calendars
+4.4+
+US market calendar and trading sessions
+Install command:
+B. Database & Caching
+C. Financial Market Data
+
+
+===== PAGE 16/23 =====
+
+pip install yfinance pandas numpy alpaca-trade-api ib_insync polygon-api-client pytz 
+Package
+Version
+Purpose
+pandas-ta
+0.3.14b
+Comprehensive TA library: MACD, RSI, EMA, Bollinger, SuperTrend, Pivots, 130+ indicators
+ta
+0.11.0
+Alternate TA library (backup for specific indicators)
+ta-lib
+0.4.28+
+C-backed TA library for high-performance indicator computation
+scipy
+1.13+
+Statistical calculations (standard deviation, volatility)
+statsmodels
+0.14+
+GARCH models, volatility forecasting
+Install command:
+pip install pandas-ta ta scipy statsmodels
+# TA-Lib requires C library install first:
+# brew install ta-lib (Mac) or apt-get install libta-lib-dev (Linux)
+pip install TA-Lib
+Package
+Version
+Purpose
+py_vollib
+1.0.1
+Black-Scholes option pricing: delta, gamma, theta, vega, rho
+py_lets_be_rational
+1.0.1
+Fast rational option pricing (dependency for py_vollib)
+mibian
+0.1.3
+Black-Scholes, Greeks, implied volatility
+QuantLib-Python
+1.34+
+Full quantitative finance library (bond pricing, yield curves)
+arch
+6.3+
+GARCH models for volatility forecasting
+Install command:
+pip install py_vollib py_lets_be_rational mibian arch
+# QuantLib requires separate C++ build or use conda:
+# conda install -c conda-forge quantlib
+Package
+Version
+Purpose
+openai
+1.35+
+GPT-4 API for technical analysis AI model
+anthropic
+0.28+
+Claude API for volatility specialist model
+D. Technical Analysis Indicators
+E. Options Pricing & Greeks Calculation
+F. AI & Machine Learning
+
+
+===== PAGE 17/23 =====
+
+Package
+Version
+Purpose
+google-generativeai
+0.7+
+Gemini API for sentiment specialist model
+langchain
+0.2+
+Orchestration layer for multi-AI consensus engine
+langchain-openai
+0.1+
+LangChain OpenAI integration
+langchain-anthropic
+0.1+
+LangChain Anthropic integration
+transformers
+4.41+
+HuggingFace models for local NLP
+torch
+2.3+
+PyTorch: neural network backbone for ML models
+scikit-learn
+1.5+
+ML utilities: classification, clustering, feature engineering
+Install command:
+pip install openai anthropic google-generativeai langchain langchain-openai langchain
+# PyTorch (visit pytorch.org for platform-specific command):
+pip install torch torchvision torchaudio
+Package
+Version
+Purpose
+finbert-tone
+pip install
+FinBERT: financial sentiment analysis model
+vaderSentiment
+3.3.2
+Fast lexicon-based sentiment for social media
+textblob
+0.18+
+General NLP and sentiment scoring
+newspaper3k
+0.2.8
+News article scraping and text extraction
+feedparser
+6.0.11+
+RSS feed parsing for financial news
+requests
+2.32+
+HTTP requests for news/social API calls
+beautifulsoup4
+4.12+
+HTML parsing for web scraping
+praw
+7.7+
+Reddit API wrapper (WallStreetBets, options subs)
+tweepy
+4.14+
+Twitter/X API for social sentiment
+Install command:
+pip install vaderSentiment textblob newspaper3k feedparser requests beautifulsoup4 pr
+# FinBERT: pip install finbert-tone
+G. Sentiment Analysis & NLP
+
+
+===== PAGE 18/23 =====
+
+Package
+Version
+Purpose
+plotly
+5.22+
+Interactive charts (served to frontend via API)
+matplotlib
+3.9+
+Static chart generation and export
+mplfinance
+0.12.10b
+Matplotlib extension for candlestick charts
+seaborn
+0.13+
+Statistical visualization for backtesting results
+Install command:
+pip install plotly matplotlib mplfinance seaborn
+Package
+Version
+Purpose
+python-jose[cryptography]
+3.3.0+
+JWT token generation and validation
+passlib[bcrypt]
+1.7.4+
+Password hashing (bcrypt)
+pyotp
+2.9+
+TOTP 2FA implementation
+cryptography
+42.0+
+AES encryption for sensitive data
+Install command:
+pip install python-jose[cryptography] passlib[bcrypt] pyotp cryptography
+Package
+Version
+Purpose
+backtrader
+1.9.78+
+Python backtesting framework for strategies
+zipline-reloaded
+3.0+
+Quantopian-style strategy backtesting
+bt
+0.2.10+
+Flexible backtesting for portfolio strategies
+pyfolio-reloaded
+0.9.5+
+Performance and risk analytics for backtested portfolios
+Install command:
+pip install backtrader bt pyfolio-reloaded
+H. Data Visualization & Charting
+I. Authentication & Security
+J. Backtesting Engine
+
+
+===== PAGE 19/23 =====
+
+Package
+Version
+Purpose
+celery
+5.4+
+Distributed task queue for background scans
+celery[redis]
+5.4+
+Redis as Celery message broker
+apscheduler
+3.10+
+Scheduled tasks (market open scan triggers)
+flower
+2.0+
+Celery task monitoring dashboard
+Install command:
+pip install celery[redis] apscheduler flower
+Package
+Version
+Purpose
+pytest
+8.2+
+Testing framework
+pytest-asyncio
+0.23+
+Async test support for FastAPI
+httpx
+0.27+
+Test client for FastAPI endpoints
+pytest-cov
+5.0+
+Code coverage reports
+black
+24.4+
+Code formatting
+ruff
+0.4+
+Fast Python linter
+mypy
+1.10+
+Static type checking
+Install command:
+pip install pytest pytest-asyncio pytest-cov black ruff mypy
+Package
+Version
+Purpose
+gunicorn
+22.0+
+Production WSGI server
+python-dotenv
+1.0+
+Environment variable management
+loguru
+0.7+
+Structured logging
+prometheus-fastapi-instrumentator
+6.1+
+Metrics for Prometheus/Grafana
+boto3
+1.34+
+AWS SDK (S3, EC2, CloudWatch)
+sentry-sdk[fastapi]
+2.3+
+Error tracking and performance monitoring
+K. Task Queue & Background Jobs
+L. Testing & Code Quality
+M. Deployment & Infrastructure
+
+
+===== PAGE 20/23 =====
+
+Install command:
+pip install gunicorn python-dotenv loguru boto3 sentry-sdk[fastapi] prometheus-fastap
+# ─── Backend Framework ───────────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+python-multipart>=0.0.9
+httpx>=0.27.0
+# ─── Database & Cache ────────────────────────────────
+sqlalchemy>=2.0.0
+asyncpg>=0.29.0
+alembic>=1.13.0
+redis>=5.0.0
+aioredis>=2.0.0
+# ─── Market Data ─────────────────────────────────────
+yfinance>=0.2.38
+pandas>=2.2.0
+numpy>=1.26.0
+alpaca-trade-api>=3.0.0
+polygon-api-client>=1.14.0
+pytz>=2024.1
+pandas-market-calendars>=4.4.0
+# ─── Technical Analysis ──────────────────────────────
+pandas-ta>=0.3.14b
+ta>=0.11.0
+scipy>=1.13.0
+statsmodels>=0.14.0
+# ─── Options Pricing & Greeks ────────────────────────
+py_vollib>=1.0.1
+py_lets_be_rational>=1.0.1
+mibian>=0.1.3
+arch>=6.3.0
+# ─── AI & Machine Learning ───────────────────────────
+openai>=1.35.0
+anthropic>=0.28.0
+google-generativeai>=0.7.0
+langchain>=0.2.0
+langchain-openai>=0.1.0
+langchain-anthropic>=0.1.0
+scikit-learn>=1.5.0
+# ─── Sentiment & NLP ─────────────────────────────────
+vaderSentiment>=3.3.2
+Complete requirements.txt
+
+
+===== PAGE 21/23 =====
+
+textblob>=0.18.0
+newspaper3k>=0.2.8
+feedparser>=6.0.11
+requests>=2.32.0
+beautifulsoup4>=4.12.0
+praw>=7.7.0
+tweepy>=4.14.0
+# ─── Charting ────────────────────────────────────────
+plotly>=5.22.0
+matplotlib>=3.9.0
+mplfinance>=0.12.10b
+seaborn>=0.13.0
+# ─── Auth & Security ─────────────────────────────────
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+pyotp>=2.9.0
+cryptography>=42.0.0
+# ─── Backtesting ─────────────────────────────────────
+backtrader>=1.9.78
+bt>=0.2.10
+# ─── Task Queue ──────────────────────────────────────
+celery[redis]>=5.4.0
+apscheduler>=3.10.0
+flower>=2.0.0
+# ─── Testing ─────────────────────────────────────────
+pytest>=8.2.0
+pytest-asyncio>=0.23.0
+pytest-cov>=5.0.0
+black>=24.4.0
+ruff>=0.4.0
+mypy>=1.10.0
+# ─── Deployment ──────────────────────────────────────
+gunicorn>=22.0.0
+python-dotenv>=1.0.0
+loguru>=0.7.0
+boto3>=1.34.0
+sentry-sdk[fastapi]>=2.3.0
+No trade executes when AI models disagree. Disagreement triggers: "Hold — Conflicting Signals."
+Model
+Role
+API
+GPT-4 (OpenAI)
+Technical Specialist — chart patterns, indicator analysis
+openai
+Claude (Anthropic)
+Volatility Specialist — IV structure, Greeks, options chain
+anthropic
+SECTION 12 — AI MULTI-MODEL CONSENSUS
+ARCHITECTURE
+
+
+===== PAGE 22/23 =====
+
+Model
+Role
+API
+Gemini (Google)
+Sentiment Specialist — news NLP, social scoring
+google-generativeai
+APEX Arbiter
+Composite scoring engine — weights consensus, issues trade brief
+Custom logic
+Consensus Gate: Minimum 2 of 3 models must agree on direction AND strategy before APEX
+Composite Score threshold is checked.
+Ticker search + interactive chart with all 10 indicators
+Live options chain loader with Greeks display
+IV vs. HV calculator + IVR display
+Paper trading mode (no live execution)
+Full 10-dimension scan engine
+Multi-model AI consensus architecture
+Composite APEX Composite Scoring
+Automated strategy recommendation (human approves execution)
+Sentiment NLP integration
+Broker API integration (Interactive Brokers / Alpaca / TD Ameritrade)
+Automated trade execution on APEX Score approval
+Position monitoring + automated exit rules
+Gamma Trampoline™ auto-detection
+Mobile-responsive interface
+Multi-account management (advisory firms)
+Backtesting engine across all strategies
+Client-facing reporting dashboard
+Regulatory compliance layer (audit trails, position logs)
+Subscription tier management
+SECTION 13 — DEVELOPMENT ROADMAP
+Phase 1 — MVP (Months 1–3)
+Phase 2 — AI Scan Engine (Months 4–6)
+Phase 3 — Autonomous Execution (Months 7–9)
+Phase 4 — Professional Platform (Months 10–12)
+
+
+===== PAGE 23/23 =====
+
+Position Sizing: 2–5% of declared account capital per trade (configurable)
+Portfolio Greeks Monitor: Running aggregate Delta, Theta, Vega across all open positions
+Correlation Filter: Third open position in same sector triggers concentration warning
+Daily Loss Cap: Configurable; trading auto-halts if breached
+Earnings Blackout: No new positions within 1 day of earnings (exception: Gamma
+Trampoline setup)
+Bid/Ask Hard Stop: No trade executes if any leg spread exceeds 10% of mid-price
+Vega Cap: Long Vega positions in catalyst environments require explicit AI override with
+justification
+APEX is built on a single conviction: options trading at the professional level should not require
+a trader to juggle 15 open tabs, three platforms, and manual Greek calculations simultaneously.
+The analytical infrastructure exists. The AI models exist. The market data exists. What has been
+missing is a platform that assembles all of it into a single, decisive, explainable, executable
+workflow.
+The Gamma Trampoline™ represents a structural innovation in how traders approach catalyst
+events — reducing entry cost through IV inversion mechanics while maintaining full long-
+gamma participation post-event. When embedded within an AI platform that detects precise
+conditions for its deployment, it becomes a systematic, repeatable edge rather than a one-time
+trade.
+APEX is not trying to replace the trader's judgment — it is designed to give every trader the
+analytical horsepower of an entire quantitative desk, in under 15 seconds, on any ticker in the
+market.
+We are seeking mentor guidance on: data architecture, AI model integration priority
+sequencing, regulatory considerations for autonomous execution, and broker API partnership
+strategy.
+This document is confidential and prepared solely for mentor review and advisory purposes.
+It does not constitute investment advice or a solicitation for investment.
+© 2026 APEX Options Intelligence — Mayank Kamaleshkumar & Partners. All Rights Reserved.
+SECTION 14 — RISK MANAGEMENT FRAMEWORK
+CLOSING STATEMENT — FOR MENTOR REVIEW

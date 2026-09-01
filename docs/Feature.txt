@@ -1,0 +1,414 @@
+
+
+===== PAGE 1/5 =====
+
+ RED – Prem’s thoughts 
+ 
+ 
+Feature 
+Simple Explanation 
+1 
+F-001 
+User Platform 
+Keeps trader login safe and secure 
+Using codes that change and expire 
+everyday anyways 
+2 
+F-026 
+User Platform 
+Handles login and token process 
+Make it possible to send emails for 
+the new code (every market open, 
+code expires at market close of the 
+same day) 
+3 
+F-051 
+User Platform 
+First login screen traders see 
+4 
+F-076 
+User Platform 
+Records every login for security 
+Security Log – add location access 
+and add a familiarization block for a 
+given ‘home’ address for the user 
+5 
+F-101 
+User Platform 
+Manages trader accounts and access 
+6 
+F-002 
+User Platform 
+Saves dashboards, layouts, and 
+widgets 
+7 
+F-027 
+User Platform 
+Loads S&P 500 chart automatically 
+8 
+F-052 
+User Platform 
+Displays charts and widgets live 
+9 
+F-077 
+User Platform 
+Shows key stock information 
+quickly 
+Optimize and focus on efficiency in 
+the UI logic 
+10 F-102 
+User Platform 
+Starts every scan and trade cycle 
+11 F-003 
+Market Data 
+Brings live price data into platform 
+12 F-028 
+Market Data 
+Connects and maintains data feeds 
+13 F-053 
+Market Data 
+Provides data for indicator 
+calculations 
+14 F-078 
+Market Data 
+Checks if market data is fresh 
+Compare values for 5 minutes every 
+30 minutes as a calibration cycle. 
+Every 30 minutes of rest, a 5 minute 
+calibration period starts, checking 
+each second if the data on APEX’s 
+charts are the same @ WTC. Full 
+chart refresh with banner pop-up 
+notif that informs user of the 
+
+
+===== PAGE 2/5 =====
+
+mismatch and that it was fixed (in 
+the case that APEX finds chart ticks 
+are mismatched, wrong, and/or 
+outdated data) 
+15 F-103 
+Market Data 
+Controls scans during market hours 
+16 F-004 
+Technical Analysis 
+Finds important MACD trade 
+signals 
+17 F-029 
+Technical Analysis 
+Spots overbought and oversold 
+conditions 
+Build IV, BB/RSI, and Extrinsic 
+Value analysis+relative analysis in 
+order for this to work. 
+18 F-054 
+Technical Analysis 
+Confirms trend direction using 
+EMAs 
+19 F-079 
+Technical Analysis 
+Tracks volatility and breakout zones 
+Train model with pattern 
+recognition, avoid using online 
+resources, rather use fake charts and 
+interact with it showing all possible 
+cases, flexibility, range, etc. Also 
+bring in and mix as a hybrid with 
+real historical data 
+20 F-104 
+Technical Analysis 
+Confirms trends and stop-loss levels​
+Use same logic above for training to 
+spot trends, as for SL, use a hard, 
+rule of thumb SL @ previous swing 
+low/swing high (up and downtrend 
+respectively), later then let model 
+train itself on SL for custom values 
+e.g.  -12.5% of expected profit from 
+original long position. 
+21 F-129 
+Technical Analysis 
+Confirms moves with volume and 
+pivots 
+22 F-005 
+Technical Analysis 
+Detects common candlestick trade 
+patterns 
+Simple injected pattern recognition 
+is enough for common candlestick 
+trade patterns, just have to also train 
+it to be flexible, in case something 
+
+
+===== PAGE 3/5 =====
+
+similar shows but model does not 
+recognize/does not deem it matches 
+correctly. 
+23 F-030 
+Technical Analysis 
+Finds larger chart pattern setups 
+24 F-055 
+Technical Analysis 
+Scores patterns based on strength 
+25 F-080 
+Technical Analysis 
+Finds support and resistance zones 
+26 F-006 
+Technical Analysis 
+Main chart traders interact with 
+27 F-031 
+Technical Analysis 
+Turns EMA data into signals 
+28 F-056 
+Technical Analysis 
+Combines indicators into trend 
+verdict 
+29 F-081 
+Technical Analysis 
+Lets traders draw trendlines 
+manually 
+30 F-007 
+Options Intelligence 
+Provides live options chain data 
+31 F-032 
+Options Intelligence 
+Shows options data under chart 
+32 F-057 
+Options Intelligence 
+Filters strikes for easier selection 
+33 F-082 
+Options Intelligence 
+Tracks unusual options activity 
+changes 
+34 F-107 
+Options Intelligence 
+Avoids bad trades with poor 
+liquidity 
+35 F-132 
+Options Intelligence 
+Chooses correct option strike legs 
+36 F-008 
+Options Intelligence 
+Measures option price movement 
+exposure 
+37 F-033 
+Options Intelligence 
+Shows time decay on options 
+38 F-058 
+Options Intelligence 
+Tracks risk from fast price moves 
+39 F-083 
+Options Intelligence 
+Finds options sensitive to volatility 
+40 F-108 
+Options Intelligence 
+Shows Greeks in one dashboard 
+41 F-009 
+Volatility 
+Calculates current implied volatility 
+live 
+42 F-034 
+Volatility 
+Compares volatility across past 
+periods 
+43 F-059 
+Volatility 
+Shows IV compared to HV 
+44 F-084 
+Volatility 
+Measures if volatility is expensive 
+45 F-109 
+Volatility 
+Labels market volatility conditions 
+clearly 
+46 F-134 
+Volatility 
+Detects volatility spikes before 
+events 
+47 F-010 
+Sentiment 
+Collects live news for each ticker 
+48 F-035 
+Sentiment 
+Turns news into market sentiment 
+
+
+===== PAGE 4/5 =====
+
+49 F-060 
+Sentiment 
+Gives one simple sentiment score 
+50 F-085 
+Sentiment 
+Finds large unusual options trades 
+51 F-110 
+Sentiment 
+Summarizes important SEC filing 
+events 
+52 F-011 
+Fundamentals 
+Compares earnings results to 
+expectations 
+53 F-036 
+Fundamentals 
+Checks company revenue and 
+income growth 
+54 F-061 
+Fundamentals 
+Compares valuation against similar 
+companies 
+55 F-086 
+Fundamentals 
+Shows analyst ratings and targets 
+56 F-111 
+Fundamentals 
+Tracks earnings and major catalysts 
+57 F-136 
+Fundamentals 
+Combines company health into 
+score 
+58 F-012 
+AI 
+Main AI engine behind scoring 
+59 F-037 
+AI 
+Shows what drives the score 
+60 F-062 
+AI 
+Chooses the best strategy path 
+61 F-087 
+AI 
+Explains strategy in simple English 
+62 F-112 
+AI 
+Gives entry, target, and stop levels 
+63 F-137 
+AI 
+Builds clear trade action checklist 
+64 F-013 
+AI 
+Blocks weak trades below threshold 
+65 F-038 
+AI 
+Checks risk before placing trades 
+66 F-063 
+AI 
+Handles mixed or unclear signals 
+67 F-088 
+AI 
+Summarizes trade logic before 
+execution 
+68 F-014 
+AI 
+Explains agreement and 
+disagreement signals 
+69 F-039 
+AI 
+Shows score breakdown visually 
+70 F-064 
+AI 
+Gives written reason for trades 
+71 F-015 
+Risk 
+Sets maximum loss per trade 
+72 F-040 
+Risk 
+Calculates safe trade size 
+73 F-065 
+Risk 
+Tracks live profit and loss 
+74 F-090 
+Risk 
+Measures total portfolio Greek risk 
+75 F-115 
+Risk 
+Alerts when portfolio risk grows 
+76 F-016 
+Risk 
+Shows all open option positions 
+77 F-041 
+Risk 
+Tracks watched stocks in one panel 
+78 F-066 
+Risk 
+Records completed trade history 
+
+
+===== PAGE 5/5 =====
+
+79 F-091 
+Risk 
+Shows strategy performance 
+snapshot 
+80 F-017 
+Execution 
+Connects platform to broker 
+account 
+81 F-042 
+Execution 
+Lets admins add broker keys 
+82 F-067 
+Execution 
+Allows testing with paper trading 
+83 F-092 
+Execution 
+Monitors broker connection health 
+84 F-018 
+Execution 
+Sends trades when score qualifies 
+85 F-043 
+Execution 
+Lets trader cancel or adjust orders 
+86 F-068 
+Execution 
+Builds better limit order prices 
+87 F-093 
+Execution 
+Tracks order status until filled 
+88 F-118 
+Execution 
+Creates final trade confirmation 
+record 
+89 F-143 
+Execution 
+Records every order event 
+permanently 
+90 F-020 
+Learning 
+Simulates trading without real 
+money 
+91 F-045 
+Learning 
+Tests full APEX scan process 
+92 F-070 
+Learning 
+Saves paper trade results 
+93 F-022 
+Reporting 
+Creates downloadable trade 
+summary reports 
+94 F-047 
+Reporting 
+Logs daily scans and results 
+95 F-023 
+Monitoring 
+Shows system and data health 
+96 F-048 
+Monitoring 
+Sends alerts when errors happen 
+97 F-024 
+Security 
+Protects financial and trading data 
+98 F-049 
+Security 
+Prevents API overuse and abuse 
+99 F-025 
+Administration 
+Stores broker keys securely 
+100 F-050 
+Administration 
+Sends important alerts to traders 
+  
+ 

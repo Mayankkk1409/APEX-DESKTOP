@@ -1,0 +1,8 @@
+repos:
+  - repo: local
+    hooks:
+      - id: apex-secret-scan
+        name: APEX secret scan
+        entry: bash infra/secret-scan.sh
+        language: system
+        pass_filenames: false

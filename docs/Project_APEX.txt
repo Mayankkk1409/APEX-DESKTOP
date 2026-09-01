@@ -1,0 +1,403 @@
+
+
+===== PAGE 1/11 =====
+
+Project APEX - Documentation & User Flow  
+ 
+Executive Summary: 
+ 
+Project APEX or APEX trading terminal is a fully automated AI powered 
+option trading platform, which is completely hassle free for a trader as they 
+only need to enter the ticker of any U.S. based company, select the 
+chart-timeframe and adjust the view of the interactive technical chart, select 
+the expiry date options from the dropdown, and then hit SCAN. After hitting 
+scan the APEX AI will run a deep synthesized analysis consisting of: 
+ 
+●​ A 10 layer deep technical analysis(MACD, EMA, RSI, BOLLINGER 
+BANDS, PIVOT POINTS, SUPPORT/RESISTANCE, SUPERTREND, 
+VOLUME, TECHNICAL CANDLESTICK PATTERNS) 
+●​ Upon running a 10 layer deep technical analysis on the charts the AI 
+will start analyzing the entire option chain based on the user selected 
+expiry dates. This part of the analysis mainly checks and looks at the 
+greeks (DELTA, THETA, GAMMA,VEGA) as well as the bid/ask 
+spread,volume, change, and open interest(OI) to locate a proper set 
+up.  
+●​ Next it will compare implied volatility (IV) with historical volatility(HV) 
+to determine the ideal scenario of buying or selling the contract.  
+●​ Next the system will scan and analyze for live real time sentimental 
+thesis from financial news and other reliable sources as well the 
+technical charts and option charts to understand investor sentiment.  
+●​ The system will also pull a fundamental snapshot of the company 
+such as the earnings per share(EPS), revenue, price/earnings 
+ratio(P/E), sales, income, analysts estimates, growth 
+rates/expectation to run a scan that will determine the health of the 
+company.  
+●​ After collecting all the information mentioned above the individual 
+layers of information get synthesized from all the layers and runs a 
+deep analysis and research model that will give a rating/score.  
+
+
+===== PAGE 2/11 =====
+
+●​ Based on the rating it gives a simple brief plain english explanation 
+and gives the exact strategy, methodology, and execution steps to be 
+followed.  
+●​ The terminal is instructed to automatically execute and follow the 
+strategy if it crosses a certain rating/score of (85).  
+●​ Lastly, it gives a final properly formatted certificate looking that 
+contains the order details and conformation.  
+ 
+APEX trading is not a dashboard that just gathers and displays data, rather 
+it is a full cycle AI powered trading agent/terminal. It logs, analyzes, and 
+executes every order with analytical backing and discipline.  
+ 
+The main innovation of the APEX is the “APEX STRATEGY”. 
+ 
+We have designed this strategy to capitalize once volatility sparks, before 
+and after a major catalyst event, and change in sentiments.  
+ 
+The strategy works in 2 sorts of mechanics one being where you buy and 
+one where you sell the option.  
+ 
+At first you are given a major upcoming event related to a specific company 
+or the broader market, while leading up to that event you are going to do 
+the 2 mechanics we discussed for the strategy to work in the intended 
+manner.  
+ 
+While leading up to the event you buy a call option and a put option both 
+OTM and both expiring a week after the event.  
+ 
+●​ You want to buy OTM as it is much cheaper and allows for much 
+more leverage. After the event the stock can potentially make large 
+moves in both directions and the crashing of volatility will allow for the 
+trade to work in your favor.  
+●​ The time frame should be 1 week as it is much more optimal because 
+it is not too far out and too far in giving enough time for the market to 
+price in.  
+
+
+===== PAGE 3/11 =====
+
+This marks one of the two steps of the strategy, the second step is when 
+you sell both an OTM call option and put option to their respective strike 
+prices as mentioned in the first step and they should have an expiry date of 
+immediately the next day of the event.  
+ 
+Now, in this step you want to sell options because as you are leading up to 
+the event the IV is significantly higher than HV you can squeeze out a 
+higher premium when selling.  
+ 
+●​ You again want to buy OTM because there are chances that the stock 
+remains flat or experiences miniscule changes in price, and doing as 
+per the strategy will allow you to not lose much, but rather give you 
+gains in the amount of premium you collect because a small change 
+will let the contract expire worthless.  
+●​ The expiry should be immediately the next day because Theta(Time 
+Decay) will be extremely fast meaning the trade will be in your favor.  
+ 
+ 
+Section 1 - What problem are we solving: 
+ 
+ 
+The main problem that modern option traders are facing is the lack of 
+hassle free and all in one place analysis. Thus, why APEX is the one stop 
+solution that will take care of these major issues such professionals face: 
+ 
+●​ Analysis: 
+○​ There are many benchmarks and tools that traders need to 
+scan and analyze, but all the software that provides these 
+details are scattered.  
+●​ Volatility Misinterpretation: 
+○​ Misreading volatility charts such as entering a long position 
+when IV high or doing the opposite can cause traders to face 
+severe losses.  
+
+
+===== PAGE 4/11 =====
+
+●​ Greeks: 
+○​ Blindly opening positions without reading, understanding, and 
+analyzing the greeks can sometimes make you pay a hefty fine.  
+●​ Faulty Execution: 
+○​ Having one trade where the execution works perfectly is not the 
+case for every trade set up and it is important to have a 
+systematic and streamlined approach.  
+●​ Strategy Mismatch: 
+○​ Not knowing what strategy should be used in a situation or 
+using a strategy without full understanding of the strategy or 
+even using the wrong strategy can cause mishappenings.  
+ 
+APEX ensures full accuracy and credibility as it goes through each 
+scenario, understands, and analyzes the details and gives evidence 
+backing to prevent professionals from facing such major issues.  
+ 
+ 
+Section 2 - The Framework: 
+ 
+For APEX to work in the intended manner there is no 1 metric that has to 
+pass: we have a 5 layer deep analysis: 
+1.​ ﻿TREND → Super Trend + EMA (9,21,50,100/200) 
+2.​ ﻿MOMENTUM → RSI (IM) (over bought) - MACD (crossover + histogram) 
+3.​ ﻿VOLATILITY  → Ballinger Band Span width + IV vs. HV & IV Rank. 
+4.​ ﻿PATTERNS → Candlestick chart recognition 
+5.​ ﻿PRICE LEVEL → Pivot Points + Support / resistance 
+6.​ ﻿GREEKS → Delta, Treta, Gramma, &i vega to get price perfection. 
+7.​ ﻿OPTION CHAIN → OI change. Volume Change, Bia/ask Spread. Change, Strike. Expiry, 
+IV. Call put. 
+8.​ ﻿SENTIMENTAL → News articles, filings, direction flow, etc.  
+9.​ ﻿FUNDAMENTAL → EPS, P/E, Revenue, Sales. Income, Profit, Growth, Analyst 
+Expectations 
+10.​FINAL STRATEGY → fully Comprehensive final synthesis of research. 
+ 
+
+
+===== PAGE 5/11 =====
+
+Section 3 - The UX Walkthrough 
+ 
+As the user opens the APEX terminal and lands on the login screen they 
+need to enter their username, password, and a six digit unique key that 
+changes every time the market opens.  
+ 
+Upon logging in they can see the main dashboard which has a big technical 
+chart of the S&P500 and that chart contains all the key technical indicators 
+such as: (MACD, EMA, RSI, BOLLINGER BANDS, PIVOT POINTS, 
+SUPERTREND, VOLUME) and the chart allows you to add in trend lines 
+for drawing and identifying key levels. The main dashboard will also have a 
+watchlist monitoring section and the ability to track any open positions. It 
+also has the sentiment section to read, analyze, and understand 
+sentimental news. 
+ 
+Above the main chart there is an entry field where you can enter the ticker 
+to any US based company, select the time frame of the chart, adjust the 
+chart view, and choose the expiry date based on the dropdowns. After all 
+that the user just needs to click scan and the APEX terminal will run its 5 
+layer deep analysis magic.  
+ 
+Next it loads up a collapsable option chain and technical graph that shows 
+the details.  
+ 
+On the left side of the terminal there will be basic stock information that will 
+be displaying the company name, current OHLCV price data, and other 
+important and needed benchmark metrics.  
+ 
+ 
+Section 4 - Technical Analysis: 
+ 
+ 
+
+
+===== PAGE 6/11 =====
+
+The first that is scanned & analyzed by APEX terminal are the candlestick 
+pattems on the technical charts as they give ideas on trend, target, stop 
+loss, entry, & exit. 
+ 
+Bullish Reversals (Buy at Support Signal) → Hamer. Bullish engulfing. Morning Star, 
+dragonfly doji. piercing line, inverted hammer. bullish harami) 
+Bearish Reversal (Sell at resistance signal) → Shooting Star. Bearish engulfing, evening 
+Star. Dark Cloud Cover, hanging man. bearish haram)i 
+Trend Continuation (Same trend) → Three-white soldiers, Three-black Crows • Rising three 
+methods 
+Indecision (Further Conclusion required) → Spinning top, Standard daji. Inside bar 
+ 
+These categories & pattern sets give ideas about trend & future price 
+expectations ONLY they confirm trend & price action NOT 
+breakouts/breakdowns. 
+ 
+ 
+Bullish  
+Bearish  
+Flag (Bullish) 
+Flag (Bearish) 
+Ascending Triangle  
+Descending Triangle  
+Cup & Handle  
+Inverted Cup & Handle  
+Inverted Head & Shoulder 
+Head & Shoulder 
+Double Bottom  
+Double Top  
+Rounding Bottom  
+Rounding Top  
+ 
+ 
+These are just Standard candiestick patterns that confirm trend, price action & expectation establishment. 
+& breakout/breakdown. These are paired with more indicators for better analysis: 
+ 
+ 
+MACD Moving Average - Convergence-Divergence) 
+ 
+●​
+Standard Configuration: 12 period EMA. 26 period EMA. 9 period signal line. 
+●​ Bullish: 
+○​
+When the MACD line crosses the signal line from below or MACD line is above zero line. 
+●​
+ Bearish: 
+
+
+===== PAGE 7/11 =====
+
+○​
+When the MACD line crosses the signal line from above or MACD line is below zero line. 
+ 
+Bullish Divergence​
+When price movement (candlesticks) are making a lower low pattern while MACD is making higher lows, 
+signaling seller exhaustion & bullish reversal. 
+Bearish Divergence​
+When price movement (candlesticks) are creating higher highs patterns while MACD is making lower 
+highs, signaling buyer exhaustion & bearish reversal. 
+ 
+RSI (Relative Strength Index) (14 TRADING PERIODS) 
+ 
+Bullish​
+RSI level above & sustaining above 60-70 & crossing 70 means it has entered strong upward momentum 
+& can stay high for a long period. RSI levels of 40-50 is supported during bull run & a classic strong entry 
+point would be when RSI dips below 30 & instantly crosses back above 30, while sustaining it. 
+Bearish​
+RSI level below & sustaining below 40-30 & crossing the levels of 30 means it has entered a strong 
+bearish trend & can stay low for a consistent period. RSI levels of 50-60 is resistance during bearish trend 
+& a classic sell/short signal occurs when RSI crosses 70 & dips right below 70, while sustaining it. 
+ 
+Bullish Divergence​
+When price action (candlestick) is making a lower low pattern but RSI is displaying a higher low, signaling 
+bearish exhaustion & bullish reversal. 
+Bearish Divergence​
+When price action (candlestick) is making a higher high pattern but RSI is displaying a lower high, 
+signaling buyer exhaustion & showing signs of bearish reversal. 
+ 
+ 
+EMA (Exponential Moving Averages) 
+ 
+For technical analysis, trend confirmation, & price action set up we focus on EMA 
+Stacks of (9, 21, 50, 100, 200) ranging from both immediate short term to mid-long term. 
+
+
+===== PAGE 8/11 =====
+
+Bullish​
+When the price is constantly above & sustaining above each level of the EMA Stack 
+starting from short/immediate (9) to mid/long (200) showing a consistent & strong 
+uptrend. The best & classic entry point is when it touches the 9-21 EMA & sustaining 
+above them as well as crosses those levels. The crossover of a shorter term moving 
+average crosses the longer term from the bottom, kind of like MACD. 
+●​ Golden Crossover (50 EMA crosses 200 EMA from bottom) 
+●​ When the price is unusually below the moving averages it often sets up an 
+upward pullback 
+Bearish​
+When the price is constantly below the EMA Stack, again starting from short/immediate 
+(9) to mid/long (200). The classic & strongest entry point would be the pullback entry — 
+when the price goes below the EMA, rises back near to touch the EMA line, and once it 
+is near that line look for reversal signals in candlestick patterns & enter bearish trade. 
+The crossover of a short term moving average to long term average from above. 
+●​ Death Crossover (50 EMA crosses 200 EMA from above) 
+●​ When price is unusually above EMA it suggests a reversal 
+The EMA number changes based on the timeframe used by the trader. For intraday & 
+day trading the 9-21 EMAs are most applicable, for standard swing trading 12-26 EMA, 
+for longer swings the 50-200 EMA. On a little longer term vision the 50-200 EMAs are 
+highly effective. 
+ 
+Supertrend 
+ 
+The Supertrend is a trend-following indicator calculated using ATR (Average True 
+Range) to account for market volatility. 
+Bullish​
+The candlestick crosses the current red line switching the trend to green, marking the 
+start of an uptrend & the price where the trend switches would act as support/stop-loss. 
+ 
+Bearish 
+
+
+===== PAGE 9/11 =====
+
+When the candlestick goes below the green-line price line it marks a potential trend 
+reversal & that price line becomes a resistance. 
+ 
+ 
+Bollinger Bands 
+ 
+The Bollinger Bands consist of 3 lines: 
+●​ A middle simple moving average (20 periods) 
+●​ The other 2 are upper resistance level & lower support level which is a standard 
+deviation of usually 2 away from middle 
+Bullish​
+When the price action (candlestick) crosses the middle line, sustains above it and 
+breaks out by crossing the upper band & breaking out suggesting a potential uptrend. 
+The breakout price level acts as a support line. 
+Bearish​
+When the price action (candlestick) goes below the midline, sustains below it and 
+breaks down below by crossing the lower band suggesting a downtrend. The 
+breakdown level acts as the resistance level. 
+Bullish (W-Pattern)​
+The price action (candlestick) breaks below the midline & slides near or even beyond 
+the lower bound but it retreats back to the midline & again pulls back to the earlier 
+support level & then shows an uptrend again by breaking out above midline making it an 
+ideal entry point. 
+Bearish (M-Pattern)​
+The price action (candlestick) breaks above the upper band or gets near that level & 
+pulls back to the midline, gets a support at the midline & bounces back to the earlier 
+resistance to again pull back & this time break the midline showing signs of a potential 
+downtrend with the midline being the resistance — marking the breaking of the midline 
+a perfect entry to enter a bearish trade. 
+ 
+ 
+
+
+===== PAGE 10/11 =====
+
+Pivot Points 
+ 
+Standard Formula: (High + Low + Close) / 3 
+●​ R1: (PP x 2) - Low; R2: PP + (High - Low); R3: High + 2 x (PP - Low) 
+●​ S1: (PP x 2) - High; S2: PP - (High - Low); S3: Low - 2 x (High - PP) 
+Pivot points are historical horizontal price levels calculated from previous day's highs & 
+lows & close, projecting key future levels. 
+Bullish​
+When the price is above the central pivot level the upward trend is continued with the 
+support level being at pivot & targets expanding outward to R1, R2, & R3. 
+Bearish​
+When the price is below the central pivot level the downward trend is continued with 
+resistance level being at pivot & downward targets expanding to S1, S2, & S3. 
+ 
+ 
+Support & Resistance 
+ 
+These are structural price levels where the stock price has historically stopped or 
+reversed from, which based on supply & demand scenarios. 
+Bullish​
+When the stock price breaks above the resistance level (price level where trend 
+reverses) suggesting a potential upside. 
+Bearish​
+When the stock price breaks below the support level (price level stock price doesn't 
+break) suggesting a bearish trend. 
+When the support or resistance is broken but the price again retreats to those levels in 
+short span it shows a false breakout & potentially more buying/selling pressure. 
+ 
+
+
+===== PAGE 11/11 =====
+
+Volume 
+ 
+Volume represents the number of shares, contracts, or tokens of an underlying asset 
+that are traded on a daily basis. 
+Bullish​
+When the price is constantly in a bullish trend making higher highs & the volume is also 
+increasing but if the stock sees a dip so does the volume, indicating that there is a 
+strong buyer demand. 
+Bearish​
+When the price is constantly in a bearish run making lower lows & the volume decides 
+to follow & if the stock trend reverses so does volume but not by a huge amount 
+showing strong seller environment. 
+Bullish Divergence​
+The price is making lower lows but volume is making higher lows showing high demand 
+& buying at low levels suggesting reversal. 
+Bearish Divergence​
+The price is making higher highs but volume is at lower highs showing selling pressure 
+suggesting reversal from current trend. 
+ 
+ 
+ 
+ 
+ 
