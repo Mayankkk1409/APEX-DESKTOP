@@ -139,6 +139,25 @@ def _first(*values: float | None) -> float | None:
     return None
 
 
+def usable_positive_price(value: Any) -> float | None:
+    """Reject non-positive or non-finite prices before they enter a quote."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if number != number or number <= 0 or number == float("inf"):
+        return None
+    return number
+
+
+def quote_mid(bid: float | None, ask: float | None) -> float | None:
+    """Mid only when both sides are positive and the market is not crossed."""
+    if bid is None or ask is None:
+        return None
+    if bid <= 0 or ask <= 0 or bid > ask:
+        return None
+    return (float(bid) + float(ask)) / 2.0
+
+
 def _index_meta(symbol: str) -> dict[str, str] | None:
     return INDEX_FEEDS.get(symbol.upper())
 
@@ -200,10 +219,13 @@ def _alpaca_stock_sync(symbol: str, settings: Settings) -> dict[str, Any] | None
     trade_px = getattr(latest_trade, "price", None)
     ask = getattr(latest_quote, "ask_price", None)
     bid = getattr(latest_quote, "bid_price", None)
-    mid = None
-    if ask and bid and ask > 0 and bid > 0:
-        mid = (float(ask) + float(bid)) / 2.0
-    price = _first(parse_number(trade_px), parse_number(mid), parse_number(getattr(daily, "close", None)))
+    price = usable_positive_price(
+        _first(
+            usable_positive_price(parse_number(trade_px)),
+            quote_mid(parse_number(bid), parse_number(ask)),
+            usable_positive_price(parse_number(getattr(daily, "close", None))),
+        )
+    )
     prev_close = parse_number(getattr(prev, "close", None))
     change = round(price - prev_close, 4) if price is not None and prev_close else None
     change_pct = round((change / prev_close) * 100, 4) if change is not None and prev_close else None
@@ -266,13 +288,13 @@ def _alpaca_stock_sync(symbol: str, settings: Settings) -> dict[str, Any] | None
         "price": price,
         "change": change,
         "change_pct": change_pct,
-        "open": parse_number(getattr(daily, "open", None)),
-        "high": parse_number(getattr(daily, "high", None)),
-        "low": parse_number(getattr(daily, "low", None)),
+        "open": usable_positive_price(parse_number(getattr(daily, "open", None))),
+        "high": usable_positive_price(parse_number(getattr(daily, "high", None))),
+        "low": usable_positive_price(parse_number(getattr(daily, "low", None))),
         "volume": parse_number(getattr(daily, "volume", None)),
         "avg_volume": avg_vol,
-        "week_52_high": week_high,
-        "week_52_low": week_low,
+        "week_52_high": usable_positive_price(week_high),
+        "week_52_low": usable_positive_price(week_low),
         "name": name,
         "asset_class": asset_class,
         "as_of": as_of,
@@ -556,17 +578,18 @@ def _apply(dst: _Bundle, src: dict[str, Any] | None, *, price: bool, fundamental
     if not src:
         return
     if price:
-        if dst.price is None and src.get("price") is not None:
-            dst.price = src["price"]
+        incoming = usable_positive_price(src.get("price"))
+        if dst.price is None and incoming is not None:
+            dst.price = incoming
             dst.price_source = src.get("source")
         dst.change = _first(dst.change, src.get("change"))
         dst.change_pct = _first(dst.change_pct, src.get("change_pct"))
-        dst.open = _first(dst.open, src.get("open"))
-        dst.high = _first(dst.high, src.get("high"))
-        dst.low = _first(dst.low, src.get("low"))
+        dst.open = _first(dst.open, usable_positive_price(src.get("open")))
+        dst.high = _first(dst.high, usable_positive_price(src.get("high")))
+        dst.low = _first(dst.low, usable_positive_price(src.get("low")))
         dst.volume = _first(dst.volume, src.get("volume"))
-        dst.week_52_high = _first(dst.week_52_high, src.get("week_52_high"))
-        dst.week_52_low = _first(dst.week_52_low, src.get("week_52_low"))
+        dst.week_52_high = _first(dst.week_52_high, usable_positive_price(src.get("week_52_high")))
+        dst.week_52_low = _first(dst.week_52_low, usable_positive_price(src.get("week_52_low")))
         dst.as_of = dst.as_of or src.get("as_of")
         if src.get("name") and dst.name == dst.symbol:
             dst.name = src["name"]

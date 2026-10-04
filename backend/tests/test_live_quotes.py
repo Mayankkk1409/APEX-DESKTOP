@@ -23,6 +23,21 @@ def test_parse_number_money_and_suffixes() -> None:
     assert parse_number(None) is None
 
 
+def test_rejects_negative_price_and_crossed_quote() -> None:
+    bundle = lq._Bundle(symbol="AAPL", name="AAPL", asset_class="stock")
+    lq._apply(bundle, {"price": -12.5, "open": -1, "source": "Alpaca"}, price=True, fundamentals=False)
+    assert bundle.price is None
+    assert bundle.open is None
+    assert bundle.price_source is None
+    lq._apply(bundle, {"price": 190.25, "change": -1.5, "source": "Alpaca"}, price=True, fundamentals=False)
+    assert bundle.price == 190.25
+    assert bundle.change == -1.5
+    assert lq.quote_mid(12.0, 10.0) is None
+    assert lq.quote_mid(10.0, 12.0) == 11.0
+    assert lq.usable_positive_price(0) is None
+    assert lq.usable_positive_price(-3) is None
+
+
 def test_parse_percent_fraction() -> None:
     assert parse_percent_fraction("0.35%") == pytest.approx(0.0035)
     assert parse_percent_fraction("0.09%") == pytest.approx(0.0009)

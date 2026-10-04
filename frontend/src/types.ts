@@ -462,9 +462,11 @@ export interface SentimentRow {
   blurb: string;
   source: string;
   signal: string;
-  score: number;
+  score: number | null;
+  score_method?: string | null;
   published_at: string;
   symbol: string | null;
+  url?: string | null;
 }
 
 export interface NewsArticleContent {
@@ -496,7 +498,7 @@ export interface SentimentLayer {
   title: string;
   symbol: string;
   score: number | null;
-  score_0_100: number;
+  score_0_100: number | null;
   band?: string;
   bias: string;
   weights: Record<string, number>;
@@ -508,6 +510,7 @@ export interface SentimentLayer {
       count: number;
       method: string;
       source: string | null;
+      as_of?: string | null;
       error?: string | null;
       articles: SentimentArticle[];
     };

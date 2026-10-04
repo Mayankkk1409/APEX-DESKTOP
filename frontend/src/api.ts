@@ -138,7 +138,19 @@ export const api = {
   watchlist: () => req<{ items: { symbol: string; name: string; price: number; change_pct: number }[] }>("/watchlist"),
   addWatch: (symbol: string) => req("/watchlist", { method: "POST", body: JSON.stringify({ symbol }) }),
   removeWatch: (symbol: string) => req(`/watchlist/${encodeURIComponent(symbol)}`, { method: "DELETE" }),
-  sentiment: () => req<{ items: unknown[]; fear_greed: number; label: string }>("/sentiment"),
+  sentiment: (symbol?: string) => {
+    const q = symbol ? `?symbol=${encodeURIComponent(symbol)}` : "";
+    return req<{
+      items: import("./types").SentimentRow[];
+      fear_greed: number | null;
+      label: string;
+      status?: string;
+      caveat?: string | null;
+      symbol?: string | null;
+      score_method?: string | null;
+      news_provider?: string | null;
+    }>(`/sentiment${q}`);
+  },
   portfolio: () => req<import("./types").PortfolioSummary>("/api/portfolio"),
   pnlHistory: () => req<import("./types").PnlHistory>("/api/portfolio/pnl-history"),
   overallPnl: () => req<{ rows: import("./types").OverallPnlRow[] }>("/api/portfolio/overall-pnl"),

@@ -120,7 +120,11 @@ export function Dashboard() {
     enabled: Boolean(activeSymbol),
   });
   const watch = useQuery({ queryKey: ["watch"], queryFn: () => api.watchlist() });
-  const sentiment = useQuery({ queryKey: ["sent"], queryFn: () => api.sentiment() });
+  const sentiment = useQuery({
+    queryKey: ["sent", activeSymbol],
+    queryFn: () => api.sentiment(activeSymbol),
+    enabled: Boolean(activeSymbol),
+  });
   const brokerage = useBrokerage();
   const cert = usePositionCertificate({
     isPaper: !brokerage.usingBrokerage,
@@ -587,22 +591,47 @@ export function Dashboard() {
               aria-expanded={sentOpen}
               onClick={() => setSentOpen((v) => !v)}
             >
-              Market sentiment <span aria-hidden>{sentOpen ? "▾" : "▸"}</span>
+              News · {activeSymbol} <span aria-hidden>{sentOpen ? "▾" : "▸"}</span>
             </button>
             {sentOpen && (
-              <ul className="max-h-56 space-y-3 overflow-auto border-t border-line px-3 py-3 text-sm">
-                {((sentiment.data?.items as SentimentRow[]) ?? []).length === 0 ? (
-                  <li className="text-xs text-faint">
-                    {(sentiment.data as { caveat?: string } | undefined)?.caveat ||
-                      "No live sentiment rows. Open Deep Scan for news flow and chain positioning."}
+              <ul className="max-h-56 space-y-3 overflow-auto border-t border-line px-3 py-3 text-sm" data-testid="sentiment-list">
+                {sentiment.isLoading ? (
+                  <li className="text-xs text-faint" data-testid="sentiment-empty">
+                    Loading news for {activeSymbol}…
+                  </li>
+                ) : sentiment.isError ? (
+                  <li className="text-xs text-faint" data-testid="sentiment-empty">
+                    Sentiment request failed: {(sentiment.error as Error)?.message || "unknown error"}.{" "}
+                    <button type="button" className="text-bronze underline" data-testid="sentiment-retry" onClick={() => sentiment.refetch()}>
+                      Retry
+                    </button>
+                  </li>
+                ) : ((sentiment.data?.items as SentimentRow[]) ?? []).length === 0 ? (
+                  <li className="text-xs text-faint" data-testid="sentiment-empty">
+                    {(sentiment.data as { caveat?: string | null } | undefined)?.caveat ||
+                      (activeSymbol
+                        ? `No recent news for ${activeSymbol} from Alpaca News.`
+                        : "No recent news from Alpaca News.")}{" "}
+                    {sentiment.data?.status === "unavailable" ? (
+                      <button type="button" className="text-bronze underline" data-testid="sentiment-retry" onClick={() => sentiment.refetch()}>
+                        Retry
+                      </button>
+                    ) : null}
                   </li>
                 ) : (
                   ((sentiment.data?.items as SentimentRow[]) ?? []).map((s, i) => (
-                    <li key={i}>
-                      <p className="text-champagne">{s.headline}</p>
-                      <p className="text-xs text-subtle">{s.blurb}</p>
+                    <li key={`${s.published_at}-${i}`}>
+                      {s.url ? (
+                        <a className="text-champagne underline" href={s.url} target="_blank" rel="noopener noreferrer">
+                          {s.headline}
+                        </a>
+                      ) : (
+                        <p className="text-champagne">{s.headline}</p>
+                      )}
+                      {s.blurb ? <p className="text-xs text-subtle">{s.blurb}</p> : null}
                       <p className="text-[10px] text-bronze">
                         {s.source} · {s.published_at}
+                        {s.score_method ? ` · ${s.score_method}` : ""}
                       </p>
                     </li>
                   ))

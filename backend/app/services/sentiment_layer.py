@@ -21,6 +21,7 @@ from app.analysis.news_nlp import score_articles
 from app.analysis.score_bounds import assert_score_in_bounds
 from app.config import Settings
 from app.schemas.market import OptionChain
+from app.services.news_authenticity import no_recent_news_message
 
 WEIGHTS = {"news": 0.40, "options_flow": 0.35, "social": 0.15, "put_call": 0.10}
 
@@ -97,9 +98,13 @@ def _news_tone_sentence(
     news_count: int,
     news_score: float | None,
     sample_headlines: list[str],
+    news_error: str | None = None,
 ) -> str:
     if not news_count or news_score is None:
-        return f"News coverage on {sym} is thin today, so headline sentiment adds limited conviction to the read."
+        reason = (news_error or "").strip()
+        if reason:
+            return f"News for {sym} is unavailable: {reason}."
+        return no_recent_news_message(sym)
 
     tone = "constructive"
     if news_score < -15:
@@ -211,6 +216,7 @@ def _synthesis_paragraph(
     renorm: dict[str, float],
     parts: dict[str, float | None],
     earnings_message: str | None,
+    news_error: str | None = None,
 ) -> str:
     """Readable analyst brief — cites facts without exposing component math."""
     _ = (score_0_100, composite, flow_score, pc_score, renorm, parts, constructive, negative, neutral)
@@ -222,6 +228,7 @@ def _synthesis_paragraph(
             news_count=news_count,
             news_score=news_score,
             sample_headlines=sample_headlines,
+            news_error=news_error,
         )
     )
     sentences.append(
@@ -244,6 +251,8 @@ def _synthesis_paragraph(
         close = f"Taken together, headline tone and options positioning support a {band.lower()} read on {sym}."
     elif band in {"Very Bearish", "Bearish"}:
         close = f"Taken together, headline tone and options positioning skew bearish on {sym}."
+    elif composite is None:
+        close = f"Live sentiment inputs for {sym} are unavailable, so no directional score is assigned."
     else:
         close = f"Overall, news and flow signals are balanced, leaving {sym} in a neutral posture."
     sentences.append(close)
@@ -374,7 +383,13 @@ def _weighted_composite(parts: dict[str, float | None]) -> tuple[float | None, d
     return round(_clamp(score), 1), renorm
 
 
-async def _fetch_alpaca_news(symbol: str, settings: Settings, *, limit: int = 20) -> tuple[list[dict], str | None]:
+async def fetch_alpaca_news(
+    settings: Settings,
+    *,
+    symbol: str | None = None,
+    limit: int = 20,
+) -> tuple[list[dict], str | None]:
+    """Alpaca news rows, unchanged. Empty list plus a reason when the feed cannot be read."""
     if not settings.alpaca_keys_present:
         return [], "News feed unavailable — market data credentials not configured"
     import httpx
@@ -384,24 +399,27 @@ async def _fetch_alpaca_news(symbol: str, settings: Settings, *, limit: int = 20
         "APCA-API-KEY-ID": settings.alpaca_api_key_id,
         "APCA-API-SECRET-KEY": settings.alpaca_api_secret_key,
     }
+    params: dict[str, Any] = {"limit": limit, "include_content": True}
+    if symbol:
+        params["symbols"] = symbol.upper()
     try:
         async with httpx.AsyncClient(timeout=12.0) as client:
-            res = await client.get(
-                url,
-                headers=headers,
-                params={"symbols": symbol.upper(), "limit": limit, "include_content": True},
-            )
+            res = await client.get(url, headers=headers, params=params)
             if res.status_code >= 400:
                 logger.warning("Alpaca news {} -> {}", res.status_code, res.text[:180])
                 return [], f"News feed HTTP {res.status_code}"
             payload = res.json()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Alpaca news failed for {}: {}", symbol, exc)
+        logger.warning("Alpaca news failed for {}: {}", symbol or "market", exc)
         return [], f"News feed error: {exc}"
     news = payload.get("news") if isinstance(payload, dict) else None
     if not isinstance(news, list):
         return [], "News feed returned no articles"
     return news, None
+
+
+async def _fetch_alpaca_news(symbol: str, settings: Settings, *, limit: int = 20) -> tuple[list[dict], str | None]:
+    return await fetch_alpaca_news(settings, symbol=symbol, limit=limit)
 
 
 def _earnings_alert(fundamentals: dict[str, Any] | None) -> dict[str, Any]:
@@ -461,12 +479,20 @@ async def build_sentiment_layer(
     sym = symbol.upper()
     raw_news, news_err = await _fetch_alpaca_news(sym, settings)
     news_score, articles = score_articles(raw_news)
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    if articles and news_score is not None:
+        news_status = "live"
+    elif news_err:
+        news_status = "unavailable"
+    else:
+        news_status = "empty"
     news_block = {
-        "status": "live" if articles else "unavailable",
+        "status": news_status,
         "score": news_score,
         "count": len(articles),
         "method": "lexicon_v1",
-        "source": "news feed" if articles else None,
+        "source": "Alpaca News" if articles else None,
+        "as_of": fetched_at if articles else None,
         "error": news_err,
         "articles": articles,
     }
@@ -510,10 +536,15 @@ async def build_sentiment_layer(
     if notional_skew:
         flow["notional_skew"] = notional_skew
 
-    score_0_100_raw = round((composite + 100.0) / 2.0, 1) if composite is not None else 50.0
-    score_0_100 = assert_score_in_bounds("sentiment_score", score_0_100_raw) or score_0_100_raw
-    band = _sentiment_band(composite)
-    bias = band.lower().replace(" ", "-")
+    score_0_100: float | None
+    if composite is None:
+        score_0_100 = None
+        band = "Unavailable"
+        bias = "unavailable"
+    else:
+        score_0_100 = assert_score_in_bounds("sentiment_score", round((composite + 100.0) / 2.0, 1))
+        band = _sentiment_band(composite)
+        bias = band.lower().replace(" ", "-")
     earnings = _earnings_alert(fundamentals)
     constructive, negative, neutral = _article_tone_counts(articles)
     sample_headlines = [
@@ -551,6 +582,7 @@ async def build_sentiment_layer(
             "put_call": put_call["score"],
         },
         earnings_message=earnings.get("message"),
+        news_error=news_err,
     )
 
     return {
@@ -573,7 +605,7 @@ async def build_sentiment_layer(
             "article_count": news_block["count"],
             "flow_source": flow.get("source"),
             "put_call_ratio": put_call.get("ratio"),
-            "as_of": datetime.now(timezone.utc).isoformat(),
+            "as_of": fetched_at,
         },
         "narrative": narrative,
     }

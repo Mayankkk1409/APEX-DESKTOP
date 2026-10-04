@@ -5,10 +5,13 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import Settings, get_settings
 from app.database import get_db
 from app.deps import current_user, get_adapter
-from app.models.trading import SentimentItem, WatchlistItem
+from app.models.trading import WatchlistItem
 from app.models.user import User
+from app.services.news_authenticity import map_provider_news, no_recent_news_message
+from app.services.sentiment_layer import fetch_alpaca_news
 
 router = APIRouter(tags=["watchlist"])
 
@@ -48,33 +51,45 @@ async def del_watch(symbol: str, user: User = Depends(current_user), db: AsyncSe
 
 
 @router.get("/sentiment")
-async def sentiment(db: AsyncSession = Depends(get_db)) -> dict:
-    """Dashboard feed. Never invent headlines — empty list when the worker has nothing."""
-    rows = (await db.scalars(select(SentimentItem).order_by(SentimentItem.published_at.desc()).limit(20))).all()
-    if not rows:
+async def sentiment(symbol: str | None = None, settings: Settings = Depends(get_settings)) -> dict:
+    """Live Alpaca News for one symbol. Headlines are the provider payload, not a local cache."""
+    sym = symbol.strip().upper() if symbol and symbol.strip() else None
+    raw_news, err = await fetch_alpaca_news(settings, symbol=sym, limit=20)
+    if err:
         return {
             "items": [],
             "fear_greed": None,
             "label": "unavailable",
             "status": "unavailable",
-            "caveat": "No live sentiment rows stored. Deep Scan uses Alpaca news + chain flow instead.",
+            "caveat": err,
+            "symbol": sym,
+            "score_method": None,
         }
-    scores = [r.score for r in rows if r.score is not None]
+    rows = map_provider_news(raw_news)
+    if not rows:
+        caveat = (
+            "Alpaca News returned articles that were missing a headline, source, or timestamp."
+            if raw_news
+            else no_recent_news_message(sym)
+        )
+        return {
+            "items": [],
+            "fear_greed": None,
+            "label": "unavailable" if raw_news else "neutral",
+            "status": "unavailable" if raw_news else "empty",
+            "caveat": caveat,
+            "symbol": sym,
+            "score_method": None,
+        }
+    scores = [r["score"] for r in rows if isinstance(r.get("score"), (int, float))]
     fear = round(sum(scores) / len(scores)) if scores else None
     return {
-        "items": [
-            {
-                "headline": r.headline,
-                "blurb": r.blurb,
-                "source": r.source,
-                "signal": r.signal,
-                "score": r.score,
-                "published_at": r.published_at.isoformat(),
-                "symbol": r.symbol,
-            }
-            for r in rows
-        ],
+        "items": rows,
         "fear_greed": fear,
         "label": "neutral" if fear is None else ("greed" if fear >= 60 else "fear" if fear <= 40 else "neutral"),
         "status": "live",
+        "caveat": None,
+        "symbol": sym,
+        "score_method": "lexicon_v1",
+        "news_provider": "Alpaca News",
     }

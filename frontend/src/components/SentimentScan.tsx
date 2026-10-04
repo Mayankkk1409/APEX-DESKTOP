@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import { humanizeLabel } from "../lib/humanizeLabel";
-import type { SentimentArticle, SentimentLayer } from "../types";
+import type { SentimentLayer } from "../types";
 
 function dash(v: string | number | null | undefined): string {
   if (v === null || v === undefined || v === "") return "—";
@@ -41,13 +41,6 @@ function sentimentBand(data: SentimentLayer): string {
 function fmtPublished(at: string | null | undefined): string {
   if (!at) return "—";
   return at.slice(0, 16).replace("T", " ");
-}
-
-function openArticle(article: SentimentArticle) {
-  const url = article.url?.trim();
-  if (url) {
-    window.open(url, "_blank", "noopener,noreferrer");
-  }
 }
 
 export function SentimentScan({
@@ -143,6 +136,7 @@ export function SentimentScan({
         >
           <span className="sf-alert-kicker">{alert.active ? "Earnings alert" : "Earnings context"}</span>
           <p>{alert.message}</p>
+          {alert.source ? <p className="sf-panel-note">{alert.source}</p> : null}
         </div>
       ) : null}
 
@@ -189,18 +183,37 @@ export function SentimentScan({
         <h2>
           News <span>{news.count}</span>
         </h2>
+        <p className="sf-panel-note">
+          {(news.source || "Alpaca News")} · {news.method || "lexicon_v1"}
+        </p>
         {!news.articles?.length ? (
-          <p className="sf-empty-inline">{news.error || "No news articles for this symbol."}</p>
+          <p className="sf-empty-inline" data-testid="sentiment-news-empty">
+            {news.error ? (
+              <>
+                {news.error.endsWith(".") ? news.error : `${news.error}.`}{" "}
+                <button type="button" className="sf-news-link" data-testid="sentiment-news-retry" onClick={() => q.refetch()}>
+                  Retry
+                </button>
+              </>
+            ) : (
+              `No recent news for ${symbol} from Alpaca News.`
+            )}
+          </p>
         ) : (
           <ul className="sf-news-list">
             {news.articles.map((a, i) => (
               <li key={`${a.published_at}-${i}`}>
                 <div className="sf-news-main">
-                  <button type="button" className="sf-news-link" onClick={() => openArticle(a)}>
-                    {a.headline || "Untitled"}
-                  </button>
+                  {a.url ? (
+                    <a className="sf-news-link" href={a.url} target="_blank" rel="noopener noreferrer">
+                      {a.headline || "Headline unavailable"}
+                    </a>
+                  ) : (
+                    <span className="sf-news-link">{a.headline || "Headline unavailable"}</span>
+                  )}
                 </div>
                 <div className="sf-news-meta">
+                  <span>{a.source || news.source || "—"}</span>
                   <span>{fmtPublished(a.published_at)}</span>
                 </div>
               </li>
