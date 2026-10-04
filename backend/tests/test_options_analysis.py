@@ -787,13 +787,14 @@ def test_recommended_contract_can_be_atm_when_it_scores_best() -> None:
     assert rec["side"] == "call"
 
 
-def test_no_trade_strategy_yields_no_recommended_contract() -> None:
+def test_advisory_label_is_replaced_with_a_real_contract() -> None:
     out = analyse(full_chain(), hv=0.30, selected_strategy="NO TRADE — Insufficient Conviction")
-    assert out["recommendedContract"] is None
+    assert out["recommendedContract"] is not None
+    assert out["recommendedContract"]["side"] in {"call", "put"}
 
 
 def test_apply_recommended_contract_refocuses_greek_cards() -> None:
-    base = analyse(full_chain(), hv=0.30, selected_strategy="NO TRADE — Insufficient Conviction")
+    base = analyse(full_chain(), hv=0.30)
     assert base["recommendedContract"] is None
     focused = apply_recommended_contract(
         base,
@@ -838,11 +839,11 @@ def test_blocked_tier_strips_recommended_contract_and_surfaces_message() -> None
 
 
 def test_caution_tier_keeps_recommended_highlight() -> None:
-    base = analyse(full_chain(), hv=0.30, selected_strategy="NO TRADE — Insufficient Conviction")
+    base = analyse(full_chain(), hv=0.30)
     out = apply_execution_score_tiers(
         base,
         65.0,
-        selected_strategy="NO TRADE — Insufficient Conviction",
+        selected_strategy="Bull Call Spread",
         direction="bullish",
         vol_signal="buy_premium",
     )
@@ -851,7 +852,7 @@ def test_caution_tier_keeps_recommended_highlight() -> None:
 
 
 def test_auto_exec_tier_keeps_recommended_for_full_doc_strategy() -> None:
-    base = analyse(full_chain(), hv=0.30, selected_strategy="NO TRADE — Insufficient Conviction")
+    base = analyse(full_chain(), hv=0.30)
     out = apply_execution_score_tiers(
         base,
         81.0,

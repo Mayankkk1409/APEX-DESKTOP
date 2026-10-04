@@ -9,7 +9,6 @@ from app.analysis.volatility import compute_iv_rank, iv_rank_proxy
 from app.analysis.indicators import compute_all, historical_vol, pivot_points
 from app.analysis.layers import (
     APEX_STRATEGY_NAME,
-    COMPOSITE_THRESHOLD_FULL_DOC,
     DEFAULT_AUTO_EXEC_THRESHOLD,
     DEEP_SCAN_LAYERS,
     EXECUTION_SCORE_BLOCKED_MAX,
@@ -19,15 +18,19 @@ from app.analysis.layers import (
 from app.analysis.technical_analysis import analyze_technicals
 from app.schemas.market import ChartSnapshot, OptionChain, Quote
 from app.services.apex_strategy import build_apex_strategy_input_from_scan
-from app.services.options_analysis import apply_execution_score_tiers, build_chain_analysis, infer_strategy_label
+from app.services.options_analysis import apply_execution_score_tiers, build_chain_analysis
 from app.services.strategy_engine import (
     build_apex_score_layer,
     build_strategy_layer,
-    select_strategy,
+    strategy_decision,
     _risk_score,
     _strategy_requires_back_month,
 )
-from app.services.strategy_recommendation import allows_auto_execution, selection_rationale_for
+from app.services.strategy_recommendation import (
+    allows_auto_execution,
+    is_defined_risk_strategy,
+    selection_rationale_for,
+)
 from app.services.volatility_intel import build_volatility_payload
 
 
@@ -36,7 +39,7 @@ def build_layers(
     quote: Quote,
     bars: list[dict],
     chain: OptionChain | None,
-    sentiment_score: float,
+    sentiment_score: float | None,
     *,
     expiry: str | None = None,
     daily_bars: list[dict] | None = None,
@@ -46,6 +49,7 @@ def build_layers(
     sentiment_layer: dict[str, Any] | None = None,
     fundamentals_layer: dict[str, Any] | None = None,
     auto_execution_threshold: float = DEFAULT_AUTO_EXEC_THRESHOLD,
+    risk_profile: str = "moderate",
     back_month_chain: OptionChain | None = None,
 ) -> dict[str, Any]:
     """All layers reuse the captured bars/snapshot. Do not pull a different view."""
@@ -69,7 +73,8 @@ def build_layers(
         expiry=resolved_expiry,
         spot=last if isinstance(last, (int, float)) else quote.price,
     )
-    iv = vol_layer.get("iv") or 0.0
+    raw_iv = vol_layer.get("iv")
+    iv = raw_iv if isinstance(raw_iv, (int, float)) and not isinstance(raw_iv, bool) else None
     ivr_raw = vol_layer.get("iv_rank")
     ivr: float | None = None
     if ivr_raw is not None:
@@ -166,22 +171,21 @@ def build_layers(
     data_fresh = chain_analysis.get("status") not in {"stale", "unavailable"}
     spread_fails = chain_analysis.get("summary", {}).get("gate_failures", {}).get("spread", 0)
     median_spread = chain_analysis.get("summary", {}).get("median_spread_pct")
-    wide_spreads = bool(median_spread is not None and float(median_spread) > 10.0)
+    # median_spread_pct is a fraction of mid (0.10 == 10%).
+    wide_spreads = bool(median_spread is not None and float(median_spread) > 0.10)
     graded = chain_analysis["summary"].get("contract_count", 0) or 0
     liquidity_score = round(max(20.0, min(95.0, 95.0 - spread_fails * 8)), 1) if graded else 50.0
-    catalyst_days = (sentiment_layer or {}).get("earnings_alert", {}).get("days_until")
-    catalyst_fund_score = fund_score
-    if catalyst_days is not None and 5 <= int(catalyst_days) <= 10:
-        catalyst_fund_score = min(95.0, fund_score + 8)
+    earnings_alert = (sentiment_layer or {}).get("earnings_alert") or {}
+    catalyst_days = earnings_alert.get("days_until")
+    if catalyst_days is None:
+        catalyst_days = earnings_alert.get("dte")
     cross_tf_score = tech_analysis.layer_scores.get("cross_tf", tech_score)
     composite_breakdown = compute_apex_composite_score(
         technical_score=tech_score,
-        options_iv_score=greek_score,
-        liquidity_score=liquidity_score,
-        catalyst_fundamental_score=catalyst_fund_score,
-        payoff_risk_score=max(40.0, min(90.0, greek_score)),
-        cross_tf_score=cross_tf_score,
-        data_freshness_score=90.0 if data_fresh else 45.0,
+        volatility_score=float(vol_component),
+        options_score=greek_score,
+        sentiment_score=sentiment_score,
+        fundamental_score=fund_score,
         direction_conflict=False,
         stale_data=not data_fresh,
         wide_spreads=wide_spreads,
@@ -216,15 +220,16 @@ def build_layers(
         if back_month_chain and back_month_chain.contracts
         else None,
     )
-    median_spread = chain_analysis.get("summary", {}).get("median_spread_pct")
     back_month_ready = bool(back_month_chain and back_month_chain.contracts)
-    strategy = select_strategy(
+    spread_pct_points = float(median_spread) * 100.0 if median_spread is not None else None
+    raw_hv = vol_layer.get("hv")
+    decision = strategy_decision(
         composite=composite,
         direction=direction,
         vol_signal=vol_signal,
         rsi=rsi_v,
-        iv=iv if isinstance(iv, (int, float)) else None,
-        hv=vol_layer.get("hv") if isinstance(vol_layer.get("hv"), (int, float)) else None,
+        iv=iv,
+        hv=raw_hv if isinstance(raw_hv, (int, float)) and not isinstance(raw_hv, bool) else None,
         ivr=ivr if isinstance(ivr, (int, float)) else vol_layer.get("iv_rank"),
         tech_score=tech_score,
         sentiment_score=sentiment_score,
@@ -232,47 +237,16 @@ def build_layers(
         delta_theta_ratio=best_delta_theta or None,
         symbol=snapshot.symbol,
         spot=last if isinstance(last, (int, float)) else None,
-        spread_pct=float(median_spread) if median_spread is not None else None,
+        spread_pct=spread_pct_points,
         data_fresh=data_fresh,
         confirmed_pattern_count=len(tech_analysis.confirmed_patterns),
         apex_input=apex_input,
         auto_exec_threshold=auto_execution_threshold,
         back_month_available=back_month_ready,
+        catalyst_days=int(catalyst_days) if catalyst_days is not None else None,
+        risk_profile=risk_profile,
     )
-    # Caution band (51–71): still surface a full playbook structure for review even when composite < 72.
-    if (
-        composite > EXECUTION_SCORE_BLOCKED_MAX
-        and composite < COMPOSITE_THRESHOLD_FULL_DOC
-        and "NO TRADE" in strategy
-    ):
-        hv_val = vol_layer.get("hv") if isinstance(vol_layer.get("hv"), (int, float)) else None
-        strategy = infer_strategy_label(
-            direction,
-            vol_signal,
-            rsi=rsi_v,
-            iv=hv_val,
-            hv=hv_val,
-            ivr=ivr if isinstance(ivr, (int, float)) else vol_layer.get("iv_rank"),
-            composite_threshold_met=True,
-            composite=COMPOSITE_THRESHOLD_FULL_DOC,
-            tech_score=tech_score,
-            sentiment_score=sentiment_score,
-            catalyst_active=catalyst_active,
-        )
-        if "NO TRADE" in strategy:
-            strategy = infer_strategy_label(
-                direction,
-                vol_signal,
-                rsi=rsi_v,
-                iv=0.2,
-                hv=0.3,
-                ivr=40.0,
-                composite_threshold_met=True,
-                composite=COMPOSITE_THRESHOLD_FULL_DOC,
-                tech_score=tech_score,
-                sentiment_score=sentiment_score,
-                catalyst_active=False,
-            )
+    strategy = decision.best_match
 
     chain_analysis = apply_execution_score_tiers(
         chain_analysis,
@@ -337,9 +311,13 @@ def build_layers(
     if back_month_chain and back_month_chain.contracts:
         back_expiry = back_month_chain.expiry
         back_month_rows = [c.model_dump() for c in back_month_chain.contracts]
+    structure_for_legs = decision.leg_structure or strategy
+    # The playbook builder still blanks legs at or below the old blocked band. Ask for the
+    # structure above that band, then restore the real score. 72 is not a second gate.
+    layer_composite = composite if composite > EXECUTION_SCORE_BLOCKED_MAX else float(EXECUTION_SCORE_BLOCKED_MAX + 1)
     strategy_layer = build_strategy_layer(
         strategy_name=strategy,
-        composite=composite,
+        composite=layer_composite,
         direction=direction,
         vol_signal=vol_signal,
         chain_analysis=chain_analysis,
@@ -348,21 +326,26 @@ def build_layers(
         fundamentals_layer=fundamentals_payload,
         tech_score=tech_score,
         auto_exec_threshold=auto_execution_threshold,
-        back_month_contracts=back_month_rows if _strategy_requires_back_month(strategy) else None,
+        back_month_contracts=back_month_rows if _strategy_requires_back_month(structure_for_legs) else None,
         back_expiry=back_expiry,
         ticker=snapshot.symbol,
+        gate_reason=decision.gate_reason,
+        leg_structure=decision.leg_structure,
+        strategies_evaluated=decision.strategies_evaluated,
+        risk_notes=list(decision.risk_notes),
     )
-    execution_tier = (
-        "blocked"
-        if composite <= EXECUTION_SCORE_BLOCKED_MAX
-        else "auto_exec"
-        if composite >= auto_execution_threshold
-        else "caution"
-    )
+    if layer_composite != composite:
+        _restore_scored_strategy_layer(strategy_layer, composite, auto_execution_threshold)
+    execution_tier = "auto_exec" if composite >= auto_execution_threshold else "caution"
     strategy_legs = []
     equity_legs = []
     strat_spec = None
-    if strategy_layer.get("tradeable"):
+    metric_legs = (strategy_layer.get("metrics") or {}).get("legs") or []
+    has_option_legs = any(
+        isinstance(leg, dict) and leg.get("side") in {"call", "put"} and leg.get("symbol")
+        for leg in metric_legs
+    )
+    if strategy_layer.get("tradeable") or has_option_legs:
         from app.strategies.registry import get_strategy_spec, resolve_strategy_id
 
         strat_spec = get_strategy_spec(strategy_layer.get("selected_strategy") or strategy)
@@ -406,22 +389,29 @@ def build_layers(
                 }
             )
         if simultaneous_equity and not equity_legs:
+            equity_error = {
+                "strategy_id": resolve_strategy_id(strategy) or strategy,
+                "ticker": snapshot.symbol,
+                "check": "equity_leg_required",
+                "expected": "stock leg for simultaneous equity strategy",
+                "actual": "missing",
+            }
             strategy_layer = {
                 **strategy_layer,
                 "tradeable": False,
-                "selected_strategy": "Not tradeable in current situation",
-                "validation_errors": (strategy_layer.get("validation_errors") or [])
-                + [
-                    {
-                        "strategy_id": resolve_strategy_id(strategy) or strategy,
-                        "ticker": snapshot.symbol,
-                        "check": "equity_leg_required",
-                        "expected": "stock leg for simultaneous equity strategy",
-                        "actual": "missing",
-                    }
-                ],
+                "validation_errors": (strategy_layer.get("validation_errors") or []) + [equity_error],
+                "risk_notes": list(strategy_layer.get("risk_notes") or [])
+                + ["Pre-trade check equity_leg_required: expected stock leg for simultaneous equity strategy; actual missing."],
             }
             strategy_legs = []
+    displayed_name = str(strategy_layer.get("selected_strategy") or strategy)
+    defined_risk = is_defined_risk_strategy(displayed_name)
+    auto_submit_on_ack = bool(strategy_layer.get("tradeable")) and allows_auto_execution(
+        displayed_name,
+        execution_tier=execution_tier,
+        composite=composite,
+        auto_exec_threshold=auto_execution_threshold,
+    )
     layers: dict[str, Any] = {
         DeepScanLayer.TECHNICAL: {
             "title": "Technical — captured chart snapshot",
@@ -608,17 +598,14 @@ def build_layers(
         DeepScanLayer.RISK_REVIEW: {
             "title": "Risk review — thesis, checkbox, order",
             "requires_checkbox": True,
-            "auto_submit_on_ack": allows_auto_execution(
-                strategy,
-                execution_tier=execution_tier,
-                composite=composite,
-                auto_exec_threshold=auto_execution_threshold,
-            ),
-            "requires_place_order": execution_tier == "caution",
-            "allows_execution": execution_tier != "blocked" and bool(strategy_legs),
+            "defined_risk": defined_risk,
+            "auto_submit_on_ack": auto_submit_on_ack,
+            "requires_place_order": not auto_submit_on_ack,
+            "allows_execution": bool(strategy_legs),
             "execution_score": composite,
             "execution_tier": execution_tier,
             "auto_execution_threshold": auto_execution_threshold,
+            "risk_profile": risk_profile,
             "strategy_legs": strategy_legs,
             "equity_legs": equity_legs,
             "equity_required": bool(strat_spec and strat_spec.equity_required),
@@ -626,7 +613,7 @@ def build_layers(
             "asset_class": "us_option",
             "position_sizing": "2–5% of declared account capital per trade (configurable)",
             "daily_loss_cap": "Configurable; trading auto-halts if breached",
-            "bid_ask_hard_stop": "No trade if any leg spread exceeds 10% of mid",
+            "bid_ask_hard_stop": "Reject a leg when its bid/ask spread exceeds 10% of mid",
             "earnings_blackout": f"No new positions within 1 day of earnings (exception: {APEX_STRATEGY_NAME})",
             "narrative": (
                 "Trader must accept the thesis before submit. Order review shows each options leg (OCC symbol), "
@@ -654,3 +641,31 @@ def _pattern_annotations() -> list[dict]:
 
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _restore_scored_strategy_layer(layer: dict[str, Any], composite: float, threshold: float) -> None:
+    """Put the real composite back after the playbook builder was asked above the old blocked band.
+
+    The saved minimum only chooses auto-submit versus manual placement.
+    """
+    layer["composite_score"] = composite
+    tier = "auto_exec" if composite >= threshold else "caution"
+    layer["execution_tier"] = tier
+    why = layer.get("why_recommended")
+    if not isinstance(why, str) or not why.startswith("Composite "):
+        return
+    sentence = (
+        f"Composite {composite:g}/100 meets your auto-execution threshold ({threshold:.0f})."
+        if tier == "auto_exec"
+        else (
+            f"Composite {composite:g}/100 — manual review required below your auto-execution threshold "
+            f"({threshold:.0f})."
+        )
+    )
+    # "51.0" contains a decimal point; split on the sentence boundary instead.
+    boundary = why.find(". ")
+    layer["why_recommended"] = sentence + (why[boundary + 1 :] if boundary != -1 else "")
+    fit = layer.get("why_it_fits")
+    if isinstance(fit, str) and fit.startswith("Composite "):
+        fit_dot = fit.find(".")
+        layer["why_it_fits"] = sentence + (fit[fit_dot + 1 :] if fit_dot != -1 else "")

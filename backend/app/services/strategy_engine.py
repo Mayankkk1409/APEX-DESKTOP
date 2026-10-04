@@ -13,16 +13,20 @@ from app.analysis.layers import (
     EXECUTION_SCORE_BLOCKED_MAX,
 )
 from app.services.strategy_recommendation import (
+    DEFINED_RISK_PLAYBOOK,
     MarketSnapshot,
+    StrategyRecommendation,
     TechnicalAnalysisResultRef,
+    auto_exec_status_line,
+    extreme_iv_overhang,
+    format_vol_percent,
+    is_defined_risk_strategy,
     recommend_strategy,
+    selection_rationale_for,
 )
 from app.strategies.payoffs import apex_strategy_payoff, calendar_spread_payoff, long_straddle_payoff
 from app.strategies.registry import STRATEGY_REGISTRY, get_strategy_spec, resolve_strategy_id
-from app.services.strategy_recommendation import selection_rationale_for
 from app.strategies.validator import assert_strategy_handler, validate_strategy_output
-
-NOT_TRADEABLE_COPY = "Not tradeable in current situation"
 
 
 def _execution_tier(
@@ -114,14 +118,6 @@ PLAYBOOK: dict[str, dict[str, str]] = {
         "summary": "Long ATM call and put when IV is cheap and a large move is expected.",
         "execution": "Buy ATM call and ATM put same expiry. Exit on expansion or time stop.",
     },
-    "NO TRADE — Insufficient Conviction": {
-        "summary": "Composite score below the 72 execution threshold — monitor only.",
-        "execution": "No new positions. Re-run scan when technical alignment and IV regime improve.",
-    },
-    "NO TRADE — Wait for IV Crush": {
-        "summary": "Extreme IV overhang — edge is destroyed by premium crush risk.",
-        "execution": "Stand aside until front-month IV normalizes toward HV.",
-    },
 }
 
 
@@ -200,7 +196,8 @@ def compute_strategy_metrics(
         "legs": [],
         "per_contract_multiplier": contract_multiplier,
     }
-    if "NO TRADE" in strategy_name or not contracts:
+    spec_gate = get_strategy_spec(strategy_name)
+    if not contracts or (spec_gate is not None and (spec_gate.risk_type == "advisory" or spec_gate.leg_count == 0)):
         return empty
 
     from app.strategies.metrics_builder import from_display_name
@@ -682,7 +679,7 @@ def compute_strategy_metrics(
     return metrics
 
 
-def select_strategy(
+def strategy_decision(
     *,
     composite: float,
     direction: str,
@@ -703,8 +700,11 @@ def select_strategy(
     auto_exec_threshold: float = DEFAULT_AUTO_EXEC_THRESHOLD,
     apex_input: Any = None,
     back_month_available: bool = False,
-) -> StrategyName:
-    """Eligibility matrix from Full Document §9.1 — deterministic rule-based selection."""
+    catalyst_days: int | None = None,
+    risk_profile: str = "moderate",
+    structure_limits: frozenset[str] | None = None,
+) -> StrategyRecommendation:
+    """One Best Match. Risk notes stay beside the structure and do not replace it."""
     from app.services.apex_strategy import ApexStrategyInput
 
     market = MarketSnapshot(
@@ -734,10 +734,63 @@ def select_strategy(
         apex_input=apex_input if isinstance(apex_input, ApexStrategyInput) else None,
         auto_exec_threshold=auto_exec_threshold,
         back_month_available=back_month_available,
+        catalyst_days=catalyst_days,
+        risk_profile=risk_profile,
+        structure_limits=structure_limits,
     )
-    if rec.best_match == "No Trade / Insufficient Conviction":
-        return "NO TRADE — Insufficient Conviction"
-    return rec.best_match
+    return rec
+
+
+def select_strategy(
+    *,
+    composite: float,
+    direction: str,
+    vol_signal: str,
+    rsi: float | None = None,
+    iv: float | None = None,
+    hv: float | None = None,
+    ivr: float | None = None,
+    tech_score: float | None = None,
+    sentiment_score: float | None = None,
+    catalyst_active: bool = False,
+    delta_theta_ratio: float | None = None,
+    symbol: str = "",
+    spot: float | None = None,
+    spread_pct: float | None = None,
+    data_fresh: bool = True,
+    confirmed_pattern_count: int = 0,
+    auto_exec_threshold: float = DEFAULT_AUTO_EXEC_THRESHOLD,
+    apex_input: Any = None,
+    back_month_available: bool = False,
+    catalyst_days: int | None = None,
+    risk_profile: str = "moderate",
+    structure_limits: frozenset[str] | None = None,
+) -> StrategyName:
+    """Eligibility matrix from Full Document §9.1 — deterministic rule-based selection."""
+    return strategy_decision(
+        composite=composite,
+        direction=direction,
+        vol_signal=vol_signal,
+        rsi=rsi,
+        iv=iv,
+        hv=hv,
+        ivr=ivr,
+        tech_score=tech_score,
+        sentiment_score=sentiment_score,
+        catalyst_active=catalyst_active,
+        delta_theta_ratio=delta_theta_ratio,
+        symbol=symbol,
+        spot=spot,
+        spread_pct=spread_pct,
+        data_fresh=data_fresh,
+        confirmed_pattern_count=confirmed_pattern_count,
+        auto_exec_threshold=auto_exec_threshold,
+        apex_input=apex_input,
+        back_month_available=back_month_available,
+        catalyst_days=catalyst_days,
+        risk_profile=risk_profile,
+        structure_limits=structure_limits,
+    ).best_match
 
 
 def _risk_score(composite: float, chain_analysis: dict[str, Any]) -> float:
@@ -1069,8 +1122,10 @@ def _volatility_apex_section(
         "buy_premium ≈ 80 (IV cheap — favor long vol), sell_premium ≈ 72 (IV rich — favor credits), "
         "fair ≈ 55 (no strong vol edge)."
     )
-    if iv is not None and hv is not None:
-        measured += f" ATM / contract IV {_apex_fmt(iv, 3)} vs 30D HV {_apex_fmt(hv, 3)}."
+    iv_pct = format_vol_percent(iv)
+    hv_pct = format_vol_percent(hv)
+    if iv_pct and hv_pct:
+        measured += f" ATM / contract IV {iv_pct} vs 30D HV {hv_pct}."
 
     score_meaning = (
         f"Volatility component score {vol_score}/100 ({band}) with signal '{signal}'. "
@@ -1087,9 +1142,8 @@ def _volatility_apex_section(
 
     weight_para = (
         f"Weighted contribution: {contribution} points ({int(weight * 100)}% weight — largest after "
-        "technicals). Volatility regime often determines whether §9.1 selects iron condors versus bull "
-        "call spreads; misalignment here is a common reason composite clears 72 but strategy still reads "
-        "'NO TRADE — Wait for IV Crush' when IV >> HV."
+        "technicals). Volatility regime often determines whether the playbook prefers iron condors or debit spreads. "
+        "IV versus HV is a scoring input and a risk note. It does not replace the recommended structure."
     )
 
     if signal == "buy_premium":
@@ -1135,10 +1189,36 @@ def _volatility_apex_section(
 
 def _sentiment_apex_section(
     *,
-    sentiment_score: float,
+    sentiment_score: float | None,
     weight: float,
     sentiment_layer: dict[str, Any],
 ) -> dict[str, Any]:
+    components = sentiment_layer.get("components") or {}
+    news = components.get("news") or {}
+    if sentiment_score is None:
+        reason = news.get("error") or "Live news and options flow did not produce a score."
+        section_body = _apex_section_payload(
+            paragraphs=[
+                "Sentiment is omitted from this composite. No neutral score is substituted when the live feed is empty.",
+                str(reason),
+            ],
+            interpretation=(
+                "Actionable view: ignore sentiment until a live score exists. Do not treat a missing read as neutral."
+            ),
+            breakdown=[
+                {"label": "0–100 scale", "value": None, "note": "Unavailable"},
+                {"label": "News source", "value": news.get("source"), "note": news.get("as_of") or news.get("status")},
+            ],
+        )
+        return {
+            "id": "sentiment",
+            "title": "Sentiment",
+            "score": None,
+            "weight": 0.0,
+            "weighted_contribution": 0.0,
+            **section_body,
+        }
+    assert sentiment_score is not None
     components = sentiment_layer.get("components") or {}
     news = components.get("news") or {}
     flow = components.get("options_flow") or {}
@@ -1407,7 +1487,7 @@ def build_apex_score_layer(
     tech_score: float,
     vol_score: float,
     greek_score: float,
-    sentiment_score: float,
+    sentiment_score: float | None,
     fund_score: float,
     risk_score: float,
     technical_narrative: str,
@@ -1419,97 +1499,78 @@ def build_apex_score_layer(
     technical_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     weights = dict(APEX_COMPOSITE_WEIGHTS)
-    # Map encyclopedia keys to section builders (legacy section ids preserved for API)
-    section_weights = {
-        "technicals": weights["technical"],
-        "options": weights["options_iv"],
-        "liquidity": weights["liquidity"],
-        "catalyst_fundamental": weights["catalyst_fundamental"],
-        "payoff_risk": weights["payoff_risk"],
-        "cross_tf": weights["cross_tf"],
-        "data_freshness": weights["data_freshness"],
-    }
-    liquidity_score = float(chain_analysis.get("summary", {}).get("liquidity_score") or greek_score)
-    cross_tf_score = float(technical_context.get("cross_tf_score") or tech_score) if technical_context else tech_score
-    data_freshness_score = float(chain_analysis.get("data_freshness_score") or 85.0)
-    payoff_risk_score = risk_score
-    catalyst_fund_score = fund_score
     sections = [
         _technicals_apex_section(
             tech_score=tech_score,
-            weight=section_weights["technicals"],
+            weight=weights["technicals"],
             direction=direction,
             technical_narrative=technical_narrative,
             technical_context=technical_context,
         ),
         _options_apex_section(
             greek_score=greek_score,
-            weight=section_weights["options"],
+            weight=weights["options"],
             chain_analysis=chain_analysis,
         ),
         _volatility_apex_section(
             vol_score=vol_score,
-            weight=section_weights["options"] * 0.5,
+            weight=weights["volatility"],
             vol_layer=vol_layer,
         ),
         _sentiment_apex_section(
             sentiment_score=sentiment_score,
-            weight=section_weights["catalyst_fundamental"] * 0.5,
+            weight=weights["sentiment"],
             sentiment_layer=sentiment_layer,
         ),
         _fundamentals_apex_section(
-            fund_score=catalyst_fund_score,
-            weight=section_weights["catalyst_fundamental"] * 0.5,
+            fund_score=fund_score,
+            weight=weights["fundamentals"],
             fundamentals_layer=fundamentals_layer,
         ),
         _risk_apex_section(
-            risk_score=payoff_risk_score,
+            risk_score=risk_score,
             composite=composite,
             chain_analysis=chain_analysis,
         ),
     ]
 
-    tech_contrib = round(tech_score * section_weights["technicals"], 1)
-    opt_contrib = round(greek_score * section_weights["options"], 1)
-    liq_contrib = round(liquidity_score * section_weights["liquidity"], 1)
-    cat_contrib = round(catalyst_fund_score * section_weights["catalyst_fundamental"], 1)
-    payoff_contrib = round(payoff_risk_score * section_weights["payoff_risk"], 1)
-    cross_contrib = round(cross_tf_score * section_weights["cross_tf"], 1)
-    fresh_contrib = round(data_freshness_score * section_weights["data_freshness"], 1)
-    vol_contrib = round(vol_score * section_weights["options"] * 0.5, 1)
-    sent_contrib = round(sentiment_score * section_weights["catalyst_fundamental"] * 0.5, 1)
-    fund_contrib = round(fund_score * section_weights["catalyst_fundamental"] * 0.5, 1)
+    applied = ((technical_context or {}).get("composite_breakdown") or {}).get("weights") or weights
+    tech_contrib = round(tech_score * applied["technicals"], 1)
+    opt_contrib = round(greek_score * applied["options"], 1)
+    vol_contrib = round(vol_score * applied["volatility"], 1)
+    sent_contrib = 0.0 if sentiment_score is None else round(sentiment_score * applied["sentiment"], 1)
+    fund_contrib = round(fund_score * applied["fundamentals"], 1)
+    sent_label = "unavailable (omitted)" if sentiment_score is None else f"{sentiment_score} ({sent_contrib} pts)"
     clears = composite >= COMPOSITE_THRESHOLD_FULL_DOC
 
     synthesis_parts = [
         (
             f"APEX Composite Score {composite}/100 synthesizes weighted pillars: "
-            f"technicals {tech_score} ({tech_contrib} pts), options/IV {greek_score} ({opt_contrib} pts), "
-            f"liquidity {liquidity_score:.0f} ({liq_contrib} pts), catalyst/fundamental {catalyst_fund_score:.0f} ({cat_contrib} pts), "
-            f"payoff/risk {payoff_risk_score:.0f} ({payoff_contrib} pts), cross-TF {cross_tf_score:.0f} ({cross_contrib} pts), "
-            f"data freshness {data_freshness_score:.0f} ({fresh_contrib} pts)."
+            f"technicals {tech_score} ({tech_contrib} pts), volatility {vol_score} ({vol_contrib} pts), "
+            f"Greeks quality {greek_score} ({opt_contrib} pts), sentiment {sent_label}, "
+            f"fundamentals {fund_score} ({fund_contrib} pts). Risk is advisory and weighted 0."
         ),
         (
             f"Full Document §8 execution threshold is ≥ {COMPOSITE_THRESHOLD_FULL_DOC}; auto-exec default "
             f"threshold is {DEFAULT_AUTO_EXEC_THRESHOLD}. Directional bias on this scan is {direction}. "
-            f"Composite formula: 35% technical + 20% options/IV + 15% liquidity + 10% catalyst/fundamental "
-            f"+ 10% payoff/risk + 5% cross-TF + 5% data freshness."
+            f"Composite formula: 30% technicals + 25% volatility + 20% Greeks quality + 15% sentiment "
+            f"+ 10% fundamentals."
         ),
     ]
     if clears:
         synthesis_parts.append(
-            "Threshold met — composite clears the execution gate. Proceed to strategy selection (§9.1) "
-            "and confirm chain recommended contract, risk tier, and live spreads before order entry."
+            "Composite is recorded. The saved auto-execution minimum decides acknowledgement versus "
+            "manual placement. Confirm the recommended structure and live spreads before order entry."
         )
     else:
         synthesis_parts.append(
-            "Below execution threshold — insufficient conviction for automated playbook selection. "
-            "Monitor for improved alignment across technicals and vol, or reduced spread failures on the chain."
+            "Composite is recorded for review. The recommended structure on the strategy slide stays visible; "
+            "the saved auto-execution minimum decides acknowledgement versus manual placement."
         )
 
     synthesis_interpretation = (
-        "Hold execution until composite ≥ 72 with clean §5 gates unless operating manual half-size in the "
-        "caution band with explicit risk acceptance."
+        "The saved auto-execution minimum decides acknowledgement versus manual placement. "
+        "The recommended structure stays visible either way."
         if not clears
         else "Execution permitted by score — complete risk review checkbox and size 2–5% account risk per structure."
     )
@@ -1549,6 +1610,178 @@ def _anchor_from_metrics_legs(
     }
 
 
+def _scan_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if number != number or number in {float("inf"), float("-inf")}:
+        return None
+    return number
+
+
+def _same_expiry(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_exp = left.get("expiry")
+    right_exp = right.get("expiry")
+    if not left_exp or not right_exp:
+        return True
+    return str(left_exp) == str(right_exp)
+
+
+def _strike(leg: dict[str, Any]) -> float | None:
+    raw = leg.get("strike")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    return float(raw)
+
+
+def structure_name_from_legs(legs: list[dict[str, Any]] | None) -> str | None:
+    """Map built option legs to an existing registry display name."""
+    rows = [leg for leg in (legs or []) if isinstance(leg, dict)]
+    stock = [leg for leg in rows if leg.get("side") == "stock"]
+    opts = [leg for leg in rows if leg.get("side") in {"call", "put"}]
+    if len(stock) == 1 and len(opts) == 1:
+        opt = opts[0]
+        if opt.get("action") == "buy" and opt.get("side") == "put":
+            return "Married Put"
+    if len(opts) == 1:
+        opt = opts[0]
+        action = str(opt.get("action") or "").lower()
+        side = opt.get("side")
+        if action == "buy" and side == "call":
+            return "Long Call"
+        if action == "buy" and side == "put":
+            return "Long Put"
+        if action == "sell" and side == "call":
+            return "Naked Call"
+        if action == "sell" and side == "put":
+            return "Naked Put"
+        return None
+    if len(opts) == 2 and _same_expiry(opts[0], opts[1]):
+        return _two_leg_name(opts[0], opts[1])
+    if len(opts) == 4 and len({str(leg.get("expiry") or "") for leg in opts}) <= 1:
+        return _iron_condor_name(opts)
+    return None
+
+
+def _two_leg_name(left: dict[str, Any], right: dict[str, Any]) -> str | None:
+    if left.get("side") != right.get("side"):
+        left_strike = _strike(left)
+        right_strike = _strike(right)
+        if (
+            left.get("action") == right.get("action") == "buy"
+            and left_strike is not None
+            and right_strike is not None
+            and abs(left_strike - right_strike) < 0.01
+        ):
+            return "Long Straddle"
+        return None
+    sell = left if left.get("action") == "sell" else right if right.get("action") == "sell" else None
+    buy = left if left.get("action") == "buy" else right if right.get("action") == "buy" else None
+    if sell is None or buy is None:
+        return None
+    sell_strike = _strike(sell)
+    buy_strike = _strike(buy)
+    if sell_strike is None or buy_strike is None or abs(sell_strike - buy_strike) < 0.01:
+        return None
+    side = left.get("side")
+    if side == "put" and sell_strike > buy_strike:
+        return "Bull Put Spread (credit)"
+    if side == "put" and sell_strike < buy_strike:
+        return "Bear Put Spread"
+    if side == "call" and buy_strike < sell_strike:
+        return "Bull Call Spread"
+    if side == "call" and sell_strike < buy_strike:
+        return "Bear Call Spread (credit)"
+    return None
+
+
+def _iron_condor_name(opts: list[dict[str, Any]]) -> str | None:
+    puts = [leg for leg in opts if leg.get("side") == "put"]
+    calls = [leg for leg in opts if leg.get("side") == "call"]
+    if len(puts) != 2 or len(calls) != 2:
+        return None
+    put_name = _two_leg_name(puts[0], puts[1])
+    call_name = _two_leg_name(calls[0], calls[1])
+    if put_name == "Bull Put Spread (credit)" and call_name == "Bear Call Spread (credit)":
+        return "Short Iron Condor"
+    return None
+
+
+def factual_structure_copy(legs: list[dict[str, Any]] | None) -> str:
+    """Short description from the legs: action, strike, side, and expiry."""
+    opts = [leg for leg in (legs or []) if isinstance(leg, dict) and leg.get("side") in {"call", "put"}]
+    if not opts:
+        return "Option legs were not resolved for this scan."
+    bits: list[str] = []
+    for leg in opts:
+        action = str(leg.get("action") or "trade").capitalize()
+        strike = _strike(leg)
+        side = leg.get("side")
+        if strike is None:
+            bits.append(f"{action} the {side}")
+        else:
+            strike_txt = f"{strike:g}"
+            bits.append(f"{action} the {strike_txt} {side}")
+    if len(bits) == 1:
+        sentence = bits[0]
+    elif len(bits) == 2:
+        sentence = f"{bits[0]} and {bits[1]}"
+    else:
+        sentence = ", ".join(bits[:-1]) + f", and {bits[-1]}"
+    expiry = next((leg.get("expiry") for leg in opts if leg.get("expiry")), None)
+    if expiry:
+        sentence += f", expiring {expiry}"
+    return sentence + "."
+
+
+def _structure_copy(strategy_name: str, legs: list[dict[str, Any]] | None) -> tuple[str, str]:
+    """Registry playbook text when it exists. Otherwise a factual line from the legs."""
+    playbook = PLAYBOOK.get(strategy_name) or {}
+    factual = factual_structure_copy(legs)
+    summary = str(playbook.get("summary") or "").strip() or factual
+    execution = str(playbook.get("execution") or "").strip() or factual
+    return summary, execution
+
+
+def _executable_name(strategy_name: str, *, direction: str, leg_structure: str | None) -> str:
+    spec = get_strategy_spec(strategy_name)
+    if spec is None or (spec.risk_type != "advisory" and spec.leg_count > 0):
+        if spec is not None or strategy_name:
+            if spec is None and strategy_name:
+                return strategy_name
+            if spec is not None and spec.leg_count > 0 and spec.risk_type != "advisory":
+                return strategy_name
+    if leg_structure:
+        held = get_strategy_spec(leg_structure)
+        if held is not None and held.leg_count > 0 and held.risk_type != "advisory":
+            return leg_structure
+    if direction == "bearish":
+        return "Bear Put Spread"
+    if direction == "neutral":
+        return "Long Straddle"
+    return "Bull Call Spread"
+
+
+def _vol_citation(vol_layer: dict[str, Any]) -> str | None:
+    """Cite IV and HV as percentages when the scan already supplied them."""
+    iv = format_vol_percent(vol_layer.get("iv"))
+    hv = format_vol_percent(vol_layer.get("hv"))
+    if iv and hv:
+        return f"IV {iv} versus HV {hv}."
+    if iv:
+        return f"IV {iv}."
+    if hv:
+        return f"HV {hv}."
+    return None
+
+
+def _outlook_for(strategy_name: str, direction: str) -> str:
+    bias = DEFINED_RISK_PLAYBOOK.get(strategy_name, {}).get("bias")
+    if bias in {"bullish", "bearish", "neutral"}:
+        return str(bias)
+    return direction
+
+
 def build_strategy_layer(
     *,
     strategy_name: StrategyName,
@@ -1564,6 +1797,10 @@ def build_strategy_layer(
     back_month_contracts: list[dict[str, Any]] | None = None,
     back_expiry: str | None = None,
     ticker: str = "",
+    gate_reason: str | None = None,
+    leg_structure: str | None = None,
+    strategies_evaluated: int | None = None,
+    risk_notes: list[str] | None = None,
 ) -> dict[str, Any]:
     from app.analysis.score_bounds import validate_scan_scores
 
@@ -1572,41 +1809,9 @@ def build_strategy_layer(
         strategy_name = STRATEGY_REGISTRY[sid].display_name  # type: ignore[assignment]
 
     tier = _execution_tier(composite, auto_exec_threshold=auto_exec_threshold)
-    empty_metrics = {
-        "max_loss": None,
-        "max_profit": None,
-        "net_debit_credit": None,
-        "net_type": None,
-        "breakevens": [],
-        "legs": [],
-        "per_contract_multiplier": 100,
-    }
-    if tier == "blocked":
-        return {
-            "title": "Strategy",
-            "tradeable": False,
-            "execution_tier": tier,
-            "selected_strategy": NOT_TRADEABLE_COPY,
-            "composite_score": composite,
-            "clears_threshold": False,
-            "direction": direction,
-            "vol_signal": vol_signal,
-            "recommended_contract": None,
-            "what_is_this": "",
-            "why_recommended": (
-                f"Composite score {composite}/100 is below the 51 minimum required for an actionable "
-                "options structure on this scan."
-            ),
-            "how_to_execute": (
-                "Review prior layers, improve composite above 50, and re-scan before considering execution. "
-                "No legs or payoff metrics are shown while the setup is blocked."
-            ),
-            "metrics": empty_metrics,
-            "narrative": (
-                f"{NOT_TRADEABLE_COPY}. Composite {composite}/100 is in the blocked band (≤50). "
-                "Improve conviction, liquidity, and structure fit before returning to strategy selection."
-            ),
-        }
+    strategy_name = _executable_name(strategy_name, direction=direction, leg_structure=leg_structure)
+    notes = [note for note in (risk_notes or []) if isinstance(note, str) and note.strip()]
+    _ = gate_reason
 
     recommended = chain_analysis.get("recommendedContract")
     contracts = chain_analysis.get("contracts") or []
@@ -1622,7 +1827,22 @@ def build_strategy_layer(
         iv=vol_layer.get("iv") if isinstance(vol_layer.get("iv"), (int, float)) else None,
         ticker=sym,
     )
+    inferred = structure_name_from_legs(metrics.get("legs") or [])
+    if inferred:
+        built = get_strategy_spec(strategy_name)
+        option_count = sum(1 for leg in (metrics.get("legs") or []) if isinstance(leg, dict) and leg.get("side") in {"call", "put"})
+        if built is None or built.leg_count in {0, option_count}:
+            strategy_name = inferred
     recommended = _anchor_from_metrics_legs(metrics, recommended, sym)
+    iv_value = vol_layer.get("iv")
+    hv_value = vol_layer.get("hv")
+    if extreme_iv_overhang(iv_value, hv_value):
+        iv_pct = format_vol_percent(iv_value)
+        hv_pct = format_vol_percent(hv_value)
+        if iv_pct and hv_pct:
+            overhang_note = f"IV {iv_pct} versus HV {hv_pct} is above 1.35× historical volatility."
+            if overhang_note not in notes:
+                notes.append(overhang_note)
     scan_scores = {
         "iv_rank": vol_layer.get("iv_rank"),
         "iv_percentile": vol_layer.get("iv_percentile"),
@@ -1663,7 +1883,12 @@ def build_strategy_layer(
     if metrics.get("max_profit_unlimited_allowed") is not None:
         max_profit_unlimited_allowed = bool(metrics.get("max_profit_unlimited_allowed"))
     metrics = {**metrics, "max_profit_unlimited_allowed": max_profit_unlimited_allowed}
-    playbook = PLAYBOOK.get(strategy_name, {"summary": "", "execution": ""})
+    if validation_errors:
+        first = validation_errors[0]
+        notes.append(
+            f"Pre-trade check {first.get('check')}: expected {first.get('expected')}; actual {first.get('actual')}."
+        )
+    summary, execution = _structure_copy(strategy_name, metrics.get("legs") or [])
     why_parts = [
         f"Composite {composite}/100 — manual review required below your auto-execution threshold ({auto_exec_threshold:.0f})."
         if tier == "caution"
@@ -1671,6 +1896,9 @@ def build_strategy_layer(
         f"Technical bias {direction} (score {tech_score}).",
         f"Volatility regime: {vol_signal} (IV rank {vol_layer.get('iv_rank', '—')}).",
     ]
+    vol_cite = _vol_citation(vol_layer)
+    if vol_cite:
+        why_parts.append(vol_cite)
     if sentiment_layer.get("bias"):
         why_parts.append(f"Sentiment {sentiment_layer.get('bias')} on 0–100 scale {sentiment_layer.get('score_0_100', '—')}.")
     if fundamentals_layer.get("score") is not None:
@@ -1685,13 +1913,16 @@ def build_strategy_layer(
     if selection_rationale:
         why_parts.append(selection_rationale)
 
+    defined = is_defined_risk_strategy(strategy_name)
+    status_line = auto_exec_status_line(composite, auto_exec_threshold, defined_risk=defined and not validation_blocked)
+    fit = " ".join(why_parts)
     return {
         "title": "Strategy playbook",
         "tradeable": not validation_blocked,
         "execution_tier": tier,
-        "selected_strategy": strategy_name if not validation_blocked else NOT_TRADEABLE_COPY,
+        "selected_strategy": strategy_name,
         "composite_score": composite,
-        "clears_threshold": composite > EXECUTION_SCORE_BLOCKED_MAX,
+        "clears_threshold": composite >= auto_exec_threshold and defined and not validation_blocked,
         "direction": direction,
         "vol_signal": vol_signal,
         "recommended_contract": recommended,
@@ -1699,16 +1930,16 @@ def build_strategy_layer(
         "equity_overlay_only": bool(
             spec and spec.equity_required and spec.equity_leg_spec and spec.equity_leg_spec.entry_mode == "pre_existing"
         ),
-        "what_is_this": playbook.get("summary", ""),
-        "why_recommended": " ".join(why_parts),
+        "what_is_this": summary,
+        "why_recommended": fit,
+        "why_it_fits": fit,
+        "outlook": _outlook_for(strategy_name, direction),
+        "strategies_evaluated": strategies_evaluated,
         "selection_rationale": selection_rationale,
-        "how_to_execute": playbook.get("execution", ""),
+        "how_to_execute": execution,
+        "risk_notes": notes,
+        "auto_exec_line": status_line,
         "metrics": metrics,
         "validation_errors": validation_errors,
-        "narrative": (
-            f"Recommended: {strategy_name}. {playbook.get('summary', '')} "
-            f"{playbook.get('execution', '')}"
-            if not validation_blocked
-            else f"{NOT_TRADEABLE_COPY}. Strategy validation failed — {validation_errors[0]['check'] if validation_errors else 'leg mismatch'}."
-        ),
+        "narrative": f"Recommended: {strategy_name}. {summary} {execution}",
     }

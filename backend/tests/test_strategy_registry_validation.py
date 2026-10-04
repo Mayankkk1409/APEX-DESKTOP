@@ -359,7 +359,8 @@ def test_build_strategy_layer_never_tradeable_with_validation_errors() -> None:
     )
     assert layer["tradeable"] is False
     assert layer["validation_errors"]
-    assert "Not tradeable" in layer["selected_strategy"]
+    assert layer["selected_strategy"] == APEX_STRATEGY_NAME
+    assert any("Pre-trade check" in note for note in layer["risk_notes"])
 
 
 def test_wrong_leg_count_blocks_trade_card() -> None:

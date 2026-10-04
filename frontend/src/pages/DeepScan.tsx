@@ -13,6 +13,7 @@ import { TaSnapshot } from "../components/TaSnapshot";
 import { VolatilityScan } from "../components/volatility/VolatilityScan";
 import { CAROUSEL_LAYERS, SCAN_SLIDE_LAYERS, SNAPSHOT_STUDIES } from "../constants";
 import { scoreTier } from "../lib/chartHighlight";
+import { autoExecEligibilityLine, orderPlacement } from "../lib/riskReview";
 import { normalizeStrategyName } from "../lib/strategyDisplay";
 import { readUserSettings } from "../lib/userSettings";
 import { formatOrderAccountLabel, formatOrderType, buildOrderConfirmationDetails } from "../lib/orderFormat";
@@ -114,6 +115,7 @@ export function DeepScan() {
     | {
         execution_tier?: "blocked" | "caution" | "auto_exec";
         auto_submit_on_ack?: boolean;
+        defined_risk?: boolean;
         requires_place_order?: boolean;
         allows_execution?: boolean;
         auto_execution_threshold?: number;
@@ -131,18 +133,40 @@ export function DeepScan() {
   const scanAutoThreshold = riskReview?.auto_execution_threshold ?? autoExecMinScore;
   const executionTier = riskReview?.execution_tier ?? scoreTier(compositeScore, scanAutoThreshold);
   const strategyLegs = riskReview?.strategy_legs ?? [];
-  const allowsExecution = riskReview?.allows_execution ?? (executionTier !== "blocked" && strategyLegs.length > 0);
-  const autoSubmitOnAck =
-    Boolean(riskReview?.auto_submit_on_ack) &&
-    executionTier === "auto_exec" &&
-    userSettings.autoExecEnabled;
-  const requiresPlaceOrder =
-    executionTier === "caution" ||
-    (executionTier === "auto_exec" && !userSettings.autoExecEnabled);
+  const definedRisk = riskReview?.defined_risk ?? Boolean(riskReview?.auto_submit_on_ack);
+  const placement = orderPlacement({
+    toggleOn: userSettings.autoExecEnabled,
+    composite: compositeScore,
+    threshold: scanAutoThreshold,
+    definedRisk,
+    hasLegs: strategyLegs.length > 0,
+  });
+  const autoSubmitOnAck = placement.autoSubmitOnAck;
   const orderAssetClass = (riskReview as { asset_class?: string } | undefined)?.asset_class ?? "us_option";
   const orderTypeLabel = formatOrderType("market", orderAssetClass);
-  const strategyName =
-    (scan.data?.layer_data?.strategy as StrategyLayer | undefined)?.selected_strategy ?? "";
+  const strategyLayerData = scan.data?.layer_data?.strategy as StrategyLayer | undefined;
+  const strategyName = strategyLayerData?.selected_strategy ?? "";
+  const chainStrategyHighlight = useMemo(() => {
+    if (!scan.data) return undefined;
+    const metricLegs = (strategyLayerData?.metrics?.legs ?? []).filter(
+      (leg) => leg.side === "call" || leg.side === "put",
+    );
+    const riskLegs = (riskReview?.strategy_legs ?? []).map((leg) => ({
+      side: leg.option_side,
+      option_side: leg.option_side,
+      strike: leg.strike,
+      expiry: leg.expiry,
+      symbol: leg.symbol,
+    }));
+    const chainRecommended = (
+      scan.data.layer_data?.options_chain_greeks as { recommendedContract?: ChainAnalysis["recommendedContract"] } | undefined
+    )?.recommendedContract;
+    return {
+      legs: metricLegs.length ? metricLegs : riskLegs,
+      recommended:
+        strategyLayerData?.recommended_contract ?? scan.data.recommendedContract ?? chainRecommended ?? null,
+    };
+  }, [riskReview?.strategy_legs, scan.data, strategyLayerData]);
 
   function confirmationFromResult(result: OrderPlacementResult): OrderConfirmationDetails {
     return buildOrderConfirmationDetails(result, {
@@ -287,6 +311,7 @@ export function DeepScan() {
             expiry={expiry}
             initial={data as unknown as ChainAnalysis | undefined}
             executionScore={compositeScore}
+            strategyHighlight={chainStrategyHighlight}
           />
         </section>
       ) : volLayer ? (
@@ -337,10 +362,9 @@ export function DeepScan() {
             <p className="mt-4 whitespace-pre-wrap text-sm leading-relaxed text-champagne/80">{String(data?.narrative ?? "Loading…")}</p>
             {riskLayer && (
               <div className="mt-6 space-y-4" data-testid="risk-review" data-execution-tier={executionTier}>
-                {executionTier === "blocked" || !allowsExecution ? (
+                {strategyLegs.length === 0 ? (
                   <p className="text-sm text-champagne/80" data-testid="risk-blocked">
-                    Execution is blocked for this scan (composite ≤50 or no tradeable options legs). Review prior layers and
-                    re-scan when conviction improves.
+                    No options legs are available for this scan.
                   </p>
                 ) : (
                   <>
@@ -358,6 +382,11 @@ export function DeepScan() {
                         </li>
                       ))}
                     </ul>
+                    {definedRisk && compositeScore != null && compositeScore >= scanAutoThreshold ? (
+                      <p className="text-sm text-champagne/80" data-testid="auto-exec-eligibility">
+                        {autoExecEligibilityLine(compositeScore, scanAutoThreshold)}
+                      </p>
+                    ) : null}
                     <label className="flex cursor-pointer items-center gap-2 text-sm leading-snug">
                       <input
                         type="checkbox"
@@ -395,20 +424,30 @@ export function DeepScan() {
                         {orderTypeLabel}
                       </p>
                     </div>
-                    {requiresPlaceOrder ? (
+                    {placement.note ? (
+                      <p className="text-sm text-champagne/70" data-testid="manual-confirmation-note" role="note">
+                        {placement.note}
+                      </p>
+                    ) : null}
+                    {placement.autoSubmitOnAck ? (
+                      <p className="text-sm text-champagne/70" data-testid="auto-exec-hint">
+                        Acknowledge — accepting the thesis submits these options legs.
+                      </p>
+                    ) : (
                       <button
                         data-testid="submit-order"
-                        disabled={!thesis || order.isPending}
-                        onClick={() => order.mutate()}
+                        disabled={order.isPending}
+                        onClick={() => {
+                          if (!thesis) {
+                            setMsg("Accept the thesis to place this trade.");
+                            return;
+                          }
+                          order.mutate();
+                        }}
                         className="rounded-md bg-gold px-4 py-2 text-ink disabled:opacity-40"
                       >
-                        Place order
+                        Place Trade
                       </button>
-                    ) : (
-                      <p className="text-sm text-champagne/70" data-testid="auto-exec-hint">
-                        Composite ≥{scanAutoThreshold} — acknowledging the thesis will auto-submit these options
-                        legs.
-                      </p>
                     )}
                     {msg && <p className="text-sm">{msg}</p>}
                   </>

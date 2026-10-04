@@ -323,6 +323,8 @@ export interface StrategyMetrics {
   breakeven_assumption_note?: string;
   /** Registry allows unlimited max profit display (long call, straddle, APEX Strategy). */
   max_profit_unlimited_allowed?: boolean;
+  /** Undefined-risk structures: the unbounded loss side is Unlimited, not a scanned stand-in. */
+  max_loss_unlimited_allowed?: boolean;
 }
 
 export interface StrategyLayer {
@@ -339,7 +341,12 @@ export interface StrategyLayer {
   equity_overlay_only?: boolean;
   what_is_this: string;
   why_recommended: string;
+  why_it_fits?: string;
+  outlook?: string;
+  strategies_evaluated?: number | null;
   selection_rationale?: string | null;
+  risk_notes?: string[];
+  auto_exec_line?: string | null;
   how_to_execute: string;
   metrics: StrategyMetrics;
   narrative: string;
@@ -424,6 +431,8 @@ export interface OverallPnlRow {
   unrealized_pl: number;
   total_pl: number;
   is_open: boolean;
+  /** Present only when the source reported a fee. Omitted means no fee was provided. */
+  fees?: number | null;
 }
 
 export interface PnlPoint {

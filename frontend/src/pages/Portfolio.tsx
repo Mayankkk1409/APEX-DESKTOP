@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { ApexLogo } from "../components/ApexLogo";
@@ -7,11 +7,14 @@ import { LegalFooter } from "../components/LegalFooter";
 import { LogoutButton } from "../components/LogoutButton";
 import { PositionCertificateModal } from "../components/PositionCertificateModal";
 import { SettingsGearLink } from "../components/SettingsGearLink";
+import { OverallPnlTotal } from "../components/OverallPnlTotal";
 import { PnlChart } from "../components/PnlChart";
 import { useBrokerage } from "../hooks/useBrokerage";
 import { defaultAccountLabel, usePositionCertificate } from "../hooks/usePositionCertificate";
+import { overallTotalPnl } from "../lib/overallPnl";
 import { filterPnlPoints, type PnlTimeframe } from "../lib/pnlTimeframe";
 import { assetLabel, fmtBalance, fmtMoney, fmtPlain, fmtTs } from "../lib/portfolioFormat";
+import { isRiskProfile, patchUserSettings, readUserSettings, type RiskProfile } from "../lib/userSettings";
 import { useSession } from "../store";
 import type { OrderHistoryRow, OverallPnlRow, PositionRow } from "../types";
 
@@ -19,11 +22,13 @@ function Collapsible({
   title,
   testId,
   defaultOpen = true,
+  footer,
   children,
 }: {
   title: string;
   testId: string;
   defaultOpen?: boolean;
+  footer?: React.ReactNode;
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(defaultOpen);
@@ -41,6 +46,7 @@ function Collapsible({
         </span>
       </button>
       {open && <div className="border-t border-line px-4 pb-4">{children}</div>}
+      {footer && <div className="border-t border-line px-4 py-3">{footer}</div>}
     </section>
   );
 }
@@ -66,6 +72,27 @@ export function Portfolio() {
     accountLabel: defaultAccountLabel(user, !brokerage.usingBrokerage),
   });
   const [chartTimeframe, setChartTimeframe] = useState<PnlTimeframe>("MAX");
+  const [riskProfile, setRiskProfile] = useState<RiskProfile>(() => readUserSettings().riskProfile);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api.getSettings().then((raw) => {
+      if (cancelled || !raw || typeof raw !== "object") return;
+      const profile = (raw as { risk_profile?: unknown }).risk_profile;
+      if (!isRiskProfile(profile)) return;
+      const next = patchUserSettings({ riskProfile: profile });
+      setRiskProfile(next.riskProfile);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function onRiskProfileChange(nextProfile: RiskProfile) {
+    const next = patchUserSettings({ riskProfile: nextProfile });
+    setRiskProfile(next.riskProfile);
+    void api.syncSettings(next);
+  }
 
   const usingBrokerage = brokerage.usingBrokerage;
 
@@ -153,6 +180,15 @@ export function Portfolio() {
     ? brokerageOverallRows(openPositions)
     : ((overall.data?.rows as OverallPnlRow[] | undefined) ?? []);
   const overallLoading = usingBrokerage ? positionsLoading : overall.isLoading;
+  const totalPnl = overallLoading
+    ? null
+    : overallTotalPnl(
+        overallRows.map((row) => ({
+          realized: row.realized_pl,
+          unrealized: row.unrealized_pl,
+          fees: row.fees,
+        })),
+      );
   const loadError =
     summary.error?.message ??
     historyQuery.error?.message ??
@@ -206,15 +242,13 @@ export function Portfolio() {
           <PnlChart
             points={points}
             fallbackBalance={fallbackBalance}
+            headlineEquity={typeof headerBalance === "number" ? headerBalance : undefined}
             timeframe={chartTimeframe}
             onTimeframeChange={setChartTimeframe}
             valueLabel={usingBrokerage ? "Equity" : "Portfolio value"}
+            pending={historyQuery.isFetching && !historyQuery.data}
+            overallTotal={totalPnl}
           />
-          {historyQuery.isFetching && !historyQuery.data && (
-            <p className="mt-2 text-xs text-faint" data-testid="portfolio-chart-loading">
-              Loading portfolio history…
-            </p>
-          )}
         </section>
 
         <Collapsible title="Current Portfolio" testId="portfolio-positions-section">
@@ -327,11 +361,34 @@ export function Portfolio() {
           )}
         </Collapsible>
 
-        <Collapsible title="Overall P&amp;L" testId="portfolio-overall-section" defaultOpen={false}>
+        <section className="rounded-xl border border-line bg-panel p-4" data-testid="portfolio-risk-profile">
+          <label className="block text-sm">
+            <span className="text-subtle">Risk profile</span>
+            <select
+              className="mt-1 w-full max-w-xs rounded-md border border-line bg-ink px-3 py-2 text-sm"
+              data-testid="portfolio-risk-profile-select"
+              value={riskProfile}
+              onChange={(e) => onRiskProfileChange(e.target.value as RiskProfile)}
+            >
+              <option value="conservative">Conservative</option>
+              <option value="moderate">Moderate</option>
+              <option value="aggressive">Aggressive</option>
+              <option value="custom">Custom</option>
+            </select>
+          </label>
+          <p className="mt-2 text-xs text-faint">Same profile as Settings → Risk &amp; Auto-Execution. Scans use this Best Match preference.</p>
+        </section>
+
+        <Collapsible
+          title="Overall P&amp;L"
+          testId="portfolio-overall-section"
+          defaultOpen={false}
+          footer={<OverallPnlTotal value={totalPnl} />}
+        >
           {overallLoading ? (
             <p className="mt-3 text-sm text-faint">Loading P&amp;L breakdown…</p>
           ) : overallRows.length === 0 ? (
-            <p className="mt-3 text-sm text-faint">No trade history yet.</p>
+            <p className="mt-3 text-sm text-faint">No order history yet.</p>
           ) : (
             <div className="apex-table-wrap">
             <table className="apex-table mt-3">

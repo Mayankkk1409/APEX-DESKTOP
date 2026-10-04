@@ -8,11 +8,19 @@ import {
   fmtSigned,
   gateSummary,
   greekProvenanceIsMixed,
+  resolveChainHighlights,
+  type ChainHighlightInputLeg,
   type ChainLadderRow,
 } from "../lib/optionsChain";
 import { scoreTier } from "../lib/chartHighlight";
 import { useSession } from "../store";
 import type { ChainAnalysis, ChainContractRow, RecommendedContract } from "../types";
+
+/** Strategy strikes for the chain mark. Present legs stay highlighted. */
+export type ChainStrategyHighlight = {
+  legs?: ChainHighlightInputLeg[] | null;
+  recommended?: RecommendedContract | null;
+};
 
 type Column = { id: string; label: string; title: string };
 
@@ -37,12 +45,18 @@ export function OptionsChainGreeks({
   expiry,
   initial,
   executionScore,
+  strategyHighlight,
 }: {
   symbol: string;
   expiry: string;
   initial?: ChainAnalysis;
-  /** Scan composite score — drives highlight / recommended-contract tiers. */
+  /** Scan composite score — drives the infeasible banner only. It does not clear leg marks. */
   executionScore?: number | null;
+  /**
+   * Best-match legs and recommended strikes from the scan.
+   * When provided, the chain marks these and ignores another symbol's session contract.
+   */
+  strategyHighlight?: ChainStrategyHighlight | null;
 }) {
   const [idx, setIdx] = useState(0);
   const sessionRecommended = useSession((s) => s.recommendedContract);
@@ -57,15 +71,22 @@ export function OptionsChainGreeks({
   const analysis: ChainAnalysis | null = chain.data ?? initial ?? null;
   const tier = scoreTier(analysis?.execution_score ?? executionScore ?? null);
   const blocked = tier === "blocked";
-  const recommended: RecommendedContract | null = blocked
-    ? null
-    : analysis?.recommendedContract ?? sessionRecommended ?? null;
-  const showRecommended = !blocked && recommended != null;
+  const chainExpiry = analysis?.expiry ?? expiry ?? null;
+  const highlights = useMemo(
+    () =>
+      resolveChainHighlights({
+        symbol,
+        legs: strategyHighlight?.legs,
+        recommended: strategyHighlight ? (strategyHighlight.recommended ?? null) : undefined,
+        sessionRecommended: strategyHighlight ? null : sessionRecommended,
+      }),
+    [symbol, strategyHighlight, sessionRecommended],
+  );
   const cards = analysis?.cards ?? [];
   const contracts = analysis?.contracts ?? [];
   const ladder = useMemo(
-    () => buildLadder(contracts, analysis?.spot ?? null, showRecommended ? recommended : null),
-    [contracts, analysis?.spot, recommended, showRecommended],
+    () => buildLadder(contracts, analysis?.spot ?? null, highlights, chainExpiry),
+    [contracts, analysis?.spot, highlights, chainExpiry],
   );
   const mixedGreeks = useMemo(() => greekProvenanceIsMixed(contracts), [contracts]);
   const callColumns = COLUMNS;
@@ -80,7 +101,7 @@ export function OptionsChainGreeks({
     const strikeCell = focusRow?.querySelector<HTMLElement>(".chain-strike");
     if (strikeCell) wrap.scrollLeft = Math.max(0, strikeCell.offsetLeft + strikeCell.offsetWidth / 2 - wrap.clientWidth / 2);
     if (focusRow) wrap.scrollTop = Math.max(0, focusRow.offsetTop - wrap.clientHeight / 2);
-  }, [ladder, recommended]);
+  }, [ladder, highlights]);
 
   useEffect(() => {
     setIdx((i) => (cards.length ? Math.min(i, cards.length - 1) : 0));
@@ -275,6 +296,8 @@ function LadderRow({ row, columns }: { row: ChainLadderRow; columns: Column[] })
       className="chain-row"
       data-testid={`chain-row-${row.strike}`}
       data-recommended={row.isRecommended ? "true" : "false"}
+      data-recommended-call={row.recommendedSides.includes("call") ? "true" : "false"}
+      data-recommended-put={row.recommendedSides.includes("put") ? "true" : "false"}
       data-reject={row.hasReject ? "true" : "false"}
       data-uoa={row.hasUoa ? "true" : "false"}
     >
@@ -284,11 +307,16 @@ function LadderRow({ row, columns }: { row: ChainLadderRow; columns: Column[] })
           column={c}
           contract={row.call}
           itm={row.itmSide === "call"}
-          recommended={row.recommendedSide === "call"}
+          recommended={row.recommendedSides.includes("call")}
         />
       ))}
       <th className="chain-strike" scope="row">
         {row.strike.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+        {row.isRecommended ? (
+          <span className="chain-leg-star" data-testid="chain-leg-star" title="Selected strategy leg">
+            ★
+          </span>
+        ) : null}
         {row.hasUoa && (
           <span className="chain-soft-flag is-uoa" title="Unusual options activity on this strike">
             ◆
@@ -306,7 +334,7 @@ function LadderRow({ row, columns }: { row: ChainLadderRow; columns: Column[] })
           column={c}
           contract={row.put}
           itm={row.itmSide === "put"}
-          recommended={row.recommendedSide === "put"}
+          recommended={row.recommendedSides.includes("put")}
         />
       ))}
     </tr>

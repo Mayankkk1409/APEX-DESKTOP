@@ -23,6 +23,7 @@ from app.analysis.options_rules import (
 from app.analysis.volatility import iv_rank_proxy
 from app.schemas.market import OptionChain, OptionContract
 from app.services.strategy_engine import select_strategy
+from app.strategies.registry import get_strategy_spec
 
 RecommendedContract = dict[str, Any]
 
@@ -80,7 +81,8 @@ def strategy_selection_bucket(
     vol_signal: str = "fair",
 ) -> tuple[Literal["buy", "sell"] | None, Literal["call", "put"] | None]:
     """Map the strategy playbook label to the §5 bucket and optional side filter."""
-    if "NO TRADE" in selected_strategy:
+    spec = get_strategy_spec(selected_strategy)
+    if spec is not None and spec.leg_count == 0:
         return None, None
     if "Iron Condor" in selected_strategy:
         return "sell", None
@@ -130,8 +132,7 @@ def infer_strategy_label(
     catalyst_active: bool = False,
 ) -> str:
     """Mirror scan_engine strategy selection so standalone analysis can pick the same contract."""
-    if not composite_threshold_met:
-        return "NO TRADE — Insufficient Conviction"
+    _ = composite_threshold_met
     return select_strategy(
         composite=composite if composite_threshold_met else 0,
         direction=direction,
@@ -304,7 +305,8 @@ def apply_execution_score_tiers(
         return payload
 
     strategy = selected_strategy
-    if tier == "caution" and "NO TRADE" in selected_strategy:
+    held = get_strategy_spec(selected_strategy)
+    if held is not None and held.leg_count == 0:
         strategy = infer_strategy_label(direction, vol_signal, composite_threshold_met=True)
 
     return apply_recommended_contract(
@@ -409,15 +411,20 @@ def build_chain_analysis(
             resolved_vol = "sell_premium"
         elif gap < -thresholds.iv_hv_rich_pts:
             resolved_vol = "buy_premium"
-    strategy = selected_strategy or infer_strategy_label(
-        resolved_direction,
-        resolved_vol,
-        rsi=tech.get("rsi"),
-        iv=atm_iv,
-        hv=hv,
-        ivr=iv_rank,
-        composite_threshold_met=True,
-    )
+    if not selected_strategy:
+        return payload
+    strategy = selected_strategy
+    held = get_strategy_spec(selected_strategy)
+    if held is not None and held.leg_count == 0:
+        strategy = infer_strategy_label(
+            resolved_direction,
+            resolved_vol,
+            rsi=tech.get("rsi"),
+            iv=atm_iv,
+            hv=hv,
+            ivr=iv_rank,
+            composite_threshold_met=True,
+        )
     return apply_recommended_contract(
         payload,
         selected_strategy=strategy,

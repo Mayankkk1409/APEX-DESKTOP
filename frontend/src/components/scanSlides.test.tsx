@@ -168,25 +168,53 @@ describe("StrategyScan", () => {
         }}
       />,
     );
-    expect(html).toContain("No Trade / Insufficient Conviction");
-    expect(html).toContain("Composite score is below 50");
+    expect(html).toContain("Not tradeable in current situation");
+    expect(html).toContain("Composite below minimum.");
+    expect(html).not.toContain("BELOW EXECUTION THRESHOLD");
     expect(html).toContain('data-testid="strategy-not-tradeable"');
     expect(html).not.toContain('data-testid="strategy-metrics"');
   });
 
-  it("hides payoff metrics for NO TRADE", () => {
+  it("shows the structure, payoff, and eligibility line for a scored recommendation", () => {
     const html = renderToStaticMarkup(
       <StrategyScan
         symbol="AAPL"
         initial={{
           ...strategyPayload,
-          selected_strategy: "NO TRADE — Insufficient Conviction",
-          recommended_contract: null,
+          selected_strategy: "Bull Put Spread (credit)",
+          auto_exec_line: "Composite score 66 · Your auto-execute minimum 40 · Auto-execute eligible",
+          risk_notes: ["IV 23.34% versus HV 22.46% is above 1.35× historical volatility."],
         }}
       />,
     );
-    expect(html).toContain("NO TRADE");
-    expect(html).toContain('data-no-trade="true"');
-    expect(html).not.toContain('data-testid="strategy-metrics"');
+    expect(html).toContain("Bull Put Spread (credit)");
+    expect(html).toContain("Composite score 66 · Your auto-execute minimum 40 · Auto-execute eligible");
+    expect(html).toContain('data-testid="strategy-metrics"');
+    expect(html).toContain('data-testid="strategy-legs"');
+    expect(html).not.toContain("NO TRADE");
+  });
+
+  it("shows outlook, cited fit, and Unlimited loss", () => {
+    const html = renderToStaticMarkup(
+      <StrategyScan
+        symbol="AAPL"
+        initial={{
+          ...strategyPayload,
+          outlook: "bullish",
+          why_it_fits: "IV 0.22 versus HV 0.35. Composite 80.",
+          strategies_evaluated: 100,
+          metrics: {
+            ...strategyPayload.metrics,
+            max_loss: null,
+            max_loss_unlimited_allowed: true,
+          },
+        }}
+      />,
+    );
+    expect(html).toContain('data-testid="strategy-outlook"');
+    expect(html).toContain("Outlook: bullish");
+    expect(html).toContain("IV 0.22 versus HV 0.35");
+    expect(html).toContain("Unlimited");
+    expect(html).toContain("100 strategies evaluated");
   });
 });
