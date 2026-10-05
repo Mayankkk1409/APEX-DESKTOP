@@ -172,6 +172,23 @@ async def test_wide_spread_blocks_until_confirmed_and_states_slippage() -> None:
 
 
 @pytest.mark.asyncio
+async def test_spread_equal_to_the_cap_is_not_wider() -> None:
+    """Exactly 10% of mid is the cap, not a wider spread. Do not reject it."""
+
+    class Adapter:
+        async def quote(self, symbol: str) -> SimpleNamespace:
+            return SimpleNamespace(
+                price=1.0,
+                bid=0.95,
+                ask=1.05,
+                as_of=datetime.now(timezone.utc).isoformat(),
+                source="test",
+            )
+
+    await enforce_submission_quotes(Adapter(), ["AAPL270115C00150000"], path="place_order")
+
+
+@pytest.mark.asyncio
 async def test_demo_fill_is_blocked_when_checks_failed() -> None:
     class Adapter:
         def __init__(self) -> None:

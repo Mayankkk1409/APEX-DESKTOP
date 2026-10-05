@@ -290,7 +290,7 @@ async def enforce_submission_quotes(
             logger.warning("order blocked path={} symbol={} reason={}", path, symbol, problem)
             raise ValueError(problem)
         frac = spread_vs_mid(_quote)
-        if frac is not None and frac >= spread_max - EPS and not spread_confirmed:
+        if frac is not None and frac > spread_max + EPS and not spread_confirmed:
             slip = slippage_dollars(_quote, qty=contracts, multiplier=multiplier)
             reason = spread_confirmation_text(spread_pct=frac, threshold=spread_max, slippage=slip)
             logger.warning("order blocked path={} symbol={} reason={}", path, symbol, reason)

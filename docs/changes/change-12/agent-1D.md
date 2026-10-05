@@ -31,7 +31,7 @@ After this change, Acknowledge, Place Trade, the direct single-leg API, close, e
 
 - `backend/app/services/executability.py` (new). One decision: eligible only when auto-execution is not explicitly off, `executable` is true, validation passed, and composite is at least the saved minimum (default 85 when settings omit it). Missing flags are not a pass. `eligibility_sentence` is the line both screens show.
 - Stale, missing, or suspect quotes are fetched once more. If the second read is still bad, submission raises `Quote not current` and includes the timestamp when there is one. A price with no timestamp is not treated as stale. `quote_is_stale` already returns false without a timestamp, and demo quotes have a price and no `as_of`. Tightening that would block every demo fill.
-- Spread at or above the cap (default 10% of mid, not loosened) blocks auto-execute. Manual submit requires `spread_confirmed`. The confirmation text states the spread, the cap, and estimated slippage in dollars (half the bid/ask width × quantity × multiplier).
+- A spread wider than the cap (default 10% of mid, strict `>`, not loosened) blocks auto-execute. Equal to 10% of mid is not wider, matching `options_rules._le`. Manual submit of a wider spread requires `spread_confirmed`. The confirmation text states the spread, the cap, and estimated slippage in dollars (half the bid/ask width × quantity × multiplier).
 - Option orders are limits: buy at the ask, sell at the bid. If that side is missing, an existing limit or a positive price is kept. A market order is not sent for `us_option`.
 - `strategy_decision` reorders only when `executable_by_name` is passed. If none are executable, the best-ranked real strategy stays. The card is not titled NO TRADE or Wait for IV Crush.
 - Scan promotion (`scan_engine._promote_close_executable`) swaps in an executable defined-risk candidate only when it is within `CLOSE_SCORE_GAP` of the blocked winner and its own layer is executable.
@@ -41,12 +41,13 @@ After this change, Acknowledge, Place Trade, the direct single-leg API, close, e
 
 ## Tests
 
-- `backend/tests/test_executability.py`: score above, equal to, and below the minimum; JPM 62.9 vs minimum 50 with `quote 17 min old` does not say Auto-execute eligible; every QA row in `docs/qa/APEX_QA_Test_Results.csv` whose strategy status is NOT EXECUTABLE and whose Risk Review said Auto-execute eligible (27 or more) is replayed the same way; a stale quote is refetched once and then rejected with no submit; wide spread states slippage and blocks until confirmed; demo fill is not called when checks failed; limits are ask/bid; a close-score executable candidate outranks a blocked one; a far gap and an all-blocked set keep the real name; held shares are a Protective Put and the note counts them.
+- `backend/tests/test_executability.py`: score above, equal to, and below the minimum; JPM 62.9 vs minimum 50 with `quote 17 min old` does not say Auto-execute eligible; every QA row in `docs/qa/APEX_QA_Test_Results.csv` whose strategy status is NOT EXECUTABLE and whose Risk Review said Auto-execute eligible (27 or more) is replayed the same way; a stale quote is refetched once and then rejected with no submit; wide spread states slippage and blocks until confirmed; a spread equal to 10% of mid is not rejected; demo fill is not called when checks failed; limits are ask/bid; a close-score executable candidate outranks a blocked one; a far gap and an all-blocked set keep the real name; held shares are a Protective Put and the note counts them.
 - Updated owned assertions in `test_strategy_engine.py`, `test_card_filter_gates.py`, `test_stock_leg.py`, `riskReview.test.ts`, `orderFormat.test.ts`, `DeepScan.order.test.tsx`, `OrderConfirmationCertificate.test.tsx`.
 
 ## Results
 
-- Backend: `1494 passed, 59 skipped, 0 failed` (`pytest -q --tb=line` from `backend/`, worktree on `PYTHONPATH`). Baseline on `change12/base` was 1482 passed, 59 skipped.
+- Backend: `1495 passed, 59 skipped, 0 failed` (`pytest -q --tb=line` from `backend/`, worktree on `PYTHONPATH`). Baseline on `change12/base` was 1482 passed, 59 skipped.
+- No order path bypasses submission validation. Acknowledge, Place Trade, the direct single-leg API, close, expiry close (`submission_path="expiry_close"`), and demo fill all call `enforce_submission_quotes` before a broker or demo submit. `skip_quote_check` defaults to false and has no caller.
 - Frontend files touched: 6 files, 47 tests passed (`riskReview`, `orderFormat`, `certificateLegs`, `DeepScan.order`, `OrderConfirmationCertificate`, `scanSlides`).
 - The app was not opened in a browser. The Risk Review and strategy-slide behavior above was checked through those tests.
 
