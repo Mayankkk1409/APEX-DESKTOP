@@ -3872,17 +3872,6 @@ def build_strategy_layer(
                 and float(ask) >= float(bid)
             ):
                 figures[f"leg{index}_slippage"] = round((float(ask) - float(bid)) / 2.0 * 100.0, 2)
-    for index, row in enumerate(chain_rows):
-        if not isinstance(row, dict):
-            continue
-        for field in ("strike", "bid", "ask", "delta", "iv", "theta"):
-            raw = row.get(field)
-            if isinstance(raw, (int, float)) and not isinstance(raw, bool):
-                figures[f"chain{index}_{field}"] = float(raw)
-        if row.get("expiry"):
-            figures[f"chain{index}_expiry"] = str(row.get("expiry"))[:10]
-        if isinstance(row.get("symbol"), str) and row.get("symbol").strip():
-            figures[f"chain{index}_symbol"] = str(row.get("symbol")).strip()
     metric_queue: list[tuple[str, Any]] = [("metric", metrics)]
     while metric_queue and len(figures) < 400:
         prefix, node = metric_queue.pop()

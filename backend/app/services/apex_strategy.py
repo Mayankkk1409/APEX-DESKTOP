@@ -278,6 +278,10 @@ def build_apex_strategy_input_from_scan(
     front_premium_offset_pct: float | None = None
     px = spot if isinstance(spot, (int, float)) and not isinstance(spot, bool) else chain_analysis.get("spot")
     px = float(px) if isinstance(px, (int, float)) and not isinstance(px, bool) and px > 0 else None
+    if back_iv is None:
+        back_iv = _atm_iv(back_rows, px)
+    if front_iv is None:
+        front_iv = _atm_iv(front_rows, px)
 
     if front_rows and back_rows:
         front_call, front_put = _expected_move_pair(front_rows, px)
@@ -353,6 +357,26 @@ def build_apex_strategy_input_from_scan(
         front_expiry_listed=four_leg_structure,
         back_expiry_listed=four_leg_structure,
     )
+
+
+def _atm_iv(contracts: list[dict[str, Any]], spot: float | None) -> float | None:
+    """Listed call IV nearest the spot. Missing IV stays missing."""
+    if spot is None:
+        return None
+    priced = [
+        row
+        for row in contracts
+        if row.get("side") == "call"
+        and isinstance(row.get("strike"), (int, float))
+        and not isinstance(row.get("strike"), bool)
+        and isinstance(row.get("iv"), (int, float))
+        and not isinstance(row.get("iv"), bool)
+        and float(row["iv"]) > 0
+    ]
+    if not priced:
+        return None
+    nearest = min(priced, key=lambda row: abs(float(row["strike"]) - float(spot)))
+    return float(nearest["iv"])
 
 
 def _expected_move_pair(

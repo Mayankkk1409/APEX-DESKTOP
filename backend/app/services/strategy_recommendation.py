@@ -1025,7 +1025,14 @@ def _merge_change11_evaluations(
             score=round(min(98.0, float(composite) + 14.0), 1) if gamma_ok else 0.0,
             tier=tier,
             defined_risk=True,
-            gate_notes=["Gamma Trampoline earnings gates passed"] if gamma_ok else gamma_reasons,
+            gate_notes=(
+                ["Gamma Trampoline earnings gates passed", *(apex_result.checks_passed if apex_result else [])]
+                if gamma_ok
+                else [
+                    *(apex_result.checks_passed if apex_result else []),
+                    *gamma_reasons,
+                ]
+            ),
             eligible=gamma_ok,
         )
         if gamma_ok:

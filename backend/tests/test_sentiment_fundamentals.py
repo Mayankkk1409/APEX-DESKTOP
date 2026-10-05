@@ -285,6 +285,17 @@ def test_googl_earnings_date_is_estimated_not_confirmed() -> None:
     assert "none" not in {str(info["date"]).lower(), str(info["status"]).lower()}
     flagged = attach_event_risk(dict(info), "2026-10-30")
     assert flagged["event_risk"] is False
+    # NASDAQ's Zacks algorithm date is another estimate. It does not blank the calendar date.
+    mixed = resolve_earnings_info(
+        "GOOGL",
+        asset_class="stock",
+        provider_dates=[("2026-11-04", "NASDAQ earnings-date")],
+    )
+    assert mixed["date"] == "2026-10-28"
+    assert mixed["status"] == "estimated"
+    assert mixed["display"] == "2026-10-28 est."
+    assert mixed["date"] != "none"
+    assert any(row["date"] == "2026-11-04" for row in mixed["conflicts"])
 
 
 def test_spy_and_qqq_skip_the_unconfirmed_earnings_check() -> None:

@@ -199,3 +199,20 @@ def test_priced_quote_without_a_timestamp_is_not_fresh() -> None:
     problem = quote_problem({"price": 4.02, "bid": 3.9, "ask": 4.1, "as_of": ""})
     assert problem is not None
     assert "unknown time" in problem
+
+
+def test_back_week_iv_is_read_from_the_back_chain() -> None:
+    from app.services.apex_strategy import build_apex_strategy_input_from_scan
+
+    built = build_apex_strategy_input_from_scan(
+        catalyst_days=8,
+        vol_layer={"iv": 0.40, "iv_rank": 80, "adv": 8_000_000},
+        chain_analysis={"spot": 100, "contracts": [{"side": "call", "strike": 100, "iv": 0.40, "bid": 2, "ask": 2.1}]},
+        back_month_contracts=[{"side": "call", "strike": 100, "iv": 0.25, "bid": 3, "ask": 3.1}],
+        earnings_date_confirmed=True,
+        spot=100,
+    )
+    assert built.front_iv == 0.40
+    assert built.back_iv == 0.25
+    assert built.earnings_date_confirmed is True
+    assert built.adv == 8_000_000

@@ -382,6 +382,15 @@ def build_layers(
         if catalyst_days is None:
             catalyst_days = earnings_calendar.get("days_until")
     best_delta_theta = _recommended_contract_delta_theta(chain_analysis)
+    if vol_layer.get("adv") is None and isinstance(getattr(quote, "avg_volume", None), (int, float)):
+        vol_layer = {**vol_layer, "adv": float(quote.avg_volume)}
+    apex_earnings_known = (
+        None
+        if earnings_not_applicable
+        else True
+        if earnings_estimated or earnings_date_confirmed
+        else None
+    )
     apex_input = build_apex_strategy_input_from_scan(
         catalyst_days=int(catalyst_days) if catalyst_days is not None else None,
         vol_layer=vol_layer,
@@ -389,6 +398,8 @@ def build_layers(
         back_month_contracts=[c.model_dump() for c in back_month_chain.contracts]
         if back_month_chain and back_month_chain.contracts
         else None,
+        earnings_date_confirmed=apex_earnings_known,
+        spot=last if isinstance(last, (int, float)) and not isinstance(last, bool) else None,
     )
     back_month_ready = bool(back_month_chain and back_month_chain.contracts)
     spread_pct_points = float(median_spread) * 100.0 if median_spread is not None else None

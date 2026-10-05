@@ -595,6 +595,22 @@ def resolve_earnings_info(
                 conflicts.append({"date": day, "source": source})
 
     if conflicts:
+        # A second estimate does not erase the calendar date. Company IR still wins above.
+        calendar = PROVIDER_ESTIMATES.get(sym)
+        if calendar and not ir:
+            return pack(
+                EarningsInfo(
+                    date=calendar["date"],
+                    status="estimated",
+                    sources=[*calendar["sources"], *[row["source"] for row in conflicts]],
+                    securityType=security,
+                ),
+                earnings_applicable=True,
+                unverified=False,
+                display=f"{calendar['date']} est.",
+                event_risk=False,
+                conflicts=conflicts,
+            )
         return pack(
             EarningsInfo(
                 date=None,
@@ -1190,7 +1206,7 @@ def _build_factor_cards(
     if applicable is False:
         kind = calendar.get("security_type") or "ETF"
         earn_parts.append(
-            f"{symbol} is classified as {kind}. An issuer earnings date does not apply."
+            f"{sym} is classified as {kind}. An issuer earnings date does not apply."
         )
     elif date_status == "unknown" or (date_status and not nd):
         earn_parts.append("Earnings date is unknown. This is a data gap.")
