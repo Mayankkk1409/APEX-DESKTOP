@@ -136,7 +136,7 @@ describe("DeepScan risk review order panel", () => {
     expect(html).toContain('data-testid="submit-order"');
     expect(html).toContain("Place Trade");
     expect(html).toContain('data-testid="manual-confirmation-note"');
-    expect(html).toContain("Manual confirmation required (score 39 vs. your auto-execute minimum 40).");
+    expect(html).toContain("Manual confirmation required (score 39.0 vs. your auto-execute minimum 40.0).");
     expect(html).not.toContain('data-testid="auto-exec-hint"');
     expect(html).not.toContain("NO TRADE");
   });
