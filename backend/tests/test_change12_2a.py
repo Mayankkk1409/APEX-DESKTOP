@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from app.analysis.gate_config import assess_vol_regime, classify_vol_regime
-from app.contracts import ledger
+from app.services.evidence_ledger import get, reset_ledger
 from app.services.strategy_engine import build_strategy_layer, strategy_decision
 
 
@@ -310,13 +310,8 @@ def test_rich_iv_hedge_records_why_the_winner_beat_the_collar() -> None:
     assert "short call" in text
 
 
-def test_ledger_record_is_called_for_gates_and_scores(monkeypatch) -> None:
-    calls = []
-
-    def _capture(entry) -> None:
-        calls.append(entry)
-
-    monkeypatch.setattr(ledger, "record", _capture)
+def test_ledger_record_is_called_for_gates_and_scores() -> None:
+    reset_ledger("AAPL")
     strategy_decision(
         composite=70.0,
         direction="bullish",
@@ -327,7 +322,7 @@ def test_ledger_record_is_called_for_gates_and_scores(monkeypatch) -> None:
         tech_score=70.0,
         symbol="AAPL",
     )
-    kinds = {entry.kind for entry in calls}
+    kinds = {entry.kind for entry in get("AAPL")}
     assert "gate" in kinds
     assert "candidate" in kinds
     assert "score" in kinds

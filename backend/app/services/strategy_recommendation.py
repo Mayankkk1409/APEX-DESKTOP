@@ -267,10 +267,11 @@ def record_ledger(
     fn: str,
     source: str = "strategy_engine",
 ) -> None:
-    """Call the frozen ledger stub. Persistence belongs to the ledger owner."""
-    from app.contracts import LedgerEntry, ledger
+    """Persist one frozen ledger row. The contracts stub still drops its own calls."""
+    from app.contracts import LedgerEntry
+    from app.services.evidence_ledger import record
 
-    ledger.record(
+    record(
         LedgerEntry(
             scanId=scan_id or "scan",
             kind=kind,

@@ -2721,31 +2721,53 @@ def _window_from_text(text: str) -> tuple[int, int] | None:
     return low, high
 
 
-def dte_window_for(strategy_name: str) -> tuple[int, int] | None:
-    """DTE window from the knowledge base when 2C stored one, else the how-to text."""
+def _dte_inside(dte: int, low: int, high: int | None) -> bool:
+    if dte < low:
+        return False
+    return True if high is None else dte <= high
+
+
+def _window_phrase(low: int, high: int | None) -> str:
+    if high is None:
+        return f"more than {low - 1} calendar days"
+    return f"{low} to {high} DTE"
+
+
+def dte_window_for(strategy_name: str) -> tuple[int, int | None] | None:
+    """Option DTE bounds from the catalog. A missing max is an open upper end.
+
+    The Gamma Trampoline 5–10 day band is an earnings window, not option DTE.
+    A catalog row with both bounds empty does not borrow a window from how-to text.
+    """
     names = [strategy_name]
     if strategy_name in {"Protective Put", "Stock + Long Put"}:
         names.append("Married Put")
     from app.strategies.knowledge_base import entry_for
 
+    saw_entry = False
     for name in names:
         entry = entry_for(name)
         if entry is None:
             continue
+        saw_entry = True
+        source = str(getattr(entry, "dte_source", "") or "").lower()
+        label = str(getattr(entry, "dte_window", "") or "").lower()
+        if "earnings window" in source or "before earnings" in label:
+            return None
         explicit = getattr(entry, "dte_window", None)
         if isinstance(explicit, (tuple, list)) and len(explicit) == 2:
             return int(explicit[0]), int(explicit[1])
         low = getattr(entry, "dte_min", None)
         high = getattr(entry, "dte_max", None)
-        if isinstance(low, int) and isinstance(high, int):
-            return low, high
-        blob = " ".join(
-            str(getattr(entry, field, "") or "")
-            for field in ("how_to_use", "ideal_conditions", "entry_management_exit")
-        )
-        found = _window_from_text(blob)
-        if found is not None:
-            return found
+        if isinstance(low, int) and not isinstance(low, bool):
+            if isinstance(high, int) and not isinstance(high, bool):
+                return low, high
+            if high is None:
+                return low, None
+        if low is None and high is None:
+            return None
+    if saw_entry:
+        return None
     for name in names:
         play = PLAYBOOK.get(name) or {}
         found = _window_from_text(f"{play.get('execution', '')} {play.get('summary', '')}")
@@ -2968,7 +2990,7 @@ def _retarget_dte_window(
     low, high = window
     today = datetime.now(timezone.utc).date()
     user_dte = _dte_from_expiry(str(front_expiry), today=today)
-    if user_dte is None or low <= user_dte <= high:
+    if user_dte is None or _dte_inside(user_dte, low, high):
         return None
     groups: dict[str, list[dict[str, Any]]] = {}
     for row in contracts:
@@ -2977,10 +2999,10 @@ def _retarget_dte_window(
         exp = str(row.get("expiry") or front_expiry)[:10]
         groups.setdefault(exp, []).append(row)
     compliant: list[tuple[float, str, list[dict[str, Any]], int]] = []
-    midpoint = (low + high) / 2.0
+    midpoint = float(low) if high is None else (low + high) / 2.0
     for exp, rows in groups.items():
         dte = _dte_from_expiry(exp, today=today)
-        if dte is None or dte < low or dte > high:
+        if dte is None or not _dte_inside(dte, low, high):
             continue
         compliant.append((abs(dte - midpoint), exp, rows, dte))
     if not compliant:
@@ -2990,7 +3012,7 @@ def _retarget_dte_window(
     if exp == str(front_expiry)[:10]:
         return None
     note = (
-        f"User expiry {front_expiry} is {user_dte} DTE, outside the {low} to {high} DTE window. "
+        f"User expiry {front_expiry} is {user_dte} DTE, outside the {_window_phrase(low, high)}. "
         f"The candidate uses {exp} ({dte} DTE)."
     )
     return rows, exp, back_month_contracts, back_expiry, note
@@ -3011,7 +3033,7 @@ def _dte_window_note(
     if not user_expiry and option_legs:
         user_expiry = option_legs[0].get("expiry")
     dte = _dte_from_expiry(str(user_expiry) if user_expiry else None)
-    if dte is None or low <= dte <= high:
+    if dte is None or _dte_inside(dte, low, high):
         return None
     from app.strategies.expiry_utils import nearest_expiry_in_window
 
@@ -3023,7 +3045,7 @@ def _dte_window_note(
         today=today,
     )
     base = (
-        f"DTE penalty: selected expiry {user_expiry} is {dte} DTE, outside the how-to window of {low} to {high} DTE."
+        f"DTE penalty: selected expiry {user_expiry} is {dte} DTE, outside the how-to window of {_window_phrase(low, high)}."
     )
     if nearest is None:
         return base + " No listed expiry falls in that window."

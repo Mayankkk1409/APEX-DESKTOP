@@ -25,12 +25,16 @@ def nearest_expiry_in_window(
     expiration_dates: list[str],
     *,
     low: int,
-    high: int,
+    high: int | None,
     today: date | None = None,
 ) -> str | None:
-    """Listed expiry whose DTE is inside [low, high], nearest the window midpoint."""
+    """Listed expiry whose DTE is inside [low, high], nearest the window midpoint.
+
+    A missing high means there is no upper bound. The nearest date is the one
+    closest to the minimum.
+    """
     ref = today or date.today()
-    midpoint = (int(low) + int(high)) / 2.0
+    midpoint = float(low) if high is None else (int(low) + int(high)) / 2.0
     best: tuple[float, str] | None = None
     for raw in expiration_dates:
         try:
@@ -38,7 +42,7 @@ def nearest_expiry_in_window(
         except (TypeError, ValueError):
             continue
         dte = (parsed - ref).days
-        if dte < int(low) or dte > int(high):
+        if dte < int(low) or (high is not None and dte > int(high)):
             continue
         distance = abs(dte - midpoint)
         if best is None or distance < best[0]:

@@ -5,8 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from app.analysis.gate_config import assess_vol_regime
-from app.contracts import ledger
-from app.services.strategy_engine import build_strategy_layer, strategy_decision
+from app.services.evidence_ledger import get, reset_ledger
+from app.services.strategy_engine import build_strategy_layer, dte_window_for, strategy_decision
 
 TODAY = datetime.now(timezone.utc).date()
 
@@ -207,30 +207,27 @@ def test_missing_iv_rank_is_not_a_bare_dash() -> None:
     assert "published IV history is missing" in text
 
 
+def test_gamma_earnings_window_is_not_an_option_dte_rule() -> None:
+    assert dte_window_for("Gamma Trampoline™") is None
+    assert dte_window_for("Long Call LEAPS") == (366, None)
+
+
 def test_rich_iv_hedge_evaluates_a_collar_and_records_the_rank() -> None:
-    captured: list[object] = []
-    original = ledger.record
-
-    def _capture(entry: object) -> None:
-        captured.append(entry)
-
-    ledger.record = _capture  # type: ignore[method-assign]
-    try:
-        decision = strategy_decision(
-            composite=78.0,
-            direction="bullish",
-            vol_signal="fair",
-            rsi=72.0,
-            iv=0.3031,
-            hv=0.2038,
-            ivr=43.2,
-            tech_score=70.0,
-            sentiment_score=60.0,
-            catalyst_days=8,
-            symbol="AAPL",
-        )
-    finally:
-        ledger.record = original  # type: ignore[method-assign]
+    reset_ledger("AAPL")
+    decision = strategy_decision(
+        composite=78.0,
+        direction="bullish",
+        vol_signal="fair",
+        rsi=72.0,
+        iv=0.3031,
+        hv=0.2038,
+        ivr=43.2,
+        tech_score=70.0,
+        sentiment_score=60.0,
+        catalyst_days=8,
+        symbol="AAPL",
+    )
+    captured = get("AAPL")
     names = [row.name for row in decision.candidates]
     assert "Collar" in names
     joined = " ".join(decision.risk_notes)
