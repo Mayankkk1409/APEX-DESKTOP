@@ -47,15 +47,15 @@ Backend, from `backend/`:
 
 `backend/.venv` from the main checkout, against this worktree:
 
-`1492 passed, 59 skipped, 0 failed` (24.87s). Baseline on `change12/base` was `1482 passed, 59 skipped, 0 failed`. The 10 new tests are 6 in `backend/tests/test_session_refresh.py` and 4 in `backend/tests/test_security.py`.
+`1492 passed, 59 skipped, 0 failed` (27.78s), plus the existing `StarletteDeprecationWarning` in `tests/test_ws.py`. Baseline on `change12/base` was `1482 passed, 59 skipped, 0 failed`. The 10 new tests are 6 in `backend/tests/test_session_refresh.py` and 4 in `backend/tests/test_security.py`.
 
-- Simulated 2-hour session: eight expired access tokens (8 × 15 minutes). Each `/auth/me` returns 401 `Invalid access token`, `POST /auth/refresh` with the original cookie returns 200, and the new access token reads `/auth/me`. The original refresh cookie still works at the end.
-- Reload: without `Authorization`, `/auth/me`, `/api/portfolio`, `/api/settings/trading`, and `/watchlist` are 401. After refresh they are 200.
-- Expired access token on `POST /scan` is 401, then refresh, then the same AAPL snapshot and expiry returns 200 with that expiry on the options layer.
-- Two overlapping refreshes both succeed and the original cookie still works.
-- Logout sets `Max-Age=0` with `Secure`, `HttpOnly`, and `SameSite=Strict`, then refresh is 401.
-- An access token presented as the refresh cookie is `Invalid refresh`.
-- Cookie on OTP verify includes `HttpOnly`, `Secure`, `SameSite=Strict`, and `Max-Age=604800`, and does not contain the access token. `expires_in` is 900 and `refresh_in` is 840. This runs with `APP_ENV=development`.
+- Simulated 2-hour session: eight expired access tokens (8 × 900s). Each `/auth/me` returns 401 `Invalid access token`, `POST /auth/refresh` with the same cookie returns 200, and the new access token reads `/auth/me`.
+- Reload: `POST /auth/refresh` with only the cookie (no `Authorization` header) returns 200. The new access token then gets 200 from `/auth/me` (`/app` and `/settings`), `/api/portfolio` (`/portfolio`), and `/scan/layers` (`/scan`).
+- Expired access token on `POST /scan` is 401 `Invalid access token`, then refresh, then the same AAPL snapshot and expiry returns 200 with `symbol` AAPL.
+- Logout `Set-Cookie` has `Max-Age=0`. The next refresh with that jar is 401.
+- An access token presented as the refresh cookie is 401.
+- Cookie on OTP verify is `HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/`, and is not the access token. The body has `expires_in` 900 and `refresh_in` 840, and no `refresh_token`. This runs with `APP_ENV=development`.
+- `decode_token` rejects an expired access token with `ExpiredSignatureError`, rejects a refresh token presented as an access token, and the access and refresh lifetimes stay 900s and 604800s.
 
 Frontend (`vitest`, files touched):
 
@@ -66,6 +66,8 @@ Frontend (`vitest`, files touched):
 - `api.scan` gets 401 `Invalid access token`, refreshes, retries, and the Zustand scan fields are unchanged.
 - A 401 from `/auth/refresh` clears the memory token and assigns `/login`.
 - Scan sessionStorage round-trip does not contain `access_token` or `refresh_token`.
+
+Full frontend `vitest run`: `285 passed, 5 failed`. The 5 failures are all in `frontend/src/pages/DeepScan.order.test.tsx` (`ticketTypeLabel` and `buildOrderReview` are not defined). That file is unchanged from `d014ef6` and is owned by 1D. The session tests above are not in that file.
 
 No browser pass. This session had no browser automation tool. Cookie flags and the refresh loop were checked through the API suite and vitest, not in Chrome.
 
