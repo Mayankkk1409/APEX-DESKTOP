@@ -11,7 +11,7 @@ from app.analysis.score_bounds import assert_score_bounded
 from app.strategies.chain_utils import net_debit_credit, normalize_leg_mids
 from app.strategies.exceptions import StrategyValidationError
 from app.strategies.payoffs import PAYOFF_FUNCTIONS
-from app.strategies.registry import StrategySpec, get_strategy_spec, resolve_strategy_id
+from app.strategies.registry import LEG_QUANTITY_BY_INDEX, StrategySpec, get_strategy_spec, resolve_strategy_id
 
 logger = logging.getLogger(__name__)
 
@@ -772,28 +772,6 @@ def apex_structure_reason(
     return None
 
 
-# Option quantity by registry-leg index when the encyclopedia ratio is not 1.
-_OPTION_QTY_BY_INDEX: dict[str, dict[int, int]] = {
-    "strip": {1: 2},
-    "strap": {0: 2},
-    "synthetic_straddle": {1: 2},
-    "long_call_butterfly": {1: 2},
-    "long_put_butterfly": {1: 2},
-    "broken_wing_butterfly": {1: 2},
-    "skip_strike_butterfly": {1: 2},
-    "short_call_butterfly": {1: 2},
-    "short_put_butterfly": {1: 2},
-    "ratio_spread": {1: 2},
-    "call_ratio_spread": {1: 2},
-    "put_ratio_spread": {1: 2},
-    "one_by_two_ratio_spread": {1: 2},
-    "two_by_one_ratio_spread": {0: 2},
-    "back_ratio_spread": {1: 2},
-    "call_backspread": {1: 2},
-    "put_backspread": {1: 2},
-}
-
-
 def _check_leg_template(
     spec: StrategySpec,
     legs: list[dict[str, Any]],
@@ -825,7 +803,7 @@ def _check_leg_template(
             )
         return
 
-    qty_overrides = _OPTION_QTY_BY_INDEX.get(strategy_id, {})
+    qty_overrides = LEG_QUANTITY_BY_INDEX.get(strategy_id, {})
     expected_options: list[tuple[str, str, int]] = []
     expected_stock: list[str] = []
     for index, leg_spec in enumerate(spec.leg_specs):

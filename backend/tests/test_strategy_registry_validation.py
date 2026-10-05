@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, timedelta
 
 import pytest
@@ -10,6 +11,15 @@ from app.analysis.layers import APEX_STRATEGY_NAME
 from app.services.apex_strategy import ApexStrategyInput, check_apex_strategy_eligibility
 from app.services.strategy_engine import compute_strategy_metrics, build_strategy_layer
 from app.strategies.metrics_builder import build_registry_metrics
+from app.strategies.knowledge_base import (
+    GAMMA_CLASSIFIER,
+    GAMMA_SUMMARY,
+    REQUIRED_KB_FIELDS,
+    entry_for,
+    knowledge_entries,
+    validate_entries,
+    validate_knowledge_base,
+)
 from app.strategies.registry import STRATEGY_REGISTRY, get_strategy_spec, implemented_strategy_names
 from app.strategies.validator import validate_strategy_output
 
@@ -441,3 +451,47 @@ try:
 
 except ImportError:
     pass
+
+
+def test_knowledge_base_startup_validator_is_clean() -> None:
+    assert validate_knowledge_base() == []
+
+
+def test_validator_fails_when_a_required_field_is_removed() -> None:
+    """CI uses the same validator as API startup. A blank required field must fail."""
+    entries = knowledge_entries()
+    sample_id = "long_call"
+    for field in REQUIRED_KB_FIELDS:
+        broken = replace(entries[sample_id], **{field: ""})
+        snapshot = dict(entries)
+        snapshot[sample_id] = broken
+        errors = validate_entries(snapshot)
+        assert any(sample_id in err and field in err for err in errors), field
+
+
+def test_gamma_trampoline_label_stays_off_the_double_calendar() -> None:
+    gamma = entry_for("Gamma Trampoline™")
+    calendar = entry_for("double_calendar")
+    apex = entry_for("APEX Strategy")
+    assert gamma is not None and calendar is not None and apex is not None
+    assert gamma.title == "Gamma Trampoline™"
+    assert GAMMA_SUMMARY in gamma.summary
+    assert GAMMA_CLASSIFIER in gamma.when_not_to_use
+    assert gamma.dte_window == "5 to 10 calendar days before earnings"
+    assert gamma.dte_min == 5 and gamma.dte_max == 10
+    assert gamma.vega_sign == "long" and gamma.theta_sign == "positive" and gamma.gamma_sign == "short"
+    assert calendar.title == "Double Calendar"
+    assert "Gamma Trampoline" not in calendar.title
+    assert calendar.dte_min is None and calendar.dte_max is None
+    assert apex.title == "APEX Strategy"
+    assert GAMMA_CLASSIFIER in apex.when_not_to_use
+    assert apex.dte_min is None and apex.dte_max is None
+    buy = entry_for("apex_benchmark_greeks_buy")
+    sell = entry_for("apex_benchmark_greeks_sell")
+    assert buy is not None and sell is not None
+    assert (buy.dte_min, buy.dte_max) == (30, 90)
+    assert (sell.dte_min, sell.dte_max) == (30, 45)
+    assert (buy.vega_sign, buy.theta_sign, buy.gamma_sign) == ("long", "negative", "long")
+    assert (sell.vega_sign, sell.theta_sign, sell.gamma_sign) == ("short", "positive", "short")
+    married = entry_for("married_put")
+    assert married is not None and (married.dte_min, married.dte_max) == (30, 45)
