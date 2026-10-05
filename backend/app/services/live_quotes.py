@@ -18,13 +18,15 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
 import httpx
 from loguru import logger
 
+from app.analysis.options_rules import build_quote_meta, parse_alpaca_calendar, weekday_sessions
 from app.config import Settings
-from app.schemas.market import Fundamentals, Quote
+from app.schemas.market import Fundamentals, Quote, QuoteMetaModel
 
 # Display names for indexes we treat as indexes (not ETFs).
 INDEX_FEEDS: dict[str, dict[str, str]] = {
@@ -54,6 +56,8 @@ HTTP_HEADERS = {
 
 _CACHE_TTL_SECONDS = 8.0
 _bundle_cache: dict[str, tuple[float, "_Bundle"]] = {}
+_SESSION_TTL_SECONDS = 3600.0
+_session_cache: tuple[float, list[tuple[datetime, datetime]]] | None = None
 
 
 @dataclass
@@ -81,6 +85,12 @@ class _Bundle:
     as_of: str | None = None
     bid: float | None = None
     ask: float | None = None
+    bid_size: float | None = None
+    ask_size: float | None = None
+    quoted_at: str | None = None
+    quote_feed: str = "other"
+    feed_delayed: bool = False
+    quote_provider: str | None = None
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -94,7 +104,9 @@ class _Bundle:
 
 
 def clear_quote_cache() -> None:
+    global _session_cache
     _bundle_cache.clear()
+    _session_cache = None
 
 
 def parse_number(value: Any) -> float | None:
@@ -195,6 +207,7 @@ def _alpaca_stock_sync(symbol: str, settings: Settings) -> dict[str, Any] | None
     )
     snapshot = None
     last_error: Exception | None = None
+    used_feed = None
     for feed in (DataFeed.IEX, DataFeed.DELAYED_SIP):
         try:
             snaps = client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols=[symbol], feed=feed))
@@ -205,6 +218,7 @@ def _alpaca_stock_sync(symbol: str, settings: Settings) -> dict[str, Any] | None
                 except Exception:  # noqa: BLE001
                     snapshot = None
             if snapshot is not None:
+                used_feed = feed
                 break
         except Exception as exc:  # noqa: BLE001
             last_error = exc
@@ -232,6 +246,9 @@ def _alpaca_stock_sync(symbol: str, settings: Settings) -> dict[str, Any] | None
     change = round(price - prev_close, 4) if price is not None and prev_close else None
     change_pct = round((change / prev_close) * 100, 4) if change is not None and prev_close else None
     trade_ts = getattr(latest_trade, "timestamp", None)
+    quote_ts = getattr(latest_quote, "timestamp", None)
+    bid_size = parse_number(getattr(latest_quote, "bid_size", None))
+    ask_size = parse_number(getattr(latest_quote, "ask_size", None))
 
     week_high = week_low = avg_vol = None
     try:
@@ -282,9 +299,19 @@ def _alpaca_stock_sync(symbol: str, settings: Settings) -> dict[str, Any] | None
     except Exception as exc:  # noqa: BLE001
         logger.debug("Alpaca asset lookup skipped for {}: {}", symbol, exc)
 
-    as_of = None
-    if trade_ts is not None:
-        as_of = trade_ts.isoformat() if hasattr(trade_ts, "isoformat") else str(trade_ts)
+    def _iso(ts: Any) -> str | None:
+        if ts is None:
+            return None
+        if hasattr(ts, "isoformat"):
+            text = ts.isoformat()
+            if getattr(ts, "tzinfo", None) is None:
+                return text + "+00:00"
+            return text
+        return str(ts)
+
+    quoted_at = _iso(quote_ts) or _iso(trade_ts)
+    as_of = quoted_at
+    feed_delayed = used_feed == DataFeed.DELAYED_SIP
 
     return {
         "price": price,
@@ -301,8 +328,14 @@ def _alpaca_stock_sync(symbol: str, settings: Settings) -> dict[str, Any] | None
         "asset_class": asset_class,
         "as_of": as_of,
         "source": "Alpaca",
+        "provider": "Alpaca",
         "bid": usable_positive_price(parse_number(bid)),
         "ask": usable_positive_price(parse_number(ask)),
+        "bid_size": bid_size,
+        "ask_size": ask_size,
+        "quoted_at": quoted_at,
+        "quote_feed": "other",
+        "feed_delayed": feed_delayed,
     }
 
 
@@ -350,8 +383,12 @@ def _cnbc_row(payload: Any) -> dict[str, Any] | None:
         "div_yield": parse_percent_fraction(row.get("dividendyield")),
         "beta_5y": parse_number(row.get("beta")),
         "as_of": row.get("last_timedate") or row.get("last_time"),
+        "quoted_at": row.get("last_timedate") or row.get("last_time"),
         "type": row.get("type") or row.get("subType"),
         "source": "CNBC",
+        "provider": "CNBC",
+        "quote_feed": "other",
+        "feed_delayed": False,
     }
 
 
@@ -455,8 +492,12 @@ async def _nasdaq_quote(symbol: str) -> dict[str, Any] | None:
         "expense_ratio": stats.get("expense_ratio"),
         "beta_5y": stats.get("beta_5y"),
         "as_of": primary.get("lastTradeTimestamp"),
+        "quoted_at": primary.get("lastTradeTimestamp"),
         "asset_class": asset_class,
         "source": "NASDAQ",
+        "provider": "NASDAQ",
+        "quote_feed": "other",
+        "feed_delayed": False,
     }
 
 
@@ -497,8 +538,12 @@ async def _yahoo_chart(yahoo_symbol: str) -> dict[str, Any] | None:
         "avg_volume": avg_vol,
         "week_52_high": max(highs) if highs else parse_number(meta.get("fiftyTwoWeekHigh")),
         "week_52_low": min(lows) if lows else parse_number(meta.get("fiftyTwoWeekLow")),
-        "as_of": str(meta.get("regularMarketTime") or ""),
+        "as_of": str(meta.get("regularMarketTime") or "") or None,
+        "quoted_at": str(meta.get("regularMarketTime") or "") or None,
         "source": "Yahoo Finance",
+        "provider": "Yahoo Finance",
+        "quote_feed": "other",
+        "feed_delayed": False,
     }
 
 
@@ -586,6 +631,12 @@ def _apply(dst: _Bundle, src: dict[str, Any] | None, *, price: bool, fundamental
         if dst.price is None and incoming is not None:
             dst.price = incoming
             dst.price_source = src.get("source")
+            dst.quote_provider = src.get("provider") or src.get("source")
+            dst.quote_feed = str(src.get("quote_feed") or "other")
+            dst.feed_delayed = bool(src.get("feed_delayed"))
+            dst.quoted_at = src.get("quoted_at") or src.get("as_of")
+            dst.bid_size = src.get("bid_size")
+            dst.ask_size = src.get("ask_size")
         dst.change = _first(dst.change, src.get("change"))
         dst.change_pct = _first(dst.change_pct, src.get("change_pct"))
         dst.open = _first(dst.open, usable_positive_price(src.get("open")))
@@ -690,7 +741,12 @@ async def _load_bundle(symbol: str, settings: Settings) -> _Bundle:
     return bundle
 
 
-def _quote_from_bundle(bundle: _Bundle) -> Quote:
+def _quote_from_bundle(
+    bundle: _Bundle,
+    *,
+    sessions: list[tuple[datetime, datetime]] | None = None,
+    now: datetime | None = None,
+) -> Quote:
     source = bundle.price_source or "unavailable"
     secondary = None
     if bundle.fundamentals_source:
@@ -700,6 +756,20 @@ def _quote_from_bundle(bundle: _Bundle) -> Quote:
         if bundle.symbol == "SPX":
             extra = f"S&P 500 INDEX · {bundle.price_source} (.SPX) — not SPY"
         secondary = extra if not secondary else f"{extra} · {secondary}"
+    clock = now or datetime.now(timezone.utc)
+    meta = build_quote_meta(
+        provider=bundle.quote_provider or bundle.price_source or "unavailable",
+        feed=bundle.quote_feed or "other",
+        quoted_at=bundle.quoted_at or bundle.as_of,
+        received_at=clock,
+        bid=bundle.bid,
+        ask=bundle.ask,
+        bid_size=bundle.bid_size,
+        ask_size=bundle.ask_size,
+        now=clock,
+        sessions=sessions,
+        feed_delayed=bundle.feed_delayed,
+    )
     return Quote(
         symbol=bundle.symbol,
         name=bundle.name,
@@ -725,6 +795,7 @@ def _quote_from_bundle(bundle: _Bundle) -> Quote:
         asset_class=bundle.asset_class,
         bid=bundle.bid,
         ask=bundle.ask,
+        quote_meta=QuoteMetaModel.model_validate(meta),
     )
 
 
@@ -757,9 +828,45 @@ def _fundamentals_from_bundle(bundle: _Bundle) -> Fundamentals:
     )
 
 
+async def _fetch_alpaca_calendar(settings: Settings) -> list[tuple[datetime, datetime]] | None:
+    if not settings.alpaca_keys_present:
+        return None
+    today = datetime.now(timezone.utc).date()
+    start = (today - timedelta(days=14)).isoformat()
+    end = (today + timedelta(days=5)).isoformat()
+    url = f"{settings.resolved_broker_base_url}/v2/calendar?start={start}&end={end}"
+    payload = await _http_json(
+        url,
+        headers={
+            "APCA-API-KEY-ID": settings.alpaca_api_key_id,
+            "APCA-API-SECRET-KEY": settings.alpaca_api_secret_key,
+        },
+        timeout=8.0,
+    )
+    if not isinstance(payload, list):
+        return None
+    sessions = parse_alpaca_calendar(payload)
+    return sessions or None
+
+
+async def regular_market_sessions(settings: Settings) -> list[tuple[datetime, datetime]]:
+    """Alpaca market calendar when the broker answers; otherwise weekday regular hours."""
+    global _session_cache
+    now = time.monotonic()
+    if _session_cache and now - _session_cache[0] < _SESSION_TTL_SECONDS:
+        return _session_cache[1]
+    fetched = await _fetch_alpaca_calendar(settings)
+    anchor = datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York")).date()
+    sessions = fetched if fetched else weekday_sessions(anchor)
+    if fetched:
+        _session_cache = (now, sessions)
+    return sessions
+
+
 async def get_live_quote(symbol: str, settings: Settings) -> Quote:
     bundle = await _load_bundle(symbol, settings)
-    return _quote_from_bundle(bundle)
+    sessions = await regular_market_sessions(settings)
+    return _quote_from_bundle(bundle, sessions=sessions)
 
 
 async def get_live_fundamentals(symbol: str, settings: Settings) -> Fundamentals:

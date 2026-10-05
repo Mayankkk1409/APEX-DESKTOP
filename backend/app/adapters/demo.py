@@ -5,7 +5,8 @@ import math
 from datetime import date, datetime, timedelta, timezone
 
 from app.analysis import black_scholes as bs
-from app.schemas.market import Expiration, OptionChain, OptionContract, Quote, SearchHit
+from app.analysis.options_rules import build_quote_meta
+from app.schemas.market import Expiration, OptionChain, OptionContract, Quote, QuoteMetaModel, SearchHit
 
 UNIVERSE: dict[str, dict] = {
     "SPX": {
@@ -153,6 +154,21 @@ class DemoAdapter:
         expense = meta.get("expense_ratio")
         if meta.get("asset_class") in {"us_equity", "us_index"}:
             expense = None
+        received = now
+        quote_meta = QuoteMetaModel.model_validate(
+            build_quote_meta(
+                provider="demo",
+                feed="other",
+                quoted_at=received,
+                received_at=received,
+                bid=round(price * 0.999, 2),
+                ask=round(price * 1.001, 2),
+                bid_size=100,
+                ask_size=100,
+                now=received,
+                feed_delayed=False,
+            )
+        )
         return Quote(
             symbol=symbol,
             name=meta["name"],
@@ -173,6 +189,11 @@ class DemoAdapter:
             beta_5y=meta.get("beta_5y"),
             source="demo",
             secondary_source=None,
+            bid=quote_meta.bid,
+            ask=quote_meta.ask,
+            quote_meta=quote_meta,
+            asset_class=str(meta.get("asset_class") or "us_equity"),
+            as_of=received.isoformat(),
         )
 
     async def bars(self, symbol: str, timeframe: str, limit: int = 180) -> list[dict]:
@@ -314,6 +335,20 @@ class DemoAdapter:
                         greeks_source="model",
                         iv_source="model",
                         multiplier=100,
+                        quote_as_of=_now().isoformat(),
+                        quote_meta=QuoteMetaModel.model_validate(
+                            build_quote_meta(
+                                provider="demo",
+                                feed="other",
+                                quoted_at=_now(),
+                                received_at=_now(),
+                                bid=bid,
+                                ask=ask,
+                                bid_size=int(5 + 60 * nearness),
+                                ask_size=int(5 + 60 * nearness),
+                                feed_delayed=False,
+                            )
+                        ),
                     )
                 )
         return OptionChain(

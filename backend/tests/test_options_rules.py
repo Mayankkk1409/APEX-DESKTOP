@@ -447,3 +447,107 @@ def test_thresholds_match_the_documented_numbers() -> None:
     assert (t.spread_max_pct_of_mid, t.spread_max_pct_illiquid) == (0.10, 0.15)
     assert (t.min_open_interest, t.volume_oi_min_ratio, t.uoa_volume_multiple) == (500, 0.25, 3.0)
     assert t.gamma_dte_flag == 7
+
+
+def test_indicative_feed_is_labeled_delayed_and_opra_is_not() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from app.analysis.gate_config import QUOTE_FRESHNESS_SECONDS
+    from app.analysis.options_rules import build_quote_meta
+    from app.contracts import QuoteMeta
+
+    assert QUOTE_FRESHNESS_SECONDS == 5 * 60
+    now = datetime(2026, 10, 5, 15, 0, tzinfo=timezone.utc)
+    fresh = now - timedelta(seconds=60)
+    indicative = build_quote_meta(
+        provider="Alpaca",
+        feed="indicative",
+        quoted_at=fresh,
+        received_at=now,
+        bid=1.0,
+        ask=1.05,
+        bid_size=10,
+        ask_size=12,
+        now=now,
+    )
+    opra = build_quote_meta(
+        provider="Alpaca",
+        feed="opra",
+        quoted_at=fresh,
+        received_at=now,
+        bid=1.0,
+        ask=1.05,
+        bid_size=10,
+        ask_size=12,
+        now=now,
+    )
+    QuoteMeta(**indicative)
+    QuoteMeta(**opra)
+    assert indicative["feed"] == "indicative"
+    assert indicative["isStale"] is False
+    assert indicative["staleReason"] == "delayed"
+    assert opra["feed"] == "opra"
+    assert opra["isStale"] is False
+    assert opra["staleReason"] is None
+    assert indicative["bid"] == 1.0 and indicative["ask"] == 1.05
+    assert indicative["bidSize"] == 10 and indicative["askSize"] == 12
+
+
+def test_outside_regular_hours_quote_is_last_close_and_threshold_stays() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from app.analysis.options_rules import build_quote_meta
+
+    saturday = datetime(2026, 10, 3, 16, 0, tzinfo=timezone.utc)
+    friday_close = datetime(2026, 10, 2, 19, 59, tzinfo=timezone.utc)
+    closed = build_quote_meta(
+        provider="Alpaca",
+        feed="opra",
+        quoted_at=friday_close,
+        received_at=saturday,
+        bid=2.0,
+        ask=2.1,
+        bid_size=1,
+        ask_size=1,
+        now=saturday,
+    )
+    assert closed["isStale"] is False
+    assert closed["staleReason"] == "last_close"
+
+    session = datetime(2026, 10, 5, 15, 0, tzinfo=timezone.utc)
+    stale = build_quote_meta(
+        provider="Alpaca",
+        feed="opra",
+        quoted_at=session - timedelta(seconds=301),
+        received_at=session,
+        bid=2.0,
+        ask=2.1,
+        bid_size=1,
+        ask_size=1,
+        now=session,
+    )
+    fresh = build_quote_meta(
+        provider="Alpaca",
+        feed="opra",
+        quoted_at=session - timedelta(seconds=299),
+        received_at=session,
+        bid=2.0,
+        ask=2.1,
+        bid_size=1,
+        ask_size=1,
+        now=session,
+    )
+    delayed_old = build_quote_meta(
+        provider="Alpaca",
+        feed="indicative",
+        quoted_at=session - timedelta(seconds=301),
+        received_at=session,
+        bid=2.0,
+        ask=2.1,
+        bid_size=1,
+        ask_size=1,
+        now=session,
+    )
+    assert stale["isStale"] is True and stale["staleReason"] == "stale"
+    assert fresh["isStale"] is False and fresh["staleReason"] is None
+    assert delayed_old["isStale"] is True and delayed_old["staleReason"] == "delayed"

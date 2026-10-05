@@ -11,6 +11,8 @@ export type CatalystEvent = {
   event_time: string;
   source: string;
   as_of: string;
+  date_status?: "confirmed" | "estimated" | "unknown" | string;
+  earnings_display?: string | null;
 };
 
 export function CatalystCalendar({
@@ -73,7 +75,10 @@ export function CatalystCalendar({
               {rows.map((e) => (
                 <li key={e.id}>
                   <p className="text-champagne">
-                    <span className="font-mono text-bronze">{e.event_date}</span>
+                    <span className="font-mono text-bronze">
+                      {e.earnings_display ||
+                        (e.date_status === "estimated" ? `${e.event_date} est.` : e.event_date)}
+                    </span>
                     {e.event_time ? ` · ${e.event_time}` : ""} — {e.title}
                   </p>
                   <p className="text-xs text-subtle">{e.detail}</p>

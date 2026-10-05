@@ -791,12 +791,21 @@ def build_volatility_payload(
         rank_iv = primary_iv
     iv_hist_values = list(iv_history or [v for _, v in hist_points])
     iv_ranks = compute_iv_rank(iv_hist_values, rank_iv, atm_iv=atm_iv_val, hv=hv)
+    rank_is_proxy = bool(iv_ranks.get("proxy"))
+    published_rank = None if rank_is_proxy else iv_ranks.get("iv_rank")
+    published_percentile = None if rank_is_proxy else iv_ranks.get("iv_percentile")
+    iv_rank_gap = None
+    if rank_is_proxy or published_rank is None:
+        iv_rank_gap = (
+            "IV rank is a data gap: published IV history is missing or shorter than 20 points. "
+            "An HV ratio is not IV rank."
+        )
 
     em = expected_move(resolved_spot, atm_iv_val, dte)
     iv_vs_hv = _iv_hv_signal(atm_iv_val, hv)
     from app.analysis.gate_config import classify_vol_regime
 
-    regime_words = classify_vol_regime(iv_rank=iv_ranks.get("iv_rank"), iv=atm_iv_val, hv=hv)
+    regime_words = classify_vol_regime(iv_rank=published_rank, iv=atm_iv_val, hv=hv)
     regime_signal = {"sell premium": "sell_premium", "buy premium": "buy_premium", "fair": "fair"}[regime_words]
     iv_vs_hv = {**iv_vs_hv, "signal": regime_signal, "regime": regime_words}
 
@@ -815,7 +824,9 @@ def build_volatility_payload(
             notes.append("IV history has fewer than two points — chart may show a reference line only.")
     elif len({round(v, 6) for _, v in hist_points}) < 2:
         notes.append("IV history is flat — check option bar entitlement for the recommended leg.")
-    if iv_ranks.get("iv_rank") is None and len(closes) >= 20:
+    if iv_rank_gap:
+        notes.append(iv_rank_gap)
+    elif iv_ranks.get("iv_rank") is None and len(closes) >= 20:
         pts = int(iv_ranks.get("history_points") or 0)
         if pts > 0:
             notes.append(f"IV Rank / Percentile warming up — {pts} daily IV points (need ≥20).")
@@ -841,10 +852,13 @@ def build_volatility_payload(
         "recommended_contract": rec,
         "hv": hv,
         "hv_by_window": windows,
-        "iv_rank": iv_ranks.get("iv_rank"),
-        "iv_percentile": iv_ranks.get("iv_percentile"),
+        "iv_rank": published_rank,
+        "iv_percentile": published_percentile,
+        "iv_rank_gap": iv_rank_gap,
         "iv_history_points": iv_ranks.get("history_points"),
         "iv_history_source": iv_history_source,
+        "feed": chain.feed if chain else None,
+        "quoted_at": chain.as_of if chain else None,
         "hv_rank": hv30_bundle.get("hv_rank"),
         "hv_percentile": hv30_bundle.get("hv_percentile"),
         "hv_history_points": hv30_bundle.get("history_points"),

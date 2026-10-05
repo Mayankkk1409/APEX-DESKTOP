@@ -863,3 +863,56 @@ def test_auto_exec_tier_keeps_recommended_for_full_doc_strategy() -> None:
     )
     assert out["execution_tier"] == "auto_exec"
     assert out["recommendedContract"] is not None
+
+
+def test_inverted_put_skew_and_bad_quotes_are_flagged() -> None:
+    skewed = chain(
+        [
+            leg(100.0, "call", iv=0.3031, delta=0.50),
+            leg(100.0, "put", iv=0.3031, delta=-0.50),
+            leg(90.0, "put", iv=0.2740, delta=-0.25),
+            leg(110.0, "call", iv=0.90, bid=3.0, ask=1.0),
+        ]
+    )
+    out = analyse(skewed)
+    codes = {flag["code"] for flag in out["ledger_flags"]}
+    assert "inverted_put_skew" in codes
+    assert "crossed_market" in codes
+    assert "iv_outside_chain_range" in codes
+    assert out["summary"]["ledger_flags"] == out["ledger_flags"]
+
+
+def test_liquid_strike_is_preferred_before_an_illiquid_one() -> None:
+    from app.analysis.options_rules import ChainContext, ContractVerdict, DEFAULT_THRESHOLDS
+
+    liquid = leg(100.0, "call", open_interest=2000, volume=800)
+    thin = leg(105.0, "call", open_interest=10, volume=1)
+    verdicts = [
+        ContractVerdict(symbol=thin.symbol, strike=105.0, side="call", verdict="buy_candidate", dte=30, buy_score=90),
+        ContractVerdict(symbol=liquid.symbol, strike=100.0, side="call", verdict="buy_candidate", dte=30, buy_score=40),
+    ]
+    picked = pick_recommended_contract(
+        verdicts,
+        [thin, liquid],
+        ChainContext(symbol="XYZ", expiry=EXPIRY, dte=30, thresholds=DEFAULT_THRESHOLDS),
+        selected_strategy="Bull Call Spread",
+        direction="bullish",
+    )
+    assert picked is not None
+    assert picked["strike"] == 100.0
+    assert picked["liquidity_gate_cleared"] is True
+
+    only_thin = pick_recommended_contract(
+        [verdicts[0]],
+        [thin],
+        ChainContext(symbol="XYZ", expiry=EXPIRY, dte=30, thresholds=DEFAULT_THRESHOLDS),
+        selected_strategy="Bull Call Spread",
+        direction="bullish",
+    )
+    assert only_thin is not None
+    assert only_thin["liquidity_gate_cleared"] is False
+
+
+def test_alpaca_paper_requests_indicative_and_live_requests_opra() -> None:
+    assert AlpacaAdapter(settings()).feed == "indicative"
+    assert AlpacaAdapter(settings(alpaca_trading_mode="live")).feed == "opra"

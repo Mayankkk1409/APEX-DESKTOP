@@ -205,3 +205,31 @@ async def test_unavailable_does_not_invent_numbers(monkeypatch: pytest.MonkeyPat
 
 async def _none(*_a, **_k):
     return None
+
+
+def test_quote_bundle_carries_quote_meta() -> None:
+    from datetime import datetime, timezone
+
+    bundle = lq._Bundle(
+        symbol="AAPL",
+        name="Apple",
+        asset_class="stock",
+        price=100.0,
+        bid=99.9,
+        ask=100.1,
+        bid_size=100,
+        ask_size=120,
+        quoted_at="2026-10-05T14:58:00+00:00",
+        quote_feed="other",
+        feed_delayed=False,
+        quote_provider="Alpaca",
+        price_source="Alpaca",
+    )
+    quote = lq._quote_from_bundle(bundle, now=datetime(2026, 10, 5, 15, 0, tzinfo=timezone.utc))
+    assert quote.quote_meta is not None
+    assert quote.quote_meta.provider == "Alpaca"
+    assert quote.quote_meta.feed == "other"
+    assert quote.quote_meta.bid == 99.9
+    assert quote.quote_meta.ask == 100.1
+    assert quote.quote_meta.bidSize == 100
+    assert quote.quote_meta.isStale is False

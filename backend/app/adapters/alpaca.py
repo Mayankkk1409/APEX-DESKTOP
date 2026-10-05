@@ -9,7 +9,8 @@ from loguru import logger
 from app.adapters.demo import DemoAdapter
 from app.analysis import black_scholes as bs
 from app.config import Settings
-from app.schemas.market import Expiration, OptionChain, OptionContract, Quote, SearchHit
+from app.analysis.options_rules import build_quote_meta
+from app.schemas.market import Expiration, OptionChain, OptionContract, Quote, QuoteMetaModel, SearchHit
 
 #: Cash-settled indices have no listed chain on Alpaca (US equities and ETFs only).
 CASH_INDEX_SYMBOLS = {"SPX", "SPXW", "NDX", "RUT", "VIX", "XSP", "DJX", "XEO", "OEX"}
@@ -481,9 +482,27 @@ class AlpacaAdapter:
         # Contract metadata for THIS expiry only — full pagination, no other dates mixed in.
         meta = {row.get("symbol"): row for row in await self._option_contracts(symbol, expiry) if row.get("symbol")}
         contracts: list[OptionContract] = []
+        received = datetime.now(timezone.utc)
+        from app.services.live_quotes import regular_market_sessions
+
+        sessions = await regular_market_sessions(self.settings)
         for occ, snap in snaps.items():
             contract = _parse_snapshot(occ, snap, meta.get(occ))
             if contract is not None:
+                contract.quote_meta = QuoteMetaModel.model_validate(
+                    build_quote_meta(
+                        provider="Alpaca",
+                        feed=self.feed,
+                        quoted_at=contract.quote_as_of,
+                        received_at=received,
+                        bid=contract.bid,
+                        ask=contract.ask,
+                        bid_size=contract.bid_size,
+                        ask_size=contract.ask_size,
+                        now=received,
+                        sessions=sessions,
+                    )
+                )
                 contracts.append(contract)
         contracts.sort(key=lambda c: (c.strike, c.side))
         if not contracts:
