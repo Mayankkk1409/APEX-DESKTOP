@@ -10,7 +10,7 @@ from loguru import logger
 from app.config import get_settings
 from app.database import init_db
 from app.logging_setup import setup_logging
-from app.routers import auth, brokerage, expiry, health, market, portfolio, scan, volatility, watchlist, ws
+from app.routers import auth, brokerage, expiry, health, ledger, market, portfolio, scan, volatility, watchlist, ws
 from app.strategies.knowledge_base import validate_knowledge_base
 from app.routers import settings as settings_router
 
@@ -59,6 +59,7 @@ def create_app() -> FastAPI:
     app.include_router(expiry.router)
     app.include_router(settings_router.router)
     app.include_router(scan.router)
+    app.include_router(ledger.router)
     app.include_router(watchlist.router)
     app.include_router(ws.router)
     return app
