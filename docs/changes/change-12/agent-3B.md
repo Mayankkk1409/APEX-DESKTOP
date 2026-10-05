@@ -37,7 +37,7 @@ Full backend suite, from `/Users/Mayank/Desktop/APEX-change12-3B/backend`, using
 
 `pytest -q --tb=line`
 
-**1715 passed, 59 skipped, 0 failed** in 780.13s.
+**1715 passed, 59 skipped, 0 failed** in 391.54s. Exit code 0.
 
 The phase 3 status file recorded 1659 passed and 59 skipped before these worktrees, and it did not claim a suite run of the phase 3 WIP commit. This run includes that WIP plus the five tests in `test_change12_3b.py`. The skip count is still 59. Nothing failed.
 
