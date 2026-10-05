@@ -297,6 +297,9 @@ export interface StrategyLeg {
   mid?: number | null;
   symbol?: string;
   quantity?: number;
+  order_type?: string;
+  limit_basis?: string | null;
+  limit_price?: number | null;
 }
 
 /** Calendar spreads may return a breakeven band instead of a single strike. */
@@ -325,6 +328,16 @@ export interface StrategyMetrics {
   max_profit_unlimited_allowed?: boolean;
   /** Undefined-risk structures: the unbounded loss side is Unlimited, not a scanned stand-in. */
   max_loss_unlimited_allowed?: boolean;
+  /** Calendars, diagonals, butterflies, and ratios: do not render a scanned max profit. */
+  payoff_depends_on_remaining_leg?: boolean;
+  validation_error?: string | null;
+  equity_covered_by_holdings?: boolean;
+  greeks?: { delta?: number | null; gamma?: number | null; theta?: number | null; vega?: number | null };
+  payoff_grid?: {
+    underlying: number;
+    pnl: number;
+  }[];
+  capital_required?: number | null;
 }
 
 export interface StrategyLayer {
@@ -336,9 +349,11 @@ export interface StrategyLayer {
   clears_threshold?: boolean;
   direction?: string;
   vol_signal?: string;
+  vol_regime?: string | null;
   recommended_contract?: RecommendedContract | null;
   equity_required?: boolean;
   equity_overlay_only?: boolean;
+  equity_note?: string | null;
   what_is_this: string;
   why_recommended: string;
   why_it_fits?: string;
@@ -346,7 +361,11 @@ export interface StrategyLayer {
   strategies_evaluated?: number | null;
   selection_rationale?: string | null;
   risk_notes?: string[];
+  validation_errors?: Array<{ check?: string; expected?: string; actual?: string }>;
   auto_exec_line?: string | null;
+  auto_exec_blocked?: boolean;
+  checks_passed?: boolean;
+  execution_banner?: string | null;
   how_to_execute: string;
   metrics: StrategyMetrics;
   narrative: string;
@@ -409,6 +428,7 @@ export interface OrderLegFill {
   qty: number;
   fill_price?: number | null;
   asset_class?: string;
+  order_type?: string;
 }
 
 export interface OrderConfirmationDetails {

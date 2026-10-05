@@ -140,8 +140,8 @@ def test_apex_strategy_eligibility_rejections() -> None:
     )
     assert result.eligible is False
     assert len(result.rejection_reasons) >= 5
-    assert any("Catalyst" in r for r in result.rejection_reasons)
-    assert any("IVR" in r or "IV term structure" in r for r in result.rejection_reasons)
+    assert any("Earnings date is missing" in r or "Calendar days to confirmed earnings" in r for r in result.rejection_reasons)
+    assert any("IV rank" in r or "IVR" in r for r in result.rejection_reasons)
 
 
 def test_apex_strategy_eligibility_passes() -> None:
@@ -160,6 +160,11 @@ def test_apex_strategy_eligibility_passes() -> None:
             spread_pct=5.0,
             open_interest=1200,
             adv=6_000_000,
+            earnings_date_confirmed=True,
+            earnings_history_hits=6,
+            earnings_history_count=8,
+            front_expiry_listed=True,
+            back_expiry_listed=True,
         )
     )
     assert result.eligible is True
@@ -215,7 +220,7 @@ def test_apex_strategy_rejects_partial_match() -> None:
         )
     )
     assert one_wing.eligible is False
-    assert any("both call and put" in r for r in one_wing.rejection_reasons)
+    assert any("Earnings move history is missing" in r for r in one_wing.rejection_reasons)
 
     exact_floor = check_apex_strategy_eligibility(
         ApexStrategyInput(
@@ -256,12 +261,39 @@ def test_earnings_blackout_blocks_new_positions() -> None:
 
 
 def test_chain_median_spread_is_percent_for_apex_gate() -> None:
-    inp = build_apex_strategy_input_from_scan(
+    # Spread is the worst of the four chosen strikes, in percent of mid.
+    # A chain-level median and a tighter unrelated contract are not the gate.
+    missing = build_apex_strategy_input_from_scan(
         catalyst_days=7,
         vol_layer={"iv_rank": 80},
         chain_analysis={"summary": {"median_spread_pct": 0.12}, "contracts": []},
     )
-    assert inp.spread_pct == pytest.approx(12.0)
+    assert missing.spread_pct is None
+
+    def leg(strike: float, side: str, bid: float, ask: float, oi: int) -> dict:
+        return {
+            "strike": strike,
+            "side": side,
+            "bid": bid,
+            "ask": ask,
+            "delta": 0.20 if side == "call" else -0.20,
+            "open_interest": oi,
+        }
+
+    front = [
+        leg(105, "call", 0.94, 1.06, 2000),
+        leg(95, "put", 0.94, 1.06, 1800),
+        leg(100, "call", 2.40, 2.50, 50),
+    ]
+    back = [leg(105, "call", 2.20, 2.40, 1500), leg(95, "put", 2.20, 2.40, 1500)]
+    inp = build_apex_strategy_input_from_scan(
+        catalyst_days=7,
+        vol_layer={"iv_rank": 80},
+        chain_analysis={"contracts": front},
+        back_month_contracts=back,
+    )
+    assert inp.spread_pct == pytest.approx(12.0, abs=0.2)
+    assert inp.open_interest == 1500
 
 
 def test_select_strategy_no_trade_below_threshold() -> None:
@@ -300,6 +332,11 @@ def test_select_strategy_apex_strategy_on_catalyst() -> None:
         spread_pct=4.0,
         open_interest=1200,
         adv=6_000_000,
+        earnings_date_confirmed=True,
+        earnings_history_hits=6,
+        earnings_history_count=8,
+        front_expiry_listed=True,
+        back_expiry_listed=True,
     )
     label = select_strategy(
         composite=82,
@@ -314,7 +351,9 @@ def test_select_strategy_apex_strategy_on_catalyst() -> None:
         apex_input=apex_input,
         confirmed_pattern_count=1,
     )
-    assert label == APEX_STRATEGY_NAME
+    from app.services.apex_strategy import GAMMA_TRAMPOLINE_NAME
+
+    assert label == GAMMA_TRAMPOLINE_NAME
 
 
 async def _auth(client: AsyncClient) -> str:

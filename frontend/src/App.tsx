@@ -8,6 +8,7 @@ import { Portfolio } from "./pages/Portfolio";
 import { Settings } from "./pages/Settings";
 import { Signup } from "./pages/Signup";
 import { Splash } from "./pages/Splash";
+import { ExpiryWatchNotice } from "./components/ExpiryWatchNotice";
 import { useSession } from "./store";
 
 /** Splash plays once on the marketing entry route; deep links skip it so /portfolio is not blocked. */
@@ -62,8 +63,13 @@ export default function App() {
     return <Splash />;
   }
 
+  const showExpiryNotice =
+    Boolean(getAccessToken()) && loc.pathname !== "/login" && loc.pathname !== "/signup";
+
   return (
-    <Routes location={loc}>
+    <>
+      {showExpiryNotice ? <ExpiryWatchNotice /> : null}
+      <Routes location={loc}>
       <Route path="/" element={<Navigate to="/login" replace />} />
       <Route path="/login" element={<Login />} />
       <Route path="/signup" element={<Signup />} />
@@ -95,5 +101,6 @@ export default function App() {
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </>
   );
 }

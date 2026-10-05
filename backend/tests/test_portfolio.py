@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pytest
 from httpx import AsyncClient
@@ -66,8 +66,8 @@ def test_symbol_pnl_open_and_closed() -> None:
     assert rows["MSFT"].realized_pl == pytest.approx(100.0)
 
 
-def test_pnl_history_daily_flat_without_trades() -> None:
-    created = datetime.now(timezone.utc) - timedelta(days=3)
+def test_pnl_history_omits_days_without_observations() -> None:
+    created = datetime(2026, 8, 1, 15, 0, tzinfo=timezone.utc)
     user = User(
         id="u1",
         username="flat",
@@ -79,10 +79,68 @@ def test_pnl_history_daily_flat_without_trades() -> None:
         created_at=created,
     )
     points = pnl_history_points(user, [], [])
-    assert len(points) == 4
-    assert all(p["portfolio_value"] == 100_000 for p in points)
-    assert all(p["balance"] == 100_000 for p in points)
-    assert all(p["cumulative_pl"] == 0 for p in points)
+    assert len(points) == 2
+    assert points[0]["t"].startswith("2026-08-01")
+    assert points[0]["portfolio_value"] == 100_000
+    assert points[0]["balance"] == 100_000
+    assert points[0]["cumulative_pl"] == 0
+    live = datetime.fromisoformat(points[1]["t"])
+    assert live.date() == datetime.now(timezone.utc).date()
+    assert points[1]["portfolio_value"] == 100_000
+    assert points[1]["cumulative_pl"] == 0
+
+
+def test_pnl_history_is_open_fill_and_live_mark() -> None:
+    created = datetime(2026, 8, 1, 15, 0, tzinfo=timezone.utc)
+    filled = datetime(2026, 8, 20, 15, 0, tzinfo=timezone.utc)
+    user = User(
+        id="u1",
+        username="marks",
+        email="marks@example.com",
+        password_hash="x",
+        cash_balance=99_000,
+        starting_balance=100_000,
+        account_mode="paper_funded",
+        created_at=created,
+    )
+    order = _order("AAPL", "buy", 10, 100.0)
+    order.filled_at = filled
+    position = Position(
+        user_id="u1",
+        symbol="AAPL",
+        qty=10,
+        avg_cost=100.0,
+        current_price=110.0,
+        asset_class="us_equity",
+    )
+    points = pnl_history_points(user, [order], [position])
+    assert [p["t"][:10] for p in points] == ["2026-08-01", "2026-08-20", points[-1]["t"][:10]]
+    assert len(points) == 3
+    # Open: starting cash, no positions.
+    assert points[0]["portfolio_value"] == 100_000
+    # Fill: cash 99,000 after spending 1,000, marked at the 100 fill → 100,000.
+    assert points[1]["portfolio_value"] == 100_000
+    # Live: cash_balance 99,000 + 10 × 110 = 100,100.
+    assert points[2]["portfolio_value"] == 100_100
+
+
+def test_short_option_unrealized_gains_when_mark_falls() -> None:
+    positions = [
+        Position(
+            user_id="u1",
+            symbol="AAPL270115P00150000",
+            qty=-1,
+            avg_cost=4.0,
+            current_price=3.0,
+            asset_class="us_option",
+        )
+    ]
+    rows = symbol_pnl_rows([], positions)
+    # (3 − 4) × (−1) × 100 = +100
+    assert rows[0].unrealized_pl == 100.0
+    assert rows[0].total_pl == 100.0
+    assert rows[0].is_open is True
+    assert rows[0].qty == -1
 
 
 def test_pnl_history_naive_db_timestamps() -> None:

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   atmStrike,
   buildLadder,
+  resolveChainHighlights,
   chainWideFlagNotes,
   chainWideFlags,
   expiryMatches,
@@ -335,5 +336,78 @@ describe("session guards", () => {
     expect(hasRenderableChain(null)).toBe(false);
     expect(hasRenderableChain({ contracts: [] } as unknown as ChainAnalysis)).toBe(false);
     expect(hasRenderableChain({ contracts: [row(100, "call")] } as unknown as ChainAnalysis)).toBe(true);
+  });
+});
+
+describe("strategy leg highlights", () => {
+  it("marks every listed leg, including both sides and a second expiry", () => {
+    const highlights = resolveChainHighlights({
+      symbol: "XYZ",
+      legs: [
+        { side: "call", strike: 100, expiry: "2026-07-01" },
+        { side: "put", strike: 100, expiry: "2026-07-01" },
+        { side: "call", strike: 110, expiry: "2026-08-01" },
+        { option_side: "put", strike: 90, expiry: "2026-08-01" },
+      ],
+    });
+    const july = buildLadder(
+      [row(90, "put"), row(100, "call"), row(100, "put"), row(110, "call")],
+      100,
+      highlights,
+      "2026-07-01",
+    );
+    expect(july.find((r) => r.strike === 100)?.recommendedSides).toEqual(["call", "put"]);
+    expect(july.find((r) => r.strike === 110)?.isRecommended).toBe(false);
+    expect(july.find((r) => r.strike === 90)?.isRecommended).toBe(false);
+
+    const august = buildLadder(
+      [row(90, "put"), row(100, "call"), row(110, "call")],
+      100,
+      highlights,
+      "2026-08-01",
+    );
+    expect(august.find((r) => r.strike === 110)?.recommendedSide).toBe("call");
+    expect(august.find((r) => r.strike === 90)?.recommendedSide).toBe("put");
+    expect(august.find((r) => r.strike === 100)?.isRecommended).toBe(false);
+  });
+
+  it("keeps No Trade legs and ignores another symbol's strikes", () => {
+    const noTrade = resolveChainHighlights({
+      symbol: "BBB",
+      legs: [{ side: "put", strike: 90, expiry: "2026-09-18", symbol: "BBB260918P00090000" }],
+      recommended: null,
+      sessionRecommended: { symbol: "AAA", expiry: "2026-09-18", strike: 100, side: "call", contract_id: null },
+    });
+    const ladder = buildLadder([row(90, "put"), row(100, "call")], 100, noTrade, "2026-09-18");
+    expect(ladder.filter((r) => r.isRecommended).map((r) => r.strike)).toEqual([90]);
+
+    const second = resolveChainHighlights({
+      symbol: "MSFT",
+      legs: [{ side: "call", strike: 420, expiry: "2026-10-16" }],
+      recommended: { symbol: "AAPL", expiry: "2026-10-16", strike: 180, side: "call", contract_id: null },
+    });
+    expect(second).toEqual([{ strike: 420, side: "call", expiry: "2026-10-16", symbol: null }]);
+  });
+
+  it("derives a mark from the recommended strike when legs are missing", () => {
+    const highlights = resolveChainHighlights({
+      symbol: "XYZ",
+      legs: [],
+      recommended: { symbol: "XYZ", expiry: "2026-07-01", strike: 105, side: "call", contract_id: null },
+    });
+    const ladder = buildLadder([row(100, "call"), row(105, "call")], 102, highlights, "2026-07-01");
+    expect(ladder.filter((r) => r.isRecommended).map((r) => r.strike)).toEqual([105]);
+  });
+
+  it("shows no mark when legs and strikes are both missing", () => {
+    const highlights = resolveChainHighlights({
+      symbol: "XYZ",
+      legs: [],
+      recommended: null,
+      sessionRecommended: { symbol: "XYZ", expiry: "2026-07-01", strike: 100, side: "call", contract_id: null },
+    });
+    expect(highlights).toEqual([]);
+    const ladder = buildLadder([row(100, "call"), row(105, "call")], 100, highlights);
+    expect(ladder.some((r) => r.isRecommended)).toBe(false);
   });
 });

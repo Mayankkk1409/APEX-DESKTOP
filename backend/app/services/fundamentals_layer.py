@@ -430,6 +430,13 @@ def _parse_us_date(text: str | None) -> date | None:
     return None
 
 
+def announcement_date(announcement: str | None) -> date | None:
+    """Date printed in a NASDAQ earnings-date ``announcement`` string, or None."""
+    if not isinstance(announcement, str) or ":" not in announcement:
+        return None
+    return _parse_us_date(announcement.split(":")[-1].strip())
+
+
 async def _scan_nasdaq_earnings_calendar(symbol: str, *, horizon_days: int = 90) -> dict[str, Any] | None:
     """Walk the NASDAQ earnings calendar for the next ``horizon_days`` and return the nearest future print."""
     today = date.today()
@@ -480,18 +487,23 @@ async def _earnings_calendar(symbol: str, surprise: dict[str, Any]) -> dict[str,
     )
     data = (payload or {}).get("data") if isinstance(payload, dict) else None
     announcement = (data or {}).get("announcement") if isinstance(data, dict) else None
+    report_text = (data or {}).get("reportText") if isinstance(data, dict) else None
+    vendor_note = None
+    if isinstance(report_text, str) and report_text.strip():
+        parts = [part.strip() for part in report_text.strip().split(". ") if part.strip()]
+        vendor_note = ". ".join(parts[:2])
+        if vendor_note and not vendor_note.endswith("."):
+            vendor_note += "."
 
     next_date = None
     dte = None
     source = None
     event_time = None
-    if isinstance(announcement, str):
-        maybe = announcement.split(":")[-1].strip()
-        parsed = _parse_us_date(maybe)
-        if parsed is not None:
-            next_date = parsed.isoformat()
-            dte = (parsed - today).days
-            source = "NASDAQ earnings-date"
+    parsed = announcement_date(announcement if isinstance(announcement, str) else None)
+    if parsed is not None:
+        next_date = parsed.isoformat()
+        dte = (parsed - today).days
+        source = "NASDAQ earnings-date"
 
     if next_date is None:
         scanned = await _scan_nasdaq_earnings_calendar(symbol)
@@ -510,6 +522,7 @@ async def _earnings_calendar(symbol: str, surprise: dict[str, Any]) -> dict[str,
             "eps_forecast": latest.get("consensus"),
             "last_reported": last,
             "source": source,
+            "vendor_note": vendor_note,
         }
 
     return {
@@ -520,6 +533,7 @@ async def _earnings_calendar(symbol: str, surprise: dict[str, Any]) -> dict[str,
         "eps_forecast": None,
         "last_reported": last,
         "source": "NASDAQ" if last else None,
+        "vendor_note": vendor_note,
     }
 
 
@@ -917,6 +931,9 @@ def _build_factor_cards(
             + (f", expected {event_time}" if event_time else "")
             + f" per {calendar.get('source') or 'NASDAQ'}."
         )
+        note = calendar.get("vendor_note")
+        if isinstance(note, str) and note.strip():
+            earn_parts.append(note.strip())
     if next_q.get("consensus_eps") is not None:
         earn_parts.append(
             f"Forward-quarter consensus EPS is {next_q['consensus_eps']:.2f}"

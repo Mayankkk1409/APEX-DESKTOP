@@ -1,9 +1,12 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BrokerageConnectionPanel } from "./BrokerageConnectionPanel";
 import { useSession } from "../store";
+import { openSnapTradeConnectionPortal } from "../lib/brokeragePortal";
 import { writePortfolioViewMode } from "../lib/portfolioViewMode";
 import { createTestQueryClient } from "../test/queryClient";
 
@@ -13,6 +16,7 @@ vi.mock("../api", () => ({
     brokeragePortalUrl: vi.fn(),
     brokerageSync: vi.fn(async () => ({ ok: true, connection_status: "connected", account_count: 2 })),
     brokerageAccounts: vi.fn(),
+    brokerageStatus: vi.fn(),
     brokerageBalance: vi.fn(),
     brokeragePositions: vi.fn(),
     brokerageDisconnect: vi.fn(),
@@ -66,6 +70,34 @@ describe("BrokerageConnectionPanel", () => {
       as_of_timestamp: "2026-08-27T12:00:00Z",
     });
     vi.mocked(api.brokeragePositions).mockResolvedValue({ positions: [] });
+  });
+
+  it("connect button opens the SnapTrade portal URL", async () => {
+    const portalUrl = "https://app.snaptrade.com/snapTrade/redeemToken?token=test-token";
+    vi.mocked(api.brokerageRegister).mockResolvedValue({ ok: true, connection_status: "pending" });
+    vi.mocked(api.brokeragePortalUrl).mockResolvedValue({ url: portalUrl });
+    const assign = vi.fn();
+
+    await openSnapTradeConnectionPortal(assign);
+
+    expect(api.brokerageRegister).toHaveBeenCalledOnce();
+    expect(api.brokeragePortalUrl).toHaveBeenCalledOnce();
+    expect(assign).toHaveBeenCalledWith(portalUrl);
+    expect(new URL(assign.mock.calls[0][0] as string).hostname).toContain("snaptrade");
+
+    const src = readFileSync(fileURLToPath(new URL("./BrokerageConnectionPanel.tsx", import.meta.url)), "utf8");
+    const connectButton = src.slice(src.indexOf('data-testid="brokerage-connect"'), src.indexOf("Connect brokerage"));
+    expect(connectButton).toContain("connect.mutate()");
+    expect(src).toContain("mutationFn: () => openSnapTradeConnectionPortal()");
+    expect(src).not.toContain("brokerage-disclosure");
+  });
+
+  it("does not leave the app when the portal URL is not SnapTrade", async () => {
+    vi.mocked(api.brokerageRegister).mockResolvedValue({ ok: true, connection_status: "pending" });
+    vi.mocked(api.brokeragePortalUrl).mockResolvedValue({ url: "https://example.com/not-snaptrade" });
+    const assign = vi.fn();
+    await expect(openSnapTradeConnectionPortal(assign)).rejects.toThrow(/connection portal URL/);
+    expect(assign).not.toHaveBeenCalled();
   });
 
   it("renders connect CTA when no accounts are linked", () => {
@@ -123,5 +155,42 @@ describe("BrokerageConnectionPanel", () => {
     expect(html).toContain('data-testid="brokerage-refresh"');
     expect(html).not.toContain('data-testid="brokerage-stats"');
     expect(html).not.toContain('data-testid="brokerage-positions"');
+  });
+
+  it("shows SnapTrade down from the live status probe, not a connected badge", () => {
+    const qc = createTestQueryClient();
+    qc.setQueryData(["brokerage", "accounts"], { connection_status: "connected", accounts: mockAccounts });
+    qc.setQueryData(["brokerage", "status"], {
+      provider: "snaptrade",
+      configured: true,
+      upstream: "down",
+      http_status: 401,
+      connection_status: "connected",
+      account_count: 2,
+      host: "https://api.snaptrade.com",
+      missing: [],
+    });
+    const html = renderPanel(qc);
+    expect(html).toContain("SnapTrade down");
+    expect(html).toContain("HTTP 401");
+    expect(html).toContain('data-testid="brokerage-upstream-down"');
+  });
+
+  it("shows not configured when SnapTrade credentials are missing", () => {
+    const qc = createTestQueryClient();
+    qc.setQueryData(["brokerage", "status"], {
+      provider: "snaptrade",
+      configured: false,
+      upstream: "not_configured",
+      http_status: null,
+      connection_status: null,
+      account_count: 0,
+      host: "https://api.snaptrade.com",
+      missing: ["SNAPTRADE_CLIENT_ID", "SNAPTRADE_CONSUMER_KEY", "ENCRYPTION_KEY"],
+    });
+    const html = renderPanel(qc);
+    expect(html).toContain("SnapTrade not configured");
+    expect(html).toContain("SNAPTRADE_CLIENT_ID");
+    expect(html).not.toContain(">Connected<");
   });
 });

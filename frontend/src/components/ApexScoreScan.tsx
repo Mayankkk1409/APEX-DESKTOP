@@ -63,7 +63,6 @@ export function ApexScoreScan({ initial }: { initial?: ApexScoreLayer | null }) 
   }
 
   const composite = data.composite_score;
-  const threshold = data.threshold_full_doc ?? 72;
   const tier = scoreTier(composite);
   const clears = data.clears_threshold;
 
@@ -76,7 +75,7 @@ export function ApexScoreScan({ initial }: { initial?: ApexScoreLayer | null }) 
       <header className="sf-head">
         <div>
           <h1 className="sf-title">APEX Composite Score</h1>
-          <p className="sf-sub">Full Document §8 · execution threshold ≥ {threshold}</p>
+          <p className="sf-sub">Weighted composite · auto-execute uses your saved minimum</p>
         </div>
       </header>
 
@@ -98,7 +97,7 @@ export function ApexScoreScan({ initial }: { initial?: ApexScoreLayer | null }) 
         </div>
         <div className="as-hero-copy">
           <p className={`as-threshold-badge ${clears ? "is-clear" : "is-below"}`} data-testid="apex-threshold-badge">
-            {clears ? "Threshold met" : "Below execution threshold"}
+            {clears ? "Threshold met" : "Score recorded"}
           </p>
           <NarrativeBlock
             paragraphs={data.paragraphs}

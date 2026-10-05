@@ -23,7 +23,13 @@ export const DEFAULT_USER_SETTINGS: UserSettings = {
   maxPositions: 8,
 };
 
-export const AUTO_EXEC_WARNING_THRESHOLD = 72;
+/** Shown under the auto-execution minimum control. */
+export const AUTO_EXEC_DISCLAIMER =
+  "New accounts start at the system default of 85. Auto-execution uses the minimum you set; that setting is the one that applies.";
+
+export function isRiskProfile(value: unknown): value is RiskProfile {
+  return value === "conservative" || value === "moderate" || value === "aggressive" || value === "custom";
+}
 
 function mergeSettings(raw: Partial<UserSettings> | null): UserSettings {
   return {

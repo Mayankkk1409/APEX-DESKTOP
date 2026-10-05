@@ -147,6 +147,25 @@ describe("StrategyScan", () => {
     expect(html).toContain('data-testid="strategy-metrics"');
     expect(html).toContain("$120");
     expect(html).toContain("$1.20 debit");
+    expect(html).not.toContain("options overlay only");
+    expect(html).not.toContain("stock is not submitted");
+  });
+
+  it("shows the holdings note instead of an options-only stock assumption", () => {
+    const html = renderToStaticMarkup(
+      <StrategyScan
+        symbol="AAPL"
+        initial={{
+          ...strategyPayload,
+          selected_strategy: "Covered Call",
+          equity_required: true,
+          equity_note: "Using 100 shares already held at cost basis $42.50. No additional shares are bought.",
+        }}
+      />,
+    );
+    expect(html).toContain("Using 100 shares already held at cost basis $42.50");
+    expect(html).not.toContain("options overlay only");
+    expect(html).not.toContain("stock is not submitted");
   });
 
   it("renders blocked state without payoff metrics", () => {
@@ -192,6 +211,29 @@ describe("StrategyScan", () => {
     expect(html).toContain('data-testid="strategy-metrics"');
     expect(html).toContain('data-testid="strategy-legs"');
     expect(html).not.toContain("NO TRADE");
+  });
+
+  it("does not show a scanned max profit when the structure has no closed form", () => {
+    const html = renderToStaticMarkup(
+      <StrategyScan
+        symbol="AAPL"
+        initial={{
+          ...strategyPayload,
+          selected_strategy: "Calendar Spread",
+          what_is_this: "Payoff depends on the remaining long leg. No closed-form max profit is shown.",
+          metrics: {
+            ...strategyPayload.metrics,
+            max_profit: 9999,
+            max_profit_unlimited_allowed: true,
+            payoff_depends_on_remaining_leg: true,
+            notes: "Payoff depends on the remaining long leg. No closed-form max profit is shown.",
+          },
+        }}
+      />,
+    );
+    expect(html).toContain("remaining long leg");
+    expect(html).not.toContain("$9,999");
+    expect(html).not.toContain("Unlimited");
   });
 
   it("shows outlook, cited fit, and Unlimited loss", () => {

@@ -6,7 +6,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-RiskProfile = Literal["conservative", "moderate", "aggressive"]
+RiskProfile = Literal["conservative", "moderate", "aggressive", "custom"]
 ThemePreference = Literal["dark", "light", "system"]
 
 
@@ -21,7 +21,7 @@ class TradingSettingsOut(BaseModel):
 
 
 class TradingSettingsPatch(BaseModel):
-    auto_execution_threshold: Optional[float] = Field(default=None, ge=60, le=100)
+    auto_execution_threshold: Optional[float] = Field(default=None, ge=0, le=100)
     risk_profile: Optional[RiskProfile] = None
     max_risk_per_trade_pct: Optional[float] = Field(default=None, ge=0.5, le=10)
     max_positions: Optional[int] = Field(default=None, ge=1, le=50)

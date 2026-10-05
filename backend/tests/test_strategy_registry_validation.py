@@ -101,8 +101,9 @@ def test_calendar_max_profit_is_finite_not_unlimited() -> None:
         iv=0.25,
         ticker="AAPL",
     )
-    assert metrics["max_profit"] != "Unlimited"
     assert isinstance(metrics["max_profit"], (int, float))
+    assert metrics["max_profit"] != "Unlimited"
+    assert metrics["max_profit_unlimited_allowed"] is False
     assert metrics.get("max_profit_iv_assumption_dependent") is True
 
 
@@ -245,6 +246,7 @@ def _apex_front_back_chains() -> tuple[list[dict], list[dict]]:
         _leg(105.0, "call", FRONT_EXPIRY, bid=1.2, ask=1.4, root="AAPL"),
         _leg(95.0, "put", FRONT_EXPIRY, bid=1.0, ask=1.2, root="AAPL"),
         _leg(100.0, "call", FRONT_EXPIRY, bid=2.5, ask=2.7, root="AAPL"),
+        _leg(100.0, "put", FRONT_EXPIRY, bid=2.3, ask=2.5, root="AAPL"),
     ]
     for row in front:
         if row["side"] == "call" and row["strike"] == 105.0:
@@ -283,7 +285,8 @@ def test_apex_strategy_four_legs_when_eligible() -> None:
     assert buy_expiries == {BACK_EXPIRY}
     validation = validate_strategy_output(APEX_STRATEGY_NAME, metrics, "AAPL")
     assert validation.valid, validation.errors
-    assert metrics.get("max_profit_unlimited_allowed") is True
+    assert metrics.get("max_profit_unlimited_allowed") is not True
+    assert isinstance(metrics.get("max_profit"), (int, float))
     assert len(metrics["breakevens"]) >= 2
 
 

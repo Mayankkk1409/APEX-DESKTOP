@@ -279,12 +279,31 @@ def test_zero_theta_yields_no_ratio_rather_than_infinity() -> None:
 
 
 def test_rule1_and_rule2_proprietary_filters() -> None:
-    rule1 = evaluate_contract(contract(delta=0.55, theta=-0.049), ctx())
+    # Default theta mode is percent of premium. IV must be below HV and the spread under 8%.
+    # The old fixture (theta -0.049 on a $1 mid, IV above HV, 10% spread) no longer passes Rule 1.
+    rule1 = evaluate_contract(
+        contract(delta=0.55, theta=-0.01, bid=0.97, ask=1.03, iv=0.20),
+        ctx(hv=0.30),
+    )
     assert "rule1_buy" in rule1.flags
     assert "Rule 1" in rule1.reasoning
+    assert "rule1_ratio_skipped" not in rule1.flags
 
-    # Delta clears 0.55 but daily Theta is at the 0.05 limit, so Rule 1 does not fire.
-    assert "rule1_buy" not in evaluate_contract(contract(delta=0.55, theta=-0.05), ctx()).flags
+    rich = evaluate_contract(contract(delta=0.55, theta=-0.01, bid=0.97, ask=1.03, iv=0.30), ctx(hv=0.22))
+    assert "rule1_buy" not in rich.flags
+
+    # Delta clears 0.55 but daily Theta is at the 0.05 limit in absolute mode.
+    from app.analysis import gate_config
+
+    original = gate_config.theta_filter_mode
+    gate_config.theta_filter_mode = lambda: "abs_per_share"  # type: ignore[method-assign]
+    try:
+        assert "rule1_buy" not in evaluate_contract(
+            contract(delta=0.55, theta=-0.05, bid=0.97, ask=1.03, iv=0.20),
+            ctx(hv=0.30),
+        ).flags
+    finally:
+        gate_config.theta_filter_mode = original  # type: ignore[method-assign]
 
     rule2 = evaluate_contract(contract(delta=0.20, theta=-0.10), ctx())
     assert "rule2_sell" in rule2.flags

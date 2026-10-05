@@ -19,69 +19,55 @@ from app.analysis.score_bounds import assert_score_in_bounds
 
 @dataclass
 class CompositeScoreBreakdown:
-    technical: float
-    options_iv: float
-    liquidity: float
-    catalyst_fundamental: float
-    payoff_risk: float
-    cross_tf: float
-    data_freshness: float
+    technicals: float
+    volatility: float
+    options: float
+    sentiment: float | None
+    fundamentals: float
+    weights_applied: dict[str, float] = field(default_factory=dict)
     penalties: dict[str, float] = field(default_factory=dict)
     raw_total: float = 0.0
     composite: float = 0.0
     tier: str = "no_trade"
 
     def to_api_dict(self) -> dict[str, Any]:
-        weights = APEX_COMPOSITE_WEIGHTS
+        weights = self.weights_applied or APEX_COMPOSITE_WEIGHTS
+        sent = self.sentiment
         components = [
             {
-                "id": "technical",
-                "label": "Technical",
-                "score": self.technical,
-                "weight": weights["technical"],
-                "contribution": round(self.technical * weights["technical"], 1),
+                "id": "technicals",
+                "label": "Technicals",
+                "score": self.technicals,
+                "weight": weights["technicals"],
+                "contribution": round(self.technicals * weights["technicals"], 1),
             },
             {
-                "id": "options_iv",
-                "label": "Options / IV",
-                "score": self.options_iv,
-                "weight": weights["options_iv"],
-                "contribution": round(self.options_iv * weights["options_iv"], 1),
+                "id": "volatility",
+                "label": "Volatility",
+                "score": self.volatility,
+                "weight": weights["volatility"],
+                "contribution": round(self.volatility * weights["volatility"], 1),
             },
             {
-                "id": "liquidity",
-                "label": "Liquidity",
-                "score": self.liquidity,
-                "weight": weights["liquidity"],
-                "contribution": round(self.liquidity * weights["liquidity"], 1),
+                "id": "options",
+                "label": "Greeks quality",
+                "score": self.options,
+                "weight": weights["options"],
+                "contribution": round(self.options * weights["options"], 1),
             },
             {
-                "id": "catalyst_fundamental",
-                "label": "Catalyst / Fundamental",
-                "score": self.catalyst_fundamental,
-                "weight": weights["catalyst_fundamental"],
-                "contribution": round(self.catalyst_fundamental * weights["catalyst_fundamental"], 1),
+                "id": "sentiment",
+                "label": "Sentiment",
+                "score": sent,
+                "weight": weights.get("sentiment", 0.0),
+                "contribution": round(sent * weights["sentiment"], 1) if sent is not None else 0.0,
             },
             {
-                "id": "payoff_risk",
-                "label": "Payoff / Risk",
-                "score": self.payoff_risk,
-                "weight": weights["payoff_risk"],
-                "contribution": round(self.payoff_risk * weights["payoff_risk"], 1),
-            },
-            {
-                "id": "cross_tf",
-                "label": "Cross-TF",
-                "score": self.cross_tf,
-                "weight": weights["cross_tf"],
-                "contribution": round(self.cross_tf * weights["cross_tf"], 1),
-            },
-            {
-                "id": "data_freshness",
-                "label": "Data Freshness",
-                "score": self.data_freshness,
-                "weight": weights["data_freshness"],
-                "contribution": round(self.data_freshness * weights["data_freshness"], 1),
+                "id": "fundamentals",
+                "label": "Fundamentals",
+                "score": self.fundamentals,
+                "weight": weights["fundamentals"],
+                "contribution": round(self.fundamentals * weights["fundamentals"], 1),
             },
         ]
         return {
@@ -110,39 +96,51 @@ def _score_tier(composite: float) -> str:
     return "candidate"
 
 
+def _weights_for_sentiment(sentiment_score: float | None) -> dict[str, float]:
+    """Documented §8.1 weights. Missing sentiment is omitted and the rest are renormalized."""
+    documented = APEX_COMPOSITE_WEIGHTS
+    if sentiment_score is not None:
+        return dict(documented)
+    active = ("technicals", "volatility", "options", "fundamentals")
+    total = sum(documented[key] for key in active)
+    applied = {key: documented[key] / total for key in active}
+    applied["sentiment"] = 0.0
+    applied["risk"] = 0.0
+    return applied
+
+
 def compute_apex_composite_score(
     *,
     technical_score: float,
-    options_iv_score: float,
-    liquidity_score: float,
-    catalyst_fundamental_score: float,
-    payoff_risk_score: float,
-    cross_tf_score: float,
-    data_freshness_score: float,
+    volatility_score: float,
+    options_score: float,
+    sentiment_score: float | None,
+    fundamental_score: float,
     direction_conflict: bool = False,
     stale_data: bool = False,
     wide_spreads: bool = False,
+    earnings_before_expiry: bool = False,
 ) -> CompositeScoreBreakdown:
-    """Compute weighted composite with documented penalties."""
+    """Full Document §8.1: 30/25/20/15/10, then documented penalties. Risk weight is 0.
+
+    A missing sentiment score is omitted. It is not replaced with a neutral 50.
+    """
     for name, val in (
         ("technical_score", technical_score),
-        ("options_iv_score", options_iv_score),
-        ("liquidity_score", liquidity_score),
-        ("catalyst_fundamental_score", catalyst_fundamental_score),
-        ("payoff_risk_score", payoff_risk_score),
-        ("cross_tf_score", cross_tf_score),
-        ("data_freshness_score", data_freshness_score),
+        ("volatility_score", volatility_score),
+        ("options_score", options_score),
+        ("sentiment_score", sentiment_score),
+        ("fundamental_score", fundamental_score),
     ):
-        assert_score_in_bounds(name, val)
-    weights = APEX_COMPOSITE_WEIGHTS
+        if val is not None:
+            assert_score_in_bounds(name, val)
+    weights = _weights_for_sentiment(sentiment_score)
     raw = (
-        technical_score * weights["technical"]
-        + options_iv_score * weights["options_iv"]
-        + liquidity_score * weights["liquidity"]
-        + catalyst_fundamental_score * weights["catalyst_fundamental"]
-        + payoff_risk_score * weights["payoff_risk"]
-        + cross_tf_score * weights["cross_tf"]
-        + data_freshness_score * weights["data_freshness"]
+        technical_score * weights["technicals"]
+        + volatility_score * weights["volatility"]
+        + options_score * weights["options"]
+        + (sentiment_score or 0.0) * weights["sentiment"]
+        + fundamental_score * weights["fundamentals"]
     )
 
     penalties: dict[str, float] = {}
@@ -152,6 +150,8 @@ def compute_apex_composite_score(
         penalties["stale_data"] = 6.0
     if wide_spreads:
         penalties["wide_spreads"] = 10.0
+    if earnings_before_expiry:
+        penalties["earnings_before_expiry"] = 4.0
 
     composite = assert_score_in_bounds(
         "composite_score",
@@ -159,13 +159,12 @@ def compute_apex_composite_score(
     )
 
     return CompositeScoreBreakdown(
-        technical=technical_score,
-        options_iv=options_iv_score,
-        liquidity=liquidity_score,
-        catalyst_fundamental=catalyst_fundamental_score,
-        payoff_risk=payoff_risk_score,
-        cross_tf=cross_tf_score,
-        data_freshness=data_freshness_score,
+        technicals=technical_score,
+        volatility=volatility_score,
+        options=options_score,
+        sentiment=sentiment_score,
+        fundamentals=fundamental_score,
+        weights_applied=weights,
         penalties=penalties,
         raw_total=round(raw, 1),
         composite=composite,

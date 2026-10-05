@@ -465,7 +465,12 @@ def _iv_hv_signal(iv: float | None, hv: float | None) -> dict[str, Any]:
     elif gap < -10:
         signal, reason = "buy_premium", f"IV is {abs(gap):.1f} pts below HV (>10) — options cheap vs realised."
     elif abs(gap) <= 5:
-        signal, reason = "fair", f"IV ≈ HV within 5 pts (gap {gap:+.1f}) — fair value band."
+        if gap > 0:
+            signal, reason = "fair", f"IV is {gap:.1f} pts above HV."
+        elif gap < 0:
+            signal, reason = "fair", f"IV is {abs(gap):.1f} pts below HV."
+        else:
+            signal, reason = "fair", f"IV ≈ HV within 5 pts (gap {gap:+.1f}) — fair value band."
     else:
         signal, reason = "between_bands", f"IV/HV gap is {gap:+.1f} pts — between the 5-pt fair and 10-pt rich/cheap bands."
     return {"signal": signal, "gap_pts": gap, "reason": reason}
@@ -789,6 +794,11 @@ def build_volatility_payload(
 
     em = expected_move(resolved_spot, atm_iv_val, dte)
     iv_vs_hv = _iv_hv_signal(atm_iv_val, hv)
+    from app.analysis.gate_config import classify_vol_regime
+
+    regime_words = classify_vol_regime(iv_rank=iv_ranks.get("iv_rank"), iv=atm_iv_val, hv=hv)
+    regime_signal = {"sell premium": "sell_premium", "buy premium": "buy_premium", "fair": "fair"}[regime_words]
+    iv_vs_hv = {**iv_vs_hv, "signal": regime_signal, "regime": regime_words}
 
     term_legs = list(term_structure or [])
     term_shape, term_detail = _term_structure_label(term_legs)
@@ -840,7 +850,8 @@ def build_volatility_payload(
         "hv_history_points": hv30_bundle.get("history_points"),
         "expected_move": em,
         "iv_vs_hv": iv_vs_hv,
-        "signal": iv_vs_hv.get("signal"),
+        "signal": regime_signal,
+        "regime": regime_words,
         "term_structure": {"shape": term_shape, "detail": term_detail, "legs": term_legs},
         "series": series,
         "methodology": METHODOLOGY,

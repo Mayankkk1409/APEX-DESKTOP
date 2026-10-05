@@ -94,6 +94,11 @@ def test_select_strategy_apex_strategy_on_catalyst() -> None:
         adv=6_000_000,
         open_interest=2000,
         spread_pct=5.0,
+        earnings_date_confirmed=True,
+        earnings_history_hits=6,
+        earnings_history_count=8,
+        front_expiry_listed=True,
+        back_expiry_listed=True,
     )
     label = select_strategy(
         composite=78.0,
@@ -108,7 +113,9 @@ def test_select_strategy_apex_strategy_on_catalyst() -> None:
         confirmed_pattern_count=1,
         apex_input=apex_input,
     )
-    assert label == APEX_STRATEGY_NAME
+    from app.services.apex_strategy import GAMMA_TRAMPOLINE_NAME
+
+    assert label == GAMMA_TRAMPOLINE_NAME
 
 
 def test_bull_call_spread_metrics() -> None:
@@ -319,8 +326,11 @@ def test_calendar_spread_metrics_use_dedicated_payoff() -> None:
     )
     assert len(metrics["legs"]) == 2
     assert metrics["net_type"] == "debit"
-    assert metrics["max_profit"] is not None
+    assert isinstance(metrics["max_profit"], (int, float))
+    assert metrics["max_profit"] > 0
+    assert metrics["max_profit_unlimited_allowed"] is False
     assert metrics["max_loss"] is not None
+    assert metrics["max_loss"] > 0
     assert len(metrics["breakevens"]) >= 1
     assert metrics.get("max_profit_iv_assumption_dependent") is True
 
@@ -432,8 +442,7 @@ def test_iv_above_135x_keeps_the_ranked_structure(profile: str) -> None:
         risk_profile=profile,
     )
     assert decision.best_match in {"Short Iron Condor", "Bull Put Spread (credit)"}
-    assert decision.risk_notes
-    assert any("1.35" in note for note in decision.risk_notes)
+    assert not any("1.35" in note for note in decision.risk_notes)
 
 
 def test_iv_040_over_hv_020_warns_and_keeps_the_structure() -> None:
@@ -454,7 +463,7 @@ def test_iv_040_over_hv_020_warns_and_keeps_the_structure() -> None:
     )
     assert decision.best_match in {"Short Iron Condor", "Bull Put Spread (credit)"}
     assert decision.gate_reason is None
-    assert any("40.00%" in note and "20.00%" in note for note in decision.risk_notes)
+    assert not any("1.35" in note for note in decision.risk_notes)
     assert decision.leg_structure
 
 
@@ -524,8 +533,7 @@ def test_wide_spread_uses_its_own_reason_not_iv_crush() -> None:
     )
     assert decision.best_match in {"Short Iron Condor", "Bull Put Spread (credit)"}
     assert any("spread" in note.lower() for note in decision.risk_notes)
-    joined = " ".join(decision.risk_notes)
-    assert "1.35" in joined
+    assert not any("1.35" in note for note in decision.risk_notes)
     # Spread alone does not turn a cleared setup into No Trade.
     still_a_match = strategy_decision(
         composite=90.0,
@@ -591,7 +599,8 @@ def test_high_iv_keeps_structure_legs_and_a_risk_note() -> None:
         ]
     )
     assert "IV Crush" not in blob
-    assert any("1.35" in note for note in layer["risk_notes"])
+    assert not any("1.35" in note for note in layer["risk_notes"])
+    assert not any("1.35" in note for note in layer.get("failed_checks") or [])
 
 
 def test_missing_quotes_are_not_described_as_iv_crush() -> None:
@@ -683,8 +692,11 @@ def test_aapl_bull_put_legs_keep_structure_name_and_payoff() -> None:
     assert "IV Crush" not in text
     assert "23.34%" in layer["why_it_fits"]
     assert "22.46%" in layer["why_it_fits"]
-    assert layer["auto_exec_line"] == "Composite score 66 · Your auto-execute minimum 40 · Auto-execute eligible"
-    assert layer["tradeable"] is True
+    # These quotes are 16.7% and 26.3% of mid. Rule 2 rejects a credit spread wider than 10%.
+    assert layer["auto_exec_line"] is None
+    assert layer["execution_banner"] == "NOT EXECUTABLE"
+    assert layer["tradeable"] is False
+    assert layer["auto_exec_blocked"] is True
 
 
 def test_msft_long_call_legs_keep_structure_name_and_unlimited_profit() -> None:
@@ -758,3 +770,76 @@ def test_score_below_threshold_still_returns_the_structure() -> None:
     assert layer["metrics"]["legs"]
     assert layer["auto_exec_line"] is None
     assert "manual review required" in layer["why_recommended"]
+
+
+def test_missing_closed_form_breakeven_does_not_drop_the_order_ticket() -> None:
+    """A diagonal with both OCC contracts stays on the ticket when the breakeven scan is empty."""
+    from app.services.scan_engine import _order_block_reason
+    from app.services.stock_leg import build_order_ticket
+    from app.strategies.validator import validate_strategy_output
+
+    metrics = {
+        "legs": [
+            {
+                "action": "buy",
+                "side": "put",
+                "strike": 69.0,
+                "expiry": "2026-10-23",
+                "mid": 4.14,
+                "symbol": "NFLX261023P00069000",
+                "quantity": 1,
+                "order_type": "limit",
+                "limit_basis": "mid",
+            },
+            {
+                "action": "sell",
+                "side": "put",
+                "strike": 68.0,
+                "expiry": "2026-10-16",
+                "mid": 2.07,
+                "symbol": "NFLX261016P00068000",
+                "quantity": 1,
+                "order_type": "limit",
+                "limit_basis": "mid",
+            },
+        ],
+        "breakevens": [],
+        "payoff_depends_on_remaining_leg": True,
+        "max_profit": None,
+        "max_loss": 207.0,
+        "max_profit_unlimited_allowed": False,
+        "net_debit_credit": 2.07,
+        "net_type": "debit",
+        "per_contract_multiplier": 100,
+    }
+    result = validate_strategy_output("Diagonal Spread (bearish)", metrics, "NFLX", spot=70.0)
+    assert [e.check for e in result.errors] == [], result.errors
+    ticket, equity = build_order_ticket(metrics, tradeable=True, equity_required=False, ticker="NFLX")
+    assert equity == []
+    assert [(row["side"], row["symbol"], row["order_type"], row["price"]) for row in ticket] == [
+        ("buy", "NFLX261023P00069000", "limit", 4.14),
+        ("sell", "NFLX261016P00068000", "limit", 2.07),
+    ]
+    blocked = build_strategy_layer(
+        strategy_name="Calendar Spread",
+        composite=80.0,
+        direction="neutral",
+        vol_signal="fair",
+        chain_analysis={
+            "spot": 100.0,
+            "symbol": "AAPL",
+            "expiry": "2026-08-01",
+            "recommendedContract": {"strike": 100.0, "side": "call", "expiry": "2026-08-01"},
+            "contracts": [
+                {"side": "call", "strike": 100.0, "bid": 2.8, "ask": 3.0, "expiry": "2026-08-01", "symbol": "AAPL260801C00100000"},
+            ],
+        },
+        vol_layer={"iv": 0.28},
+        sentiment_layer={},
+        fundamentals_layer={"score": 60},
+        tech_score=70.0,
+    )
+    assert blocked["tradeable"] is False
+    reason = _order_block_reason(blocked)
+    assert reason
+    assert "No options legs are available" not in reason

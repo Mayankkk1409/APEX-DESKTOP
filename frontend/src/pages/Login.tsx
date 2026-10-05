@@ -15,6 +15,7 @@ export function Login() {
   const nav = useNavigate();
   const setUser = useSession((s) => s.setUser);
   const setModal = useSession((s) => s.setConnectModal);
+  const setExpiryNoticeOnLogin = useSession((s) => s.setExpiryNoticeOnLogin);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -156,6 +157,7 @@ export function Login() {
       setAccessToken(res.access_token);
       const me = (await api.me()) as import("../types").User;
       setUser(me);
+      setExpiryNoticeOnLogin(true);
       setModal(true);
       nav("/app");
     } catch (ex) {

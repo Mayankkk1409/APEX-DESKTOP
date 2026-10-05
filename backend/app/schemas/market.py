@@ -51,6 +51,8 @@ class Quote(BaseModel):
     status: QuoteStatus = "unavailable"
     as_of: Optional[str] = None
     asset_class: Optional[str] = None
+    bid: Optional[float] = None
+    ask: Optional[float] = None
 
 
 class Fundamentals(BaseModel):
@@ -112,6 +114,8 @@ class OptionContract(BaseModel):
     greeks_source: ValueSource = "unavailable"
     iv_source: ValueSource = "unavailable"
     quote_as_of: Optional[str] = None
+    #: Listed contract size. 100 is the standard equity option; a published value is kept as-is.
+    multiplier: Optional[int] = None
 
 
 class OptionChain(BaseModel):

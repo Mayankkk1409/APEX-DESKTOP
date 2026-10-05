@@ -67,6 +67,33 @@ def _strike_from_occ(occ: str) -> float | None:
     return None
 
 
+def _json_or_none(res: Any) -> Any:
+    try:
+        return res.json()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def alpaca_order_error_message(body: Any, *, fallback: str) -> str:
+    """The broker's own sentence, when the response has one."""
+    if isinstance(body, dict):
+        message = body.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+    return fallback
+
+
+def _whole_order_qty(qty: Any) -> Any:
+    """Alpaca rejects a fractional-looking option qty such as 1.0."""
+    try:
+        number = float(qty)
+    except (TypeError, ValueError):
+        return qty
+    if number > 0 and number == int(number):
+        return int(number)
+    return qty
+
+
 def _parse_snapshot(occ: str, snap: Any, meta: Any = None) -> OptionContract | None:
     """Merge one Alpaca option snapshot with its contract reference row.
 
@@ -119,6 +146,7 @@ def _parse_snapshot(occ: str, snap: Any, meta: Any = None) -> OptionContract | N
         greeks_source="vendor" if has_greeks else "unavailable",
         iv_source="vendor" if iv is not None else "unavailable",
         quote_as_of=quote_row.get("t") or trade.get("t"),
+        multiplier=_opt_int(details.get("multiplier")),
     )
 
 
@@ -190,19 +218,29 @@ class AlpacaAdapter:
             return None
 
     async def search(self, query: str) -> list[SearchHit]:
-        data = await self._get(self.settings.resolved_broker_base_url, "/v2/assets", {"status": "active", "asset_class": "us_equity"})
-        if not data:
-            return await self.demo.search(query)
-        q = query.upper()
-        hits = []
-        for row in data:
-            sym = row.get("symbol", "")
-            name = row.get("name", "")
-            if q in sym or q.lower() in name.lower():
-                hits.append(SearchHit(symbol=sym, name=name, asset_class=row.get("class", "us_equity")))
-            if len(hits) >= 12:
-                break
-        return hits or await self.demo.search(query)
+        from app.services.symbol_catalog import Instrument, search_instruments
+
+        extras: list[Instrument] = []
+        # Empty focus shows the backlog only. A typed query may also include
+        # broker assets, which pass through the same type filter.
+        if query.strip():
+            data = await self._get(
+                self.settings.resolved_broker_base_url,
+                "/v2/assets",
+                {"status": "active", "asset_class": "us_equity"},
+            )
+            if isinstance(data, list):
+                for row in data:
+                    if not isinstance(row, dict):
+                        continue
+                    extras.append(
+                        Instrument(
+                            symbol=str(row.get("symbol") or ""),
+                            name=str(row.get("name") or ""),
+                            asset_class=str(row.get("class") or row.get("asset_class") or ""),
+                        )
+                    )
+        return search_instruments(query, extras)
 
     async def quote(self, symbol: str) -> Quote:
         from app.services.live_quotes import get_live_quote
@@ -634,12 +672,59 @@ class AlpacaAdapter:
             )
         return out
 
+    async def _submit_combo(self, kwargs: dict, *, strict: bool) -> dict:
+        """One multi-leg limit. A rejection is returned as-is and is not split into single-leg orders."""
+        _ = strict
+        if not self.settings.alpaca_keys_present:
+            return await self.demo.submit_order(**kwargs)
+        legs = kwargs.get("legs") or []
+        payload = {
+            "order_class": "mleg",
+            "qty": str(_whole_order_qty(kwargs["qty"])),
+            "type": "limit",
+            "time_in_force": "day",
+            "limit_price": str(kwargs.get("limit_price")),
+            "legs": [
+                {
+                    "symbol": leg["symbol"],
+                    "ratio_qty": str(int(leg.get("ratio_qty") or 1)),
+                    "side": leg["side"],
+                    "position_intent": leg.get("position_intent") or (
+                        "buy_to_open" if leg.get("side") == "buy" else "sell_to_open"
+                    ),
+                }
+                for leg in legs
+            ],
+        }
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                res = await client.post(
+                    f"{self.settings.resolved_broker_base_url}/v2/orders",
+                    headers=self._headers(),
+                    json=payload,
+                )
+                if res.status_code >= 400:
+                    reason = alpaca_order_error_message(
+                        _json_or_none(res),
+                        fallback=(res.text or "").strip()[:300] or f"Broker rejected the order ({res.status_code})",
+                    )
+                    logger.warning("Alpaca combo order failed {}", reason)
+                    return {"status": "rejected", "rejected": True, "reason": reason}
+                return res.json()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Alpaca combo order error {}", exc)
+            reason = str(exc).strip() or "Broker order failed"
+            return {"status": "rejected", "rejected": True, "reason": reason}
+
     async def submit_order(self, **kwargs) -> dict:
+        strict = bool(kwargs.pop("strict", False))
+        if kwargs.get("order_class") == "mleg":
+            return await self._submit_combo(kwargs, strict=strict)
         if not self.settings.alpaca_keys_present:
             return await self.demo.submit_order(**kwargs)
         payload = {
             "symbol": kwargs["symbol"],
-            "qty": kwargs["qty"],
+            "qty": _whole_order_qty(kwargs["qty"]),
             "side": kwargs["side"],
             "type": kwargs.get("order_type", "market"),
             "time_in_force": "day",
@@ -654,9 +739,18 @@ class AlpacaAdapter:
                     json=payload,
                 )
                 if res.status_code >= 400:
-                    logger.warning("Alpaca order failed {}", res.text[:300])
+                    reason = alpaca_order_error_message(
+                        _json_or_none(res),
+                        fallback=(res.text or "").strip()[:300] or f"Broker rejected the order ({res.status_code})",
+                    )
+                    logger.warning("Alpaca order failed {}", reason)
+                    if strict:
+                        return {"status": "rejected", "rejected": True, "reason": reason}
                     return await self.demo.submit_order(**kwargs)
                 return res.json()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Alpaca order error {}", exc)
+            reason = str(exc).strip() or "Broker order failed"
+            if strict:
+                return {"status": "rejected", "rejected": True, "reason": reason}
             return await self.demo.submit_order(**kwargs)

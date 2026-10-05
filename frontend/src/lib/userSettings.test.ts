@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  AUTO_EXEC_WARNING_THRESHOLD,
+  AUTO_EXEC_DISCLAIMER,
   DEFAULT_USER_SETTINGS,
   patchUserSettings,
   readUserSettings,
@@ -42,7 +42,8 @@ describe("userSettings", () => {
 
   it("returns defaults when storage is empty", () => {
     const s = readUserSettings();
-    expect(s.autoExecMinScore).toBe(DEFAULT_USER_SETTINGS.autoExecMinScore);
+    expect(DEFAULT_USER_SETTINGS.autoExecMinScore).toBe(85);
+    expect(s.autoExecMinScore).toBe(85);
     expect(s.autoExecEnabled).toBe(false);
     expect(s.maxRiskPerTradePct).toBe(3);
   });
@@ -60,8 +61,13 @@ describe("userSettings", () => {
     expect(readThemeMode()).toBe("light");
   });
 
-  it("warn threshold constant matches production gate", () => {
-    expect(AUTO_EXEC_WARNING_THRESHOLD).toBe(72);
+  it("disclaimer states the new-account default and that the saved minimum applies", () => {
+    expect(AUTO_EXEC_DISCLAIMER).toBe(
+      "New accounts start at the system default of 85. Auto-execution uses the minimum you set; that setting is the one that applies.",
+    );
+    expect(AUTO_EXEC_DISCLAIMER).not.toContain("Scores below 72 increase false-positive risk");
+    expect(AUTO_EXEC_DISCLAIMER).not.toContain("below 72");
+    expect(AUTO_EXEC_DISCLAIMER).not.toContain("BELOW EXECUTION THRESHOLD");
   });
 });
 

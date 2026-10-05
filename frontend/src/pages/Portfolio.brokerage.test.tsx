@@ -20,6 +20,8 @@ vi.mock("../api", () => ({
     brokeragePositions: vi.fn(),
     brokerageEquityHistory: vi.fn(),
     brokerageOrders: vi.fn(),
+    getSettings: vi.fn(async () => ({ risk_profile: "moderate" })),
+    syncSettings: vi.fn(async () => ({ ok: true })),
   },
 }));
 
@@ -128,6 +130,15 @@ describe("Portfolio brokerage integration", () => {
     expect(html).not.toContain('data-testid="close-position-');
     expect(html).toContain('data-testid="pnl-chart-timeframe"');
     expect(html).toContain('data-testid="pnl-tf-1M"');
+    expect(html).toContain('data-testid="portfolio-risk-profile-select"');
+    expect(html.indexOf('data-testid="portfolio-risk-profile"')).toBeLessThan(
+      html.indexOf('data-testid="portfolio-overall-section"'),
+    );
+    expect(html).toContain('data-testid="overall-pnl-total"');
+    expect(html).toContain("Overall total P&amp;L");
+    expect(html).toContain("+$60");
+    expect(html).not.toContain("+$3,000");
+    expect(html).toContain('data-chart-engine="apex-equity"');
     expect(html).toContain('data-testid="portfolio-brokerage-account"');
     expect(html).not.toContain('data-testid="portfolio-paper-context"');
     expect(html).toContain('data-testid="logout-btn"');

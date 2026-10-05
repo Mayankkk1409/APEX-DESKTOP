@@ -1,14 +1,28 @@
-/** Auto-submit score gate: the saved minimum, the global toggle, and defined-risk. */
+/**
+ * Acknowledge vs Place Trade.
+ * The saved minimum is the score gate. A browser-only auto-exec toggle is not.
+ * `serverAutoExecEnabled === false` is honored only when that switch is stored on the server.
+ */
 export function autoSubmitArms(input: {
-  toggleOn: boolean;
+  /** Ignored. Kept so callers can show the browser toggle is not a second gate. */
+  toggleOn?: boolean;
+  /** Scan `auto_submit_on_ack`. */
+  serverAutoSubmit?: boolean;
+  /** `false` only when Settings persisted auto-execution off on the server. */
+  serverAutoExecEnabled?: boolean | null;
   composite: number | null | undefined;
   threshold: number;
   definedRisk: boolean;
 }): boolean {
-  if (!input.toggleOn || !input.definedRisk) return false;
-  if (input.composite == null || !Number.isFinite(input.composite)) return false;
-  if (!Number.isFinite(input.threshold)) return false;
-  return input.composite >= input.threshold;
+  if (input.serverAutoExecEnabled === false) return false;
+  const composite = input.composite;
+  if (composite != null && Number.isFinite(composite) && Number.isFinite(input.threshold)) {
+    if (composite < input.threshold) return false;
+    if (input.serverAutoSubmit === true) return true;
+    if (!input.definedRisk) return false;
+    return composite >= input.threshold;
+  }
+  return input.serverAutoSubmit === true;
 }
 
 function formatGateScore(value: number): string {
@@ -39,7 +53,9 @@ export type OrderPlacement = {
  * It does not decide whether a recommendation exists.
  */
 export function orderPlacement(input: {
-  toggleOn: boolean;
+  toggleOn?: boolean;
+  serverAutoSubmit?: boolean;
+  serverAutoExecEnabled?: boolean | null;
   composite: number | null | undefined;
   threshold: number;
   definedRisk: boolean;
@@ -60,7 +76,7 @@ export function orderPlacement(input: {
   let note: string | null = null;
   if (below && input.composite != null) {
     note = manualConfirmationNote(input.composite, input.threshold);
-  } else if (!input.toggleOn) {
+  } else if (input.serverAutoExecEnabled === false) {
     note = AUTO_EXECUTION_OFF_NOTE;
   }
   return {

@@ -44,6 +44,8 @@ BACK_MONTH_STRATEGIES = frozenset(
         "diagonal_call_spread",
         "apex_strategy",
         "jelly_roll",
+        "poor_mans_covered_call",
+        "vega_neutral_spread",
     }
 )
 

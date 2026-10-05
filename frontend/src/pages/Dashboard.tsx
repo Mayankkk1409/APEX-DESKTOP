@@ -11,8 +11,9 @@ import { ApexLogo } from "../components/ApexLogo";
 import { LegalFooter } from "../components/LegalFooter";
 import { WatchlistToggle } from "../components/WatchlistToggle";
 import { captureChartState, getChartState, subscribeChartState } from "../chartCapture";
-import { DEFAULT_SYMBOL, SNAPSHOT_STUDIES, WS_BASE } from "../constants";
+import { DEFAULT_SYMBOL, SNAPSHOT_STUDIES } from "../constants";
 import { useBrokerage } from "../hooks/useBrokerage";
+import { useMarketSocket } from "../hooks/useMarketSocket";
 import { defaultAccountLabel, usePositionCertificate } from "../hooks/usePositionCertificate";
 import { resolvePositionDayPl } from "../lib/positionDayPl";
 import { useSession } from "../store";
@@ -69,12 +70,6 @@ export function Dashboard() {
 
   async function runSearch(value: string) {
     const seq = ++searchSeq.current;
-    if (!value.trim()) {
-      setHits([]);
-      setHitsFor("");
-      setSuggestionsOpen(false);
-      return;
-    }
     const r = await api.search(value);
     if (seq !== searchSeq.current) return;
     setHits(r.hits);
@@ -142,42 +137,26 @@ export function Dashboard() {
     }
   }, [expiries.data, expiry, setExpiry]);
 
-  useEffect(() => {
-    const token = getAccessToken();
-    if (!token) return;
-    let ws: WebSocket | null = null;
-    let stopped = false;
-    const connect = () => {
-      if (stopped) return;
-      ws = new WebSocket(`${WS_BASE}/ws/market?token=${token}`);
-      ws.onopen = () => ws?.send(JSON.stringify({ type: "subscribe", symbols: [activeSymbol, DEFAULT_SYMBOL] }));
-      ws.onmessage = (ev) => {
-        const msg = JSON.parse(ev.data);
-        if (msg.type === "fill") {
-          setLive({ balance: msg.balance, buying_power: msg.buying_power, portfolio_value: msg.portfolio_value });
-          qc.invalidateQueries({ queryKey: ["port"] });
-          qc.invalidateQueries({ queryKey: ["pos"] });
-          qc.invalidateQueries({ queryKey: ["orders"] });
+  useMarketSocket({
+    token: getAccessToken(),
+    symbols: [activeSymbol, DEFAULT_SYMBOL],
+    onMessage: (msg) => {
+      if (msg.type === "fill") {
+        setLive({ balance: msg.balance, buying_power: msg.buying_power, portfolio_value: msg.portfolio_value });
+        qc.invalidateQueries({ queryKey: ["port"] });
+        qc.invalidateQueries({ queryKey: ["pos"] });
+        qc.invalidateQueries({ queryKey: ["orders"] });
+      }
+      if (msg.type === "quotes") {
+        for (const row of (msg.quotes as Quote[]) ?? []) {
+          if (row.symbol !== activeSymbol || row.price == null) continue;
+          qc.setQueryData<Quote>(["quote", activeSymbol], (old) =>
+            old ? { ...old, ...row, price: row.price, change: row.change, change_pct: row.change_pct } : row,
+          );
         }
-        if (msg.type === "quotes") {
-          for (const row of (msg.quotes as Quote[]) ?? []) {
-            if (row.symbol !== activeSymbol || row.price == null) continue;
-            qc.setQueryData<Quote>(["quote", activeSymbol], (old) =>
-              old ? { ...old, ...row, price: row.price, change: row.change, change_pct: row.change_pct } : row,
-            );
-          }
-        }
-      };
-      ws.onclose = () => {
-        if (!stopped) setTimeout(connect, 800);
-      };
-    };
-    connect();
-    return () => {
-      stopped = true;
-      ws?.close();
-    };
-  }, [qc, activeSymbol]);
+      }
+    },
+  });
 
   const stats = brokerage.usingBrokerage && brokerage.stats
     ? {
@@ -339,13 +318,17 @@ export function Dashboard() {
               e.preventDefault();
               if (highlightIdx >= 0 && hits[highlightIdx]) {
                 applyTicker(hits[highlightIdx].symbol);
-              } else {
+              } else if (query.trim()) {
                 applyTicker(resolveTyped());
               }
             }}
+            onFocus={() => {
+              if (!query.trim()) void runSearch("");
+            }}
+            onBlur={() => closeSuggestions()}
           />
           {suggestionsOpen && hits.length > 0 && (
-            <ul id="ticker-suggestions" className="absolute z-20 mt-1 w-full rounded-md border border-line bg-panel text-sm" role="listbox">
+            <ul id="ticker-suggestions" className="absolute z-20 mt-1 max-h-72 w-80 overflow-y-auto rounded-md border border-line bg-panel text-sm" role="listbox">
               {hits.map((h, i) => (
                 <li key={h.symbol} id={`ticker-hit-${i}`} role="option" aria-selected={i === highlightIdx}>
                   <button

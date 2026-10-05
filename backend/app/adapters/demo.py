@@ -126,14 +126,9 @@ class DemoAdapter:
     feed = "indicative"
 
     async def search(self, query: str) -> list[SearchHit]:
-        q = query.strip().upper()
-        hits = []
-        for sym, meta in UNIVERSE.items():
-            if q in sym or q.lower() in meta["name"].lower():
-                hits.append(SearchHit(symbol=sym, name=meta["name"], asset_class=meta["asset_class"]))
-        if not hits and q:
-            hits.append(SearchHit(symbol=q, name=f"{q} (demo)", asset_class="us_equity"))
-        return hits[:12]
+        from app.services.symbol_catalog import search_instruments
+
+        return search_instruments(query)
 
     async def quote(self, symbol: str) -> Quote:
         symbol = symbol.upper()
@@ -318,6 +313,7 @@ class DemoAdapter:
                         rho=round(g.rho, 4),
                         greeks_source="model",
                         iv_source="model",
+                        multiplier=100,
                     )
                 )
         return OptionChain(
@@ -342,4 +338,7 @@ class DemoAdapter:
         )
 
     async def submit_order(self, **kwargs) -> dict:
-        return {"status": "filled", "broker": "demo_paper", **kwargs}
+        result = {"status": "filled", "broker": "demo_paper", **kwargs}
+        if kwargs.get("order_class") == "mleg" and kwargs.get("limit_price") is not None:
+            result["filled_avg_price"] = abs(float(kwargs["limit_price"]))
+        return result

@@ -182,3 +182,75 @@ def test_scan_evaluates_registry_and_selects_one_label() -> None:
     assert all(c.gate_notes for c in missed)
     assert all(c.name not in {"Naked Call", "Naked Put", "Short Straddle", "Short Strangle"} for c in decision.candidates)
     assert any(reason.startswith("Naked Call:") for reason in decision.rejection_reasons)
+
+
+def test_long_iron_condor_buys_body_and_sells_wings() -> None:
+    # Buy 95 put 1.50, sell 90 put 0.50, buy 105 call 1.20, sell 110 call 0.40.
+    # Debit 1.80. Wing 5. Max loss 180. Max profit 320. Breakevens 96.80 and 103.20.
+    contracts = [
+        {"side": "put", "strike": 90.0, "delta": -0.10, "bid": 0.40, "ask": 0.60, "symbol": "P90", "expiry": "2026-07-01"},
+        {"side": "put", "strike": 95.0, "delta": -0.20, "bid": 1.40, "ask": 1.60, "symbol": "P95", "expiry": "2026-07-01"},
+        {"side": "call", "strike": 105.0, "delta": 0.20, "bid": 1.10, "ask": 1.30, "symbol": "C105", "expiry": "2026-07-01"},
+        {"side": "call", "strike": 110.0, "delta": 0.10, "bid": 0.30, "ask": 0.50, "symbol": "C110", "expiry": "2026-07-01"},
+    ]
+    metrics = compute_strategy_metrics(
+        "Long Iron Condor",
+        spot=100.0,
+        contracts=contracts,
+        recommended=None,
+        front_expiry="2026-07-01",
+        ticker="XYZ",
+    )
+    legs = metrics["legs"]
+    bought_put = next(leg for leg in legs if leg["side"] == "put" and leg["action"] == "buy")
+    sold_put = next(leg for leg in legs if leg["side"] == "put" and leg["action"] == "sell")
+    bought_call = next(leg for leg in legs if leg["side"] == "call" and leg["action"] == "buy")
+    sold_call = next(leg for leg in legs if leg["side"] == "call" and leg["action"] == "sell")
+    assert bought_put["strike"] > sold_put["strike"]
+    assert sold_call["strike"] > bought_call["strike"]
+    assert metrics["net_type"] == "debit"
+    assert metrics["net_debit_credit"] == 1.8
+    assert metrics["max_loss"] == 180.0
+    assert metrics["max_profit"] == 320.0
+    assert metrics["breakevens"] == [96.8, 103.2]
+
+
+def test_christmas_tree_does_not_show_a_finite_max_loss() -> None:
+    contracts = [
+        {"side": "call", "strike": 100.0, "delta": 0.55, "bid": 3.8, "ask": 4.0, "symbol": "C100", "expiry": "2026-07-01"},
+        {"side": "call", "strike": 105.0, "delta": 0.35, "bid": 1.8, "ask": 2.0, "symbol": "C105", "expiry": "2026-07-01"},
+        {"side": "call", "strike": 110.0, "delta": 0.20, "bid": 0.8, "ask": 1.0, "symbol": "C110", "expiry": "2026-07-01"},
+    ]
+    metrics = compute_strategy_metrics(
+        "Christmas Tree Spread",
+        spot=100.0,
+        contracts=contracts,
+        recommended=None,
+        front_expiry="2026-07-01",
+        ticker="XYZ",
+    )
+    assert metrics["max_profit"] is None
+    assert metrics["max_profit_unlimited_allowed"] is not True
+    assert metrics["max_loss"] is None
+    assert metrics["max_loss_unlimited_allowed"] is True
+
+
+def test_guts_use_in_the_money_strikes() -> None:
+    contracts = [
+        {"side": "call", "strike": 95.0, "delta": 0.70, "bid": 6.0, "ask": 6.2, "symbol": "C95", "expiry": "2026-07-01"},
+        {"side": "call", "strike": 100.0, "delta": 0.50, "bid": 3.0, "ask": 3.2, "symbol": "C100", "expiry": "2026-07-01"},
+        {"side": "put", "strike": 100.0, "delta": -0.50, "bid": 2.8, "ask": 3.0, "symbol": "P100", "expiry": "2026-07-01"},
+        {"side": "put", "strike": 105.0, "delta": -0.70, "bid": 6.0, "ask": 6.2, "symbol": "P105", "expiry": "2026-07-01"},
+    ]
+    metrics = compute_strategy_metrics(
+        "Long Guts",
+        spot=100.0,
+        contracts=contracts,
+        recommended=None,
+        front_expiry="2026-07-01",
+        ticker="XYZ",
+    )
+    call = next(leg for leg in metrics["legs"] if leg["side"] == "call")
+    put = next(leg for leg in metrics["legs"] if leg["side"] == "put")
+    assert call["action"] == "buy" and put["action"] == "buy"
+    assert call["strike"] < 100.0 < put["strike"]

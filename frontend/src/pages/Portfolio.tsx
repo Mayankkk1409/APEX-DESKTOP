@@ -9,14 +9,15 @@ import { PositionCertificateModal } from "../components/PositionCertificateModal
 import { SettingsGearLink } from "../components/SettingsGearLink";
 import { OverallPnlTotal } from "../components/OverallPnlTotal";
 import { PnlChart } from "../components/PnlChart";
+import { useAccountOverallPnl } from "../hooks/useAccountOverallPnl";
 import { useBrokerage } from "../hooks/useBrokerage";
 import { defaultAccountLabel, usePositionCertificate } from "../hooks/usePositionCertificate";
-import { overallTotalPnl } from "../lib/overallPnl";
 import { filterPnlPoints, type PnlTimeframe } from "../lib/pnlTimeframe";
 import { assetLabel, fmtBalance, fmtMoney, fmtPlain, fmtTs } from "../lib/portfolioFormat";
 import { isRiskProfile, patchUserSettings, readUserSettings, type RiskProfile } from "../lib/userSettings";
 import { useSession } from "../store";
-import type { OrderHistoryRow, OverallPnlRow, PositionRow } from "../types";
+import { formatOptionExpiration, parseOccSymbol } from "../lib/optionSymbolParse";
+import type { OrderHistoryRow, PositionRow } from "../types";
 
 function Collapsible({
   title,
@@ -49,18 +50,6 @@ function Collapsible({
       {footer && <div className="border-t border-line px-4 py-3">{footer}</div>}
     </section>
   );
-}
-
-function brokerageOverallRows(positions: PositionRow[]): OverallPnlRow[] {
-  return positions.map((p) => ({
-    symbol: p.symbol,
-    asset_class: p.asset_class ?? "us_equity",
-    qty: p.qty,
-    realized_pl: 0,
-    unrealized_pl: p.unrealized_pl,
-    total_pl: p.unrealized_pl,
-    is_open: true,
-  }));
 }
 
 export function Portfolio() {
@@ -113,11 +102,7 @@ export function Portfolio() {
     enabled: usingBrokerage && Boolean(brokerage.activeAccountId),
     retry: 2,
   });
-  const overall = useQuery({
-    queryKey: ["overall-pnl"],
-    queryFn: () => api.overallPnl(),
-    enabled: !usingBrokerage,
-  });
+  const accountPnl = useAccountOverallPnl();
   const positions = useQuery({
     queryKey: ["pos"],
     queryFn: () => api.positions(),
@@ -176,24 +161,14 @@ export function Portfolio() {
     ? ((brokerageOrders.data?.orders as OrderHistoryRow[] | undefined) ?? [])
     : ((paperOrders.data?.orders as OrderHistoryRow[] | undefined) ?? []);
   const ordersLoading = usingBrokerage ? brokerageOrders.isLoading : paperOrders.isLoading;
-  const overallRows: OverallPnlRow[] = usingBrokerage
-    ? brokerageOverallRows(openPositions)
-    : ((overall.data?.rows as OverallPnlRow[] | undefined) ?? []);
-  const overallLoading = usingBrokerage ? positionsLoading : overall.isLoading;
-  const totalPnl = overallLoading
-    ? null
-    : overallTotalPnl(
-        overallRows.map((row) => ({
-          realized: row.realized_pl,
-          unrealized: row.unrealized_pl,
-          fees: row.fees,
-        })),
-      );
+  const overallRows = accountPnl.rows;
+  const overallLoading = accountPnl.loading;
+  const totalPnl = accountPnl.total;
   const loadError =
     summary.error?.message ??
     historyQuery.error?.message ??
     positions.error?.message ??
-    overall.error?.message ??
+    (accountPnl.error instanceof Error ? accountPnl.error.message : null) ??
     paperOrders.error?.message ??
     brokerageOrders.error?.message ??
     null;
@@ -339,22 +314,31 @@ export function Portfolio() {
                   <th>Time</th>
                   <th>Side</th>
                   <th>Symbol</th>
+                  <th>Strike</th>
+                  <th>Expiry</th>
                   <th className="apex-num">Qty</th>
+                  <th>Type</th>
                   <th className="apex-num">Fill</th>
                   <th>Status</th>
                 </tr>
               </thead>
               <tbody>
-                {orderRows.map((o) => (
-                  <tr key={o.id}>
-                    <td className="text-subtle">{fmtTs(o.filled_at ?? o.created_at)}</td>
-                    <td>{o.side.toUpperCase()}</td>
-                    <td className="font-mono">{o.symbol}</td>
-                    <td className="apex-num">{fmtPlain(o.qty)}</td>
-                    <td className="apex-num">{fmtPlain(o.fill_price)}</td>
-                    <td>{o.status}</td>
-                  </tr>
-                ))}
+                {orderRows.map((o) => {
+                  const parsed = parseOccSymbol(o.symbol);
+                  return (
+                    <tr key={o.id}>
+                      <td className="text-subtle">{fmtTs(o.filled_at ?? o.created_at)}</td>
+                      <td>{o.side.toUpperCase()}</td>
+                      <td className="font-mono">{o.symbol}</td>
+                      <td>{parsed ? parsed.strike : "—"}</td>
+                      <td>{parsed ? formatOptionExpiration(parsed.expiry) : "—"}</td>
+                      <td className="apex-num">{fmtPlain(o.qty)}</td>
+                      <td>{o.order_type || "market"}</td>
+                      <td className="apex-num">{fmtPlain(o.fill_price)}</td>
+                      <td>{o.status}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
             </div>

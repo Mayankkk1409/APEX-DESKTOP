@@ -15,7 +15,7 @@ router = APIRouter(prefix="/market", tags=["market"])
 
 
 @router.get("/search")
-async def search(q: str = Query(min_length=1), adapter=Depends(get_adapter)) -> dict:
+async def search(q: str = "", adapter=Depends(get_adapter)) -> dict:
     hits = await adapter.search(q)
     return {"hits": [h.model_dump() for h in hits]}
 

@@ -21,7 +21,7 @@ from app.services import snaptrade as st
 
 @pytest.fixture
 def app():
-    st._client.cache_clear()
+    st._cached_client.cache_clear()
     return create_app()
 
 

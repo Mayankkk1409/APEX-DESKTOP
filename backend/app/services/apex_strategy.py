@@ -1,22 +1,38 @@
-"""APEX Strategy eligibility module (formerly Gamma Trampoline)."""
+"""Gamma Trampoline eligibility. Every earnings gate must pass.
+
+The same four legs without those gates are a standard double calendar.
+The trademark name is used only when the gates pass.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.analysis.layers import APEX_STRATEGY_NAME
+from app.analysis.gate_config import (
+    gamma_adv_min,
+    gamma_back_week_days,
+    gamma_back_week_tolerance_days,
+    gamma_earnings_days_max,
+    gamma_earnings_days_min,
+    gamma_front_back_iv_ratio_min,
+    gamma_front_iv_rank_min,
+    gamma_history_hits_min,
+    gamma_history_lookback,
+    gamma_open_interest_min,
+    gamma_spread_max,
+)
+GAMMA_TRAMPOLINE_NAME = "Gamma Trampoline™"
+DOUBLE_CALENDAR_NAME = "Double Calendar"
 
-# Eligibility thresholds per encyclopedia §10 / workspace rules
+# Named defaults. The live values are read from settings inside the gate.
 CATALYST_DAYS_MIN = 5
 CATALYST_DAYS_MAX = 10
-DELTA_OTM_MIN = 0.15
-DELTA_OTM_MAX = 0.25
-FRONT_PREMIUM_OFFSET_MIN = 0.50
 FRONT_IVR_MIN = 70
 MIN_ADV = 5_000_000
 MIN_OPEN_INTEREST = 1_000
 MAX_SPREAD_PCT = 8.0
+FRONT_BACK_IV_RATIO_MIN = 1.25
 
 
 @dataclass
@@ -34,12 +50,17 @@ class ApexStrategyInput:
     adv: float | None = None
     open_interest: int | None = None
     spread_pct: float | None = None
+    earnings_date_confirmed: bool = False
+    earnings_history_hits: int | None = None
+    earnings_history_count: int | None = None
+    front_expiry_listed: bool = False
+    back_expiry_listed: bool = False
 
 
 @dataclass
 class ApexStrategyEligibility:
     eligible: bool
-    strategy_name: str = APEX_STRATEGY_NAME
+    strategy_name: str = GAMMA_TRAMPOLINE_NAME
     rejection_reasons: list[str] = field(default_factory=list)
     checks_passed: list[str] = field(default_factory=list)
 
@@ -52,86 +73,114 @@ class ApexStrategyEligibility:
         }
 
 
-def _delta_in_range(delta: float | None) -> bool:
-    if delta is None:
-        return False
-    abs_delta = abs(delta)
-    return DELTA_OTM_MIN <= abs_delta <= DELTA_OTM_MAX
+def classifier_label(*, eligible: bool) -> str:
+    """Gamma Trampoline™ only when the earnings gates pass. Otherwise a double calendar."""
+    return GAMMA_TRAMPOLINE_NAME if eligible else DOUBLE_CALENDAR_NAME
+
+
+def _as_fraction(value: float | None) -> float | None:
+    if value is None:
+        return None
+    number = float(value)
+    if number > 3.0:
+        number = number / 100.0
+    if number <= 0:
+        return None
+    return number
 
 
 def check_apex_strategy_eligibility(inp: ApexStrategyInput) -> ApexStrategyEligibility:
-    """Deterministic eligibility gate for APEX Strategy with explicit rejection reasons."""
+    """Earnings gates for Gamma Trampoline™. A miss names that gate and the value.
+
+    Premium offset is measured and shown. It is not a gate. A missing earnings
+    date or a missing 8-report history fails closed. Nothing is invented.
+    """
     passed: list[str] = []
     rejected: list[str] = []
-
-    if inp.catalyst_days is None:
-        rejected.append("No catalyst date available")
-    elif not (CATALYST_DAYS_MIN <= inp.catalyst_days <= CATALYST_DAYS_MAX):
+    days_min = gamma_earnings_days_min()
+    days_max = gamma_earnings_days_max()
+    if not inp.earnings_date_confirmed or inp.catalyst_days is None:
+        rejected.append("Earnings date is missing.")
+    elif not (days_min <= int(inp.catalyst_days) <= days_max):
         rejected.append(
-            f"Catalyst must be {CATALYST_DAYS_MIN}–{CATALYST_DAYS_MAX} days out; got {inp.catalyst_days}"
+            f"Calendar days to confirmed earnings {int(inp.catalyst_days)} is outside {days_min} to {days_max}."
         )
     else:
-        passed.append(f"Catalyst within {CATALYST_DAYS_MIN}–{CATALYST_DAYS_MAX} day window")
+        passed.append(f"Catalyst window {int(inp.catalyst_days)} calendar days is inside {days_min} to {days_max}")
 
+    rank_min = gamma_front_iv_rank_min()
     if inp.front_ivr is None:
-        rejected.append("Front-week IVR unavailable")
-    elif inp.front_ivr <= FRONT_IVR_MIN:
-        rejected.append(f"Front-week IVR must be > {FRONT_IVR_MIN}; got {inp.front_ivr:.0f}")
+        rejected.append(f"Front-week IV rank is missing, so the {rank_min:g} minimum cannot pass.")
+    elif float(inp.front_ivr) <= rank_min:
+        rejected.append(f"Front-week IV rank {float(inp.front_ivr):g} is not above {rank_min:g}.")
     else:
-        passed.append(f"Front-week IVR > {FRONT_IVR_MIN}")
+        passed.append(f"Front-week IVR {float(inp.front_ivr):g} is above {rank_min:g}")
 
-    if not inp.term_structure_inverted:
-        rejected.append("IV term structure must be inverted (front IV > back IV)")
-    elif inp.front_iv is not None and inp.back_iv is not None and inp.front_iv <= inp.back_iv:
+    ratio_min = gamma_front_back_iv_ratio_min()
+    front = _as_fraction(inp.front_iv)
+    back = _as_fraction(inp.back_iv)
+    if front is None or back is None:
+        rejected.append("Front-week IV divided by back-week IV is missing, so the 1.25 minimum cannot pass.")
+    else:
+        ratio = front / back
+        if ratio < ratio_min:
+            rejected.append(f"Front-week IV divided by back-week IV is {ratio:.2f}, below {ratio_min:g}.")
+        else:
+            passed.append(f"Front-week IV / back-week IV is {ratio:.2f}")
+
+    lookback = gamma_history_lookback()
+    hits_min = gamma_history_hits_min()
+    if inp.earnings_history_count is None or inp.earnings_history_hits is None:
+        rejected.append("Earnings move history is missing; the last 8 reports are not in the data.")
+    elif int(inp.earnings_history_count) < lookback or int(inp.earnings_history_hits) < hits_min:
         rejected.append(
-            f"Front IV ({inp.front_iv:.3f}) must exceed back IV ({inp.back_iv:.3f})"
+            f"Only {int(inp.earnings_history_hits)} of the last {int(inp.earnings_history_count)} earnings moves "
+            f"were smaller than the implied move; at least {hits_min} of {lookback} are required."
         )
     else:
-        passed.append("IV term structure inverted (front > back)")
+        passed.append(
+            f"{int(inp.earnings_history_hits)} of the last {int(inp.earnings_history_count)} earnings moves "
+            "were smaller than the implied move"
+        )
 
-    if not inp.four_leg_structure:
-        rejected.append("APEX Strategy requires a 4-leg structure (front/back call + put)")
+    adv_min = gamma_adv_min()
+    if inp.adv is None:
+        rejected.append(f"ADV is missing, so the {adv_min:,.0f} share minimum cannot pass.")
+    elif float(inp.adv) <= adv_min:
+        rejected.append(f"ADV {float(inp.adv):,.0f} is not above {adv_min:,.0f} shares.")
+    else:
+        passed.append(f"ADV {float(inp.adv):,.0f} is above {adv_min:,.0f} shares")
+
+    oi_min = gamma_open_interest_min()
+    if inp.open_interest is None:
+        rejected.append(f"Open interest is missing, so the {oi_min} minimum on each strike cannot pass.")
+    elif int(inp.open_interest) <= oi_min:
+        rejected.append(f"Open interest {int(inp.open_interest)} is not above {oi_min}.")
+    else:
+        passed.append(f"Open interest {int(inp.open_interest)} is above {oi_min}")
+
+    spread_cap = gamma_spread_max() * 100.0
+    if inp.spread_pct is None:
+        rejected.append(f"Bid/ask spread is missing, so the {gamma_spread_max() * 100:.0f}% of mid cap cannot pass.")
+    elif float(inp.spread_pct) >= spread_cap:
+        rejected.append(
+            f"Bid/ask spread is {float(inp.spread_pct):.1f}% of mid, not below {gamma_spread_max() * 100:.0f}%."
+        )
+    else:
+        passed.append(f"Spread {float(inp.spread_pct):.1f}% of mid is below {gamma_spread_max() * 100:.0f}%")
+
+    if not inp.four_leg_structure or not inp.front_expiry_listed or not inp.back_expiry_listed:
+        rejected.append(
+            "The 4-leg structure is not listed: a front expiry after earnings and a back expiry about 2 weeks later must both be on the chain."
+        )
     elif not inp.legs_same_strikes:
-        rejected.append("Front and back expirations must use the same strikes across all legs")
+        rejected.append("Front and back expirations must use the same strikes on each side.")
     else:
-        passed.append("4-leg structure with matching strikes across expirations")
-
-    call_ok = _delta_in_range(inp.call_delta)
-    put_ok = _delta_in_range(inp.put_delta)
-    if not call_ok and not put_ok:
-        rejected.append(
-            f"Strikes must be {DELTA_OTM_MIN:.2f}–{DELTA_OTM_MAX:.2f} delta OTM on call or put leg"
-        )
-    else:
-        passed.append(f"OTM delta within {DELTA_OTM_MIN:.2f}–{DELTA_OTM_MAX:.2f} band")
-
-    if inp.front_premium_offset_pct is None:
-        rejected.append("Front-week premium offset could not be computed")
-    elif inp.front_premium_offset_pct < FRONT_PREMIUM_OFFSET_MIN:
-        rejected.append(
-            f"Front-week premium must offset ≥{int(FRONT_PREMIUM_OFFSET_MIN * 100)}% of back-week cost; "
-            f"got {inp.front_premium_offset_pct * 100:.0f}%"
-        )
-    else:
-        passed.append(f"Front-week premium offset ≥{int(FRONT_PREMIUM_OFFSET_MIN * 100)}%")
-
-    if inp.adv is not None and inp.adv < MIN_ADV:
-        rejected.append(f"ADV below minimum ({inp.adv:,.0f} < {MIN_ADV:,})")
-    elif inp.adv is not None:
-        passed.append("ADV liquidity gate passed")
-
-    if inp.open_interest is not None and inp.open_interest < MIN_OPEN_INTEREST:
-        rejected.append(f"Open interest below minimum ({inp.open_interest} < {MIN_OPEN_INTEREST})")
-    elif inp.open_interest is not None:
-        passed.append("Open interest gate passed")
-
-    if inp.spread_pct is not None and inp.spread_pct > MAX_SPREAD_PCT:
-        rejected.append(f"Bid/ask spread {inp.spread_pct:.1f}% exceeds {MAX_SPREAD_PCT}% limit")
-    elif inp.spread_pct is not None:
-        passed.append("Spread within liquidity gate")
+        passed.append("Front expiry after earnings and back expiry about 2 weeks later are both listed")
 
     return ApexStrategyEligibility(
         eligible=len(rejected) == 0,
+        strategy_name=classifier_label(eligible=len(rejected) == 0),
         rejection_reasons=rejected,
         checks_passed=passed,
     )
@@ -174,6 +223,30 @@ def _contract_at_strike(contracts: list[dict[str, Any]], side: str, strike: floa
     )
 
 
+def _history_from_layer(vol_layer: dict[str, Any]) -> tuple[int | None, int | None]:
+    """Read a supplied earnings-move history. Never invent the eight reports."""
+    raw = vol_layer.get("earnings_move_history")
+    if not isinstance(raw, list) or not raw:
+        return None, None
+    hits = 0
+    counted = 0
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        actual = row.get("actual_move")
+        implied = row.get("implied_move")
+        if not isinstance(actual, (int, float)) or not isinstance(implied, (int, float)):
+            continue
+        if isinstance(actual, bool) or isinstance(implied, bool):
+            continue
+        counted += 1
+        if float(actual) < float(implied):
+            hits += 1
+    if counted == 0:
+        return None, None
+    return hits, counted
+
+
 def build_apex_strategy_input_from_scan(
     *,
     catalyst_days: int | None,
@@ -181,6 +254,8 @@ def build_apex_strategy_input_from_scan(
     chain_analysis: dict[str, Any],
     contracts: list[dict[str, Any]] | None = None,
     back_month_contracts: list[dict[str, Any]] | None = None,
+    earnings_date_confirmed: bool | None = None,
+    spot: float | None = None,
 ) -> ApexStrategyInput:
     """Build eligibility input from scan-layer payloads — never fabricates structure eligibility."""
     term = vol_layer.get("term_structure") or {}
@@ -193,39 +268,22 @@ def build_apex_strategy_input_from_scan(
     call_delta = put_delta = None
     spread_pct = None
     min_oi = None
-    for c in front_rows + back_rows:
-        side = c.get("side")
-        delta = c.get("delta")
-        if side == "call" and delta is not None:
-            call_delta = float(delta)
-        if side == "put" and delta is not None:
-            put_delta = float(delta)
-        bid, ask = c.get("bid"), c.get("ask")
-        if bid and ask and ask > 0:
-            mid = (float(bid) + float(ask)) / 2
-            if mid > 0:
-                sp = (float(ask) - float(bid)) / mid * 100
-                spread_pct = sp if spread_pct is None else min(spread_pct, sp)
-        oi = c.get("open_interest")
-        if oi is not None:
-            min_oi = int(oi) if min_oi is None else min(min_oi, int(oi))
 
-    summary = chain_analysis.get("summary") or {}
-    median_spread = summary.get("median_spread_pct")
-    if spread_pct is None and median_spread is not None:
-        spread_pct = float(median_spread)
-
-    inverted = bool(term.get("inverted")) or (
-        front_iv is not None and back_iv is not None and float(front_iv) > float(back_iv)
-    )
+    front_f = _as_fraction(float(front_iv)) if isinstance(front_iv, (int, float)) and not isinstance(front_iv, bool) else None
+    back_f = _as_fraction(float(back_iv)) if isinstance(back_iv, (int, float)) and not isinstance(back_iv, bool) else None
+    inverted = front_f is not None and back_f is not None and front_f / back_f >= gamma_front_back_iv_ratio_min()
 
     four_leg_structure = False
     legs_same_strikes = False
     front_premium_offset_pct: float | None = None
+    px = spot if isinstance(spot, (int, float)) and not isinstance(spot, bool) else chain_analysis.get("spot")
+    px = float(px) if isinstance(px, (int, float)) and not isinstance(px, bool) and px > 0 else None
 
     if front_rows and back_rows:
-        front_call = _pick_otm_contract(front_rows, "call")
-        front_put = _pick_otm_contract(front_rows, "put")
+        front_call, front_put = _expected_move_pair(front_rows, px)
+        if front_call is None or front_put is None:
+            front_call = _pick_otm_contract(front_rows, "call")
+            front_put = _pick_otm_contract(front_rows, "put")
         back_call = (
             _contract_at_strike(back_rows, "call", float(front_call["strike"]))
             if front_call and front_call.get("strike") is not None
@@ -250,6 +308,30 @@ def build_apex_strategy_input_from_scan(
                 call_delta = float(front_call["delta"])
             if front_put.get("delta") is not None:
                 put_delta = float(front_put["delta"])
+            chosen = (front_call, front_put, back_call, back_put)
+            oi_values: list[int] = []
+            spreads: list[float] = []
+            oi_complete = True
+            spread_complete = True
+            for contract in chosen:
+                oi = contract.get("open_interest")
+                if oi is None:
+                    oi_complete = False
+                else:
+                    oi_values.append(int(oi))
+                bid, ask = contract.get("bid"), contract.get("ask")
+                if bid and ask and float(ask) > 0:
+                    mid = (float(bid) + float(ask)) / 2.0
+                    if mid > 0:
+                        spreads.append((float(ask) - float(bid)) / mid * 100.0)
+                    else:
+                        spread_complete = False
+                else:
+                    spread_complete = False
+            if oi_complete and oi_values:
+                min_oi = min(oi_values)
+            if spread_complete and len(spreads) == 4:
+                spread_pct = max(spreads)
 
     return ApexStrategyInput(
         catalyst_days=catalyst_days,
@@ -265,4 +347,38 @@ def build_apex_strategy_input_from_scan(
         adv=vol_layer.get("adv"),
         open_interest=min_oi,
         spread_pct=spread_pct,
+        earnings_date_confirmed=bool(earnings_date_confirmed) if earnings_date_confirmed is not None else bool(catalyst_days is not None and vol_layer.get("earnings_date_confirmed")),
+        earnings_history_hits=_history_from_layer(vol_layer)[0],
+        earnings_history_count=_history_from_layer(vol_layer)[1],
+        front_expiry_listed=four_leg_structure,
+        back_expiry_listed=four_leg_structure,
     )
+
+
+def _expected_move_pair(
+    contracts: list[dict[str, Any]],
+    spot: float | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Strike A and Strike B at the front-week ATM straddle, rounded to listed strikes."""
+    if spot is None:
+        return None, None
+    calls = [c for c in contracts if c.get("side") == "call" and c.get("strike") is not None]
+    if not calls:
+        return None, None
+    atm_call = min(calls, key=lambda c: abs(float(c["strike"]) - spot))
+    atm_put = _contract_at_strike(contracts, "put", float(atm_call["strike"]))
+    call_mid = _contract_mid(atm_call)
+    put_mid = _contract_mid(atm_put)
+    if call_mid is None or put_mid is None:
+        return None, None
+    move = call_mid + put_mid
+    above = _nearest_listed(contracts, "call", spot + move)
+    below = _nearest_listed(contracts, "put", spot - move)
+    return above, below
+
+
+def _nearest_listed(contracts: list[dict[str, Any]], side: str, target: float) -> dict[str, Any] | None:
+    pool = [c for c in contracts if c.get("side") == side and c.get("strike") is not None]
+    if not pool:
+        return None
+    return min(pool, key=lambda c: (abs(float(c["strike"]) - target), float(c["strike"])))

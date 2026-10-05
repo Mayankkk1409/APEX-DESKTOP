@@ -79,6 +79,8 @@ class _Bundle:
     price_source: str | None = None
     fundamentals_source: str | None = None
     as_of: str | None = None
+    bid: float | None = None
+    ask: float | None = None
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -299,6 +301,8 @@ def _alpaca_stock_sync(symbol: str, settings: Settings) -> dict[str, Any] | None
         "asset_class": asset_class,
         "as_of": as_of,
         "source": "Alpaca",
+        "bid": usable_positive_price(parse_number(bid)),
+        "ask": usable_positive_price(parse_number(ask)),
     }
 
 
@@ -591,6 +595,8 @@ def _apply(dst: _Bundle, src: dict[str, Any] | None, *, price: bool, fundamental
         dst.week_52_high = _first(dst.week_52_high, usable_positive_price(src.get("week_52_high")))
         dst.week_52_low = _first(dst.week_52_low, usable_positive_price(src.get("week_52_low")))
         dst.as_of = dst.as_of or src.get("as_of")
+        dst.bid = _first(dst.bid, usable_positive_price(src.get("bid")))
+        dst.ask = _first(dst.ask, usable_positive_price(src.get("ask")))
         if src.get("name") and dst.name == dst.symbol:
             dst.name = src["name"]
     if fundamentals:
@@ -717,6 +723,8 @@ def _quote_from_bundle(bundle: _Bundle) -> Quote:
         status=bundle.status,  # type: ignore[arg-type]
         as_of=bundle.as_of or None,
         asset_class=bundle.asset_class,
+        bid=bundle.bid,
+        ask=bundle.ask,
     )
 
 

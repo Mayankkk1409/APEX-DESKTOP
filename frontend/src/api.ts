@@ -155,6 +155,7 @@ export const api = {
   pnlHistory: () => req<import("./types").PnlHistory>("/api/portfolio/pnl-history"),
   overallPnl: () => req<{ rows: import("./types").OverallPnlRow[] }>("/api/portfolio/overall-pnl"),
   positions: () => req<{ positions: import("./types").PositionRow[] }>("/api/positions"),
+  expiryWatch: () => req<import("./lib/expiryNotice").ExpiryWatchResponse>("/api/expiry-watch"),
   positionDetail: (positionId: string) =>
     req<{
       position: import("./types").PositionRow;
@@ -204,6 +205,17 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ broker }),
     }),
+  brokerageStatus: () =>
+    req<{
+      provider: string;
+      configured: boolean;
+      upstream: "up" | "down" | "not_configured";
+      http_status: number | null;
+      connection_status: string | null;
+      account_count: number;
+      host: string;
+      missing: string[];
+    }>("/api/brokerage/status"),
   brokerageAccounts: () => req<{ connection_status: string | null; accounts: unknown[] }>("/api/brokerage/accounts"),
   brokerageBalance: (accountId: string) =>
     req(`/api/brokerage/accounts/${encodeURIComponent(accountId)}/balance`),

@@ -7,12 +7,15 @@ import { ApexScoreScan } from "../components/ApexScoreScan";
 import { FundamentalsScan } from "../components/FundamentalsScan";
 import { OptionsChainGreeks } from "../components/OptionsChainGreeks";
 import { OrderConfirmationCertificate } from "../components/OrderConfirmationCertificate";
+import { RiskReviewLegs } from "../components/RiskReviewLegs";
+import { RiskReviewOrderActions } from "../components/RiskReviewOrderActions";
 import { SentimentScan } from "../components/SentimentScan";
 import { StrategyScan } from "../components/StrategyScan";
 import { TaSnapshot } from "../components/TaSnapshot";
 import { VolatilityScan } from "../components/volatility/VolatilityScan";
 import { CAROUSEL_LAYERS, SCAN_SLIDE_LAYERS, SNAPSHOT_STUDIES } from "../constants";
 import { scoreTier } from "../lib/chartHighlight";
+import { optionReviewRows, optionsLegBlockReason } from "../lib/orderTicket";
 import { autoExecEligibilityLine, orderPlacement } from "../lib/riskReview";
 import { normalizeStrategyName } from "../lib/strategyDisplay";
 import { readUserSettings } from "../lib/userSettings";
@@ -126,26 +129,65 @@ export function DeepScan() {
           strike?: number;
           option_side?: string;
           expiry?: string;
+          order_type?: string;
+          price?: number | null;
+          limit_basis?: string | null;
         }>;
         contracts_per_leg?: number;
+        equity_legs?: Array<{
+          symbol: string;
+          side: string;
+          qty?: number;
+          position_intent?: string;
+          order_type?: string;
+          price?: number | null;
+        }>;
+        equity_note?: string | null;
+        equity_required?: boolean;
+        block_reason?: string | null;
       }
     | undefined;
   const scanAutoThreshold = riskReview?.auto_execution_threshold ?? autoExecMinScore;
   const executionTier = riskReview?.execution_tier ?? scoreTier(compositeScore, scanAutoThreshold);
   const strategyLegs = riskReview?.strategy_legs ?? [];
+  const equityLegs = riskReview?.equity_legs ?? [];
+  const equityNote = riskReview?.equity_note ?? null;
   const definedRisk = riskReview?.defined_risk ?? Boolean(riskReview?.auto_submit_on_ack);
+  const strategyLayerData = scan.data?.layer_data?.strategy as StrategyLayer | undefined;
+  const strategyName = strategyLayerData?.selected_strategy ?? "";
+  const reviewRows = useMemo(
+    () =>
+      optionReviewRows({
+        ticketLegs: strategyLegs,
+        metricLegs: strategyLayerData?.metrics?.legs,
+        strategyName,
+        equityRequired: riskReview?.equity_required,
+        equityLegs,
+        equityCovered: strategyLayerData?.metrics?.equity_covered_by_holdings,
+        validationError: strategyLayerData?.metrics?.validation_error,
+        multiplier: strategyLayerData?.metrics?.per_contract_multiplier,
+        contractsPerLeg,
+      }),
+    [contractsPerLeg, equityLegs, riskReview?.equity_required, strategyLayerData, strategyLegs, strategyName],
+  );
+  const emptyLegReason = optionsLegBlockReason({
+    blockReason: riskReview?.block_reason,
+    equityNote,
+    validationError: strategyLayerData?.metrics?.validation_error,
+    validationErrors: strategyLayerData?.validation_errors,
+    riskNotes: strategyLayerData?.risk_notes,
+  });
+  // The browser auto-exec toggle defaults off and is not stored on the server, so it is not a gate.
   const placement = orderPlacement({
-    toggleOn: userSettings.autoExecEnabled,
+    serverAutoSubmit: riskReview?.auto_submit_on_ack === true,
     composite: compositeScore,
     threshold: scanAutoThreshold,
     definedRisk,
-    hasLegs: strategyLegs.length > 0,
+    hasLegs: reviewRows.length > 0,
   });
   const autoSubmitOnAck = placement.autoSubmitOnAck;
   const orderAssetClass = (riskReview as { asset_class?: string } | undefined)?.asset_class ?? "us_option";
   const orderTypeLabel = formatOrderType("market", orderAssetClass);
-  const strategyLayerData = scan.data?.layer_data?.strategy as StrategyLayer | undefined;
-  const strategyName = strategyLayerData?.selected_strategy ?? "";
   const chainStrategyHighlight = useMemo(() => {
     if (!scan.data) return undefined;
     const metricLegs = (strategyLayerData?.metrics?.legs ?? []).filter(
@@ -223,20 +265,23 @@ export function DeepScan() {
 
   const order = useMutation({
     mutationFn: () => {
-      if (!strategyLegs.length) {
-        throw new Error("No options legs available for this scan — re-run with a tradeable strategy.");
+      if (!reviewRows.length) {
+        throw new Error(emptyLegReason);
       }
       return api.order({
         scan_id: scan.data?.id,
         thesis_accepted: thesis,
         asset_class: "us_option",
-        legs: strategyLegs.map((leg) => ({
+        legs: reviewRows.map((leg) => ({
           symbol: leg.symbol,
           side: leg.side,
-          qty: leg.qty ?? contractsPerLeg,
+          qty: leg.contracts,
           strike: leg.strike,
-          option_side: leg.option_side,
+          option_side: leg.optionSide,
           expiry: leg.expiry,
+          price: leg.price,
+          order_type: leg.orderType,
+          limit_price: leg.orderType === "limit" ? leg.price : null,
         })),
         contracts_per_leg: contractsPerLeg,
       });
@@ -362,27 +407,37 @@ export function DeepScan() {
             <p className="mt-4 whitespace-pre-wrap text-sm leading-relaxed text-champagne/80">{String(data?.narrative ?? "Loading…")}</p>
             {riskLayer && (
               <div className="mt-6 space-y-4" data-testid="risk-review" data-execution-tier={executionTier}>
-                {strategyLegs.length === 0 ? (
+                {reviewRows.length === 0 ? (
                   <p className="text-sm text-champagne/80" data-testid="risk-blocked">
-                    No options legs are available for this scan.
+                    {emptyLegReason}
                   </p>
                 ) : (
                   <>
-                    <p className="text-sm text-champagne/70">
-                      Options-only execution — {strategyLegs.length} leg{strategyLegs.length === 1 ? "" : "s"} from the
-                      recommended strategy. Each leg is submitted as an OCC options contract order.
+                    <p className="text-sm text-champagne/70" data-testid="order-composition">
+                      {equityLegs.length
+                        ? "The stock leg is submitted with the option legs. Shares fill before any short call."
+                        : equityNote
+                          ? equityNote
+                          : `Options execution — ${reviewRows.length} leg${reviewRows.length === 1 ? "" : "s"} from the recommended strategy.`}
                     </p>
-                    <ul className="space-y-2 text-sm" data-testid="strategy-legs-review">
-                      {strategyLegs.map((leg) => (
-                        <li key={leg.symbol} className="rounded border border-line/60 px-3 py-2 font-mono text-xs">
-                          {leg.side.toUpperCase()} {contractsPerLeg} × {leg.symbol}
-                          {leg.option_side && leg.strike != null
-                            ? ` (${leg.option_side} ${leg.strike}${leg.expiry ? ` · ${leg.expiry}` : ""})`
-                            : ""}
-                        </li>
-                      ))}
-                    </ul>
-                    {definedRisk && compositeScore != null && compositeScore >= scanAutoThreshold ? (
+                    {equityNote && equityLegs.length ? (
+                      <p className="text-sm text-champagne/80" data-testid="equity-order-note">
+                        {equityNote}
+                      </p>
+                    ) : null}
+                    {equityLegs.length ? (
+                      <ul className="space-y-2 text-sm" data-testid="equity-legs-review">
+                        {equityLegs.map((leg) => (
+                          <li key={`stock-${leg.symbol}`} className="rounded border border-line/60 px-3 py-2 font-mono text-xs">
+                            {leg.position_intent === "sell_short" ? "SELL SHORT" : leg.side.toUpperCase()} {leg.qty} {leg.symbol}{" "}
+                            stock · {leg.order_type ?? "market"}
+                            {leg.price != null ? ` @ $${Number(leg.price).toFixed(2)}` : ""}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    <RiskReviewLegs rows={reviewRows} />
+                    {placement.autoSubmitOnAck && compositeScore != null ? (
                       <p className="text-sm text-champagne/80" data-testid="auto-exec-eligibility">
                         {autoExecEligibilityLine(compositeScore, scanAutoThreshold)}
                       </p>
@@ -403,8 +458,8 @@ export function DeepScan() {
                         }}
                       />
                       <span>
-                        I accept the thesis and have reviewed each options leg, contract quantity, estimated premium, and
-                        account impact.
+                        I accept the thesis and have reviewed each option leg, the stock leg when this strategy includes
+                        shares, contract quantity, and account impact.
                       </span>
                     </label>
                     <div className="grid grid-cols-2 gap-3 text-sm">
@@ -424,31 +479,17 @@ export function DeepScan() {
                         {orderTypeLabel}
                       </p>
                     </div>
-                    {placement.note ? (
-                      <p className="text-sm text-champagne/70" data-testid="manual-confirmation-note" role="note">
-                        {placement.note}
-                      </p>
-                    ) : null}
-                    {placement.autoSubmitOnAck ? (
-                      <p className="text-sm text-champagne/70" data-testid="auto-exec-hint">
-                        Acknowledge — accepting the thesis submits these options legs.
-                      </p>
-                    ) : (
-                      <button
-                        data-testid="submit-order"
-                        disabled={order.isPending}
-                        onClick={() => {
-                          if (!thesis) {
-                            setMsg("Accept the thesis to place this trade.");
-                            return;
-                          }
-                          order.mutate();
-                        }}
-                        className="rounded-md bg-gold px-4 py-2 text-ink disabled:opacity-40"
-                      >
-                        Place Trade
-                      </button>
-                    )}
+                    <RiskReviewOrderActions
+                      placement={placement}
+                      pending={order.isPending}
+                      onPlace={() => {
+                        if (!thesis) {
+                          setMsg("Accept the thesis to place this trade.");
+                          return;
+                        }
+                        order.mutate();
+                      }}
+                    />
                     {msg && <p className="text-sm">{msg}</p>}
                   </>
                 )}

@@ -90,7 +90,7 @@ def strategy_selection_bucket(
         return "buy", "call"
     if "Bear Put" in selected_strategy:
         return "buy", "put"
-    if "APEX Strategy" in selected_strategy:
+    if "APEX Strategy" in selected_strategy or "Gamma Trampoline" in selected_strategy:
         return "buy", "put" if direction == "bearish" else "call"
     if "Benchmark Greeks" in selected_strategy:
         return "buy", "put" if direction == "bearish" else "call"

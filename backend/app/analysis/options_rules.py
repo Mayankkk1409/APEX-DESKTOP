@@ -18,6 +18,7 @@ Documented rules implemented here
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
 from typing import Iterable, Literal, Optional
 
@@ -185,6 +186,35 @@ def spread_metrics(bid: float | None, ask: float | None) -> tuple[float | None, 
     return mid, spread, spread / mid
 
 
+def daily_theta_per_share(
+    theta: float | None,
+    *,
+    mid: float | None = None,
+    multiplier: int | None = 100,
+) -> float | None:
+    """Theta in premium points per share per calendar day.
+
+    Rule 1 compares this number with 0.05. A reading already near 0.15–0.20 is
+    left unchanged so that contract fails. A reading larger than the option mid
+    cannot be per-share premium (the contract would be worth less than one day
+    of decay) and is the whole-contract Greek, so it is divided by the multiplier.
+    """
+    if theta is None or isinstance(theta, bool):
+        return None
+    try:
+        value = float(theta)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    scale = int(multiplier) if multiplier and int(multiplier) > 1 else 100
+    if mid is not None and mid > 0 and abs(value) > mid:
+        per_share = value / scale
+        if abs(per_share) <= mid:
+            value = per_share
+    return value
+
+
 def delta_theta_ratio(delta: float | None, theta: float | None) -> float | None:
     """APEX Delta/Theta ratio (§5.2): |Delta| divided by absolute daily Theta.
 
@@ -218,7 +248,7 @@ def evaluate_contract(contract: OptionContract, ctx: ChainContext) -> ContractVe
 
     mid, spread_abs, spread_pct = spread_metrics(contract.bid, contract.ask)
     abs_delta = abs(contract.delta) if contract.delta is not None else None
-    theta_day = contract.theta
+    theta_day = daily_theta_per_share(contract.theta, mid=mid, multiplier=contract.multiplier)
     ratio = delta_theta_ratio(contract.delta, theta_day)
     moneyness = classify_moneyness(contract.side, contract.strike, ctx.spot, ctx.atm_strike)
 
@@ -520,8 +550,19 @@ def evaluate_contract(contract: OptionContract, ctx: ChainContext) -> ContractVe
 
     # §9.1 Rule 1 / Rule 2 — the tighter proprietary filters
     if abs_delta is not None and theta_day is not None:
-        if _ge(abs_delta, t.rule1_delta_min) and _lt(abs(theta_day), t.rule1_theta_max) and _gt(ratio or 0, t.delta_theta_buy_min):
+        from app.analysis.gate_config import iv_below_hv, rule1_theta_failures
+
+        theta_fail, theta_notes = rule1_theta_failures(
+            delta=abs_delta,
+            theta_per_share=theta_day,
+            premium=mid,
+        )
+        spread_ok = spread_pct is not None and spread_pct < 0.08
+        iv_ok = iv_below_hv(contract.iv, ctx.hv) is True
+        if not theta_fail and spread_ok and iv_ok:
             flags.append("rule1_buy")
+        elif any("skipped" in note for note in theta_notes):
+            flags.append("rule1_ratio_skipped")
         if _le(abs_delta, t.rule2_delta_max) and spread_pct is not None and _le(spread_pct, t.spread_max_pct_of_mid):
             flags.append("rule2_sell")
 
@@ -798,10 +839,19 @@ def _reasoning(
     if "uoa" in flags:
         parts.append("Unusual options activity is present on this strike.")
     if "rule1_buy" in flags:
-        parts.append(
-            f"Meets §9.1 Rule 1 (Delta >= {ctx.thresholds.rule1_delta_min:.2f}, daily Theta < "
-            f"{ctx.thresholds.rule1_theta_max:.2f}, Delta/Theta > {ctx.thresholds.delta_theta_buy_min:g})."
-        )
+        from app.analysis.gate_config import theta_filter_mode
+
+        if theta_filter_mode() == "abs_per_share":
+            parts.append(
+                f"Meets §9.1 Rule 1 (Delta >= {ctx.thresholds.rule1_delta_min:.2f}, daily Theta < "
+                f"{ctx.thresholds.rule1_theta_max:.2f}, Delta/Theta > {ctx.thresholds.delta_theta_buy_min:g}, "
+                "spread under 8% of mid, IV below HV)."
+            )
+        else:
+            parts.append(
+                "Meets §9.1 Rule 1 (Delta >= 0.55, theta within the percent-of-premium cap, "
+                "spread under 8% of mid, IV below HV). The delta/theta ratio was skipped."
+            )
     if "rule2_sell" in flags:
         parts.append(
             f"Meets §9.1 Rule 2 short-leg profile (Delta <= {ctx.thresholds.rule2_delta_max:.2f} with a spread inside the cap)."

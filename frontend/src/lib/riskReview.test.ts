@@ -22,9 +22,27 @@ describe("autoSubmitArms", () => {
     ).toBe(false);
   });
 
-  it("stays off when the global toggle is off", () => {
+  it("still arms when the browser toggle defaults off and the server flag is true", () => {
     expect(
-      autoSubmitArms({ toggleOn: false, composite: 90, threshold: 35, definedRisk: true }),
+      autoSubmitArms({
+        toggleOn: false,
+        serverAutoSubmit: true,
+        composite: 52.8,
+        threshold: 40,
+        definedRisk: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("stays off when auto-execution is persisted off on the server", () => {
+    expect(
+      autoSubmitArms({
+        serverAutoExecEnabled: false,
+        serverAutoSubmit: true,
+        composite: 90,
+        threshold: 35,
+        definedRisk: true,
+      }),
     ).toBe(false);
   });
 
@@ -76,8 +94,42 @@ describe("orderPlacement", () => {
     );
   });
 
-  it("keeps Place Trade when the toggle is off even if the score clears the minimum", () => {
-    expect(orderPlacement({ ...legs, toggleOn: false, composite: 66, threshold: 40 })).toEqual({
+  it("shows Acknowledge when the server auto-submits and the browser toggle defaults off", () => {
+    expect(
+      orderPlacement({
+        ...legs,
+        toggleOn: false,
+        serverAutoSubmit: true,
+        composite: 52.8,
+        threshold: 40,
+      }),
+    ).toEqual({
+      autoSubmitOnAck: true,
+      placeTradeEnabled: false,
+      note: null,
+    });
+    expect(
+      orderPlacement({
+        ...legs,
+        toggleOn: false,
+        serverAutoSubmit: true,
+        composite: 55.4,
+        threshold: 40,
+      }).autoSubmitOnAck,
+    ).toBe(true);
+  });
+
+  it("keeps Place Trade when auto-execution is persisted off on the server", () => {
+    expect(
+      orderPlacement({
+        ...legs,
+        toggleOn: false,
+        serverAutoExecEnabled: false,
+        serverAutoSubmit: true,
+        composite: 66,
+        threshold: 40,
+      }),
+    ).toEqual({
       autoSubmitOnAck: false,
       placeTradeEnabled: true,
       note: "Auto-execution is off.",
@@ -90,10 +142,18 @@ describe("orderPlacement", () => {
       placeTradeEnabled: false,
       note: null,
     });
-    expect(orderPlacement({ ...legs, toggleOn: false, composite: 72, threshold: 40 })).toEqual({
-      autoSubmitOnAck: false,
-      placeTradeEnabled: true,
-      note: "Auto-execution is off.",
+    expect(
+      orderPlacement({
+        ...legs,
+        toggleOn: false,
+        serverAutoSubmit: true,
+        composite: 72,
+        threshold: 40,
+      }),
+    ).toEqual({
+      autoSubmitOnAck: true,
+      placeTradeEnabled: false,
+      note: null,
     });
   });
 

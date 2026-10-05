@@ -32,6 +32,19 @@ describe("pnlTimeframe", () => {
     expect(filtered.length).toBe(2);
   });
 
+  it("does not draw a line from the first point to the last when the window is sparse", () => {
+    const now = new Date("2026-08-28T12:00:00Z");
+    const filtered = filterPnlPoints(
+      [
+        { t: "2025-01-01T00:00:00Z", portfolio_value: 1 },
+        { t: "2026-08-01T00:00:00Z", portfolio_value: 2 },
+      ],
+      "1D",
+      now,
+    );
+    expect(filtered.map((p) => p.portfolio_value)).toEqual([2]);
+  });
+
   it("computes timeframe start dates", () => {
     const now = new Date("2026-08-28T12:00:00Z");
     expect(timeframeStart("YTD", now)?.toISOString()).toBe("2026-01-01T00:00:00.000Z");

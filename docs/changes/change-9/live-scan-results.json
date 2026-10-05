@@ -1,0 +1,459 @@
+{
+  "generated_at": "2026-10-05T00:51:29.187111+00:00",
+  "source": "POST /scan against http://127.0.0.1:8000 after GET /health",
+  "requested_symbols": [
+    "SPY",
+    "QQQ",
+    "IWM",
+    "DIA",
+    "XLF",
+    "XLE",
+    "XLK",
+    "GLD",
+    "TLT",
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "AMZN",
+    "GOOGL",
+    "META",
+    "TSLA",
+    "AMD",
+    "NFLX",
+    "AVGO",
+    "CRM",
+    "ORCL",
+    "INTC",
+    "JPM",
+    "BAC",
+    "GS",
+    "WFC",
+    "V",
+    "MA",
+    "XOM",
+    "CVX",
+    "OXY",
+    "JNJ",
+    "PFE",
+    "MRK",
+    "UNH",
+    "LLY",
+    "ABBV",
+    "KO",
+    "PEP",
+    "WMT",
+    "COST",
+    "HD",
+    "MCD",
+    "NKE",
+    "DIS",
+    "BA",
+    "CAT",
+    "GE",
+    "F",
+    "GM",
+    "T",
+    "VZ",
+    "PLTR",
+    "COIN",
+    "UBER",
+    "SOFI"
+  ],
+  "succeeded": 56,
+  "stopped_reason": null,
+  "failures": [],
+  "rows": [
+    {
+      "symbol": "SPY",
+      "selected_strategy": "Bull Put Spread (credit)",
+      "composite_score": 63.4,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "QQQ",
+      "selected_strategy": "Bull Put Spread (credit)",
+      "composite_score": 63.0,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "IWM",
+      "selected_strategy": "Diagonal Spread (bullish)",
+      "composite_score": 65.0,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "DIA",
+      "selected_strategy": "Long Put",
+      "composite_score": 57.2,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "XLF",
+      "selected_strategy": "Diagonal Spread (bullish)",
+      "composite_score": 45.0,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "XLE",
+      "selected_strategy": "Bull Put Spread (credit)",
+      "composite_score": 50.2,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "XLK",
+      "selected_strategy": "Bull Put Spread (credit)",
+      "composite_score": 49.9,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "GLD",
+      "selected_strategy": "Bear Call Spread (credit)",
+      "composite_score": 58.8,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "TLT",
+      "selected_strategy": "Bear Call Spread (credit)",
+      "composite_score": 53.5,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "AAPL",
+      "selected_strategy": "Bull Put Spread (credit)",
+      "composite_score": 56.8,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "MSFT",
+      "selected_strategy": "Long Call",
+      "composite_score": 51.0,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "NVDA",
+      "selected_strategy": "Diagonal Spread (bullish)",
+      "composite_score": 58.4,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "AMZN",
+      "selected_strategy": "Long Call",
+      "composite_score": 56.5,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "GOOGL",
+      "selected_strategy": "Bull Put Spread (credit)",
+      "composite_score": 56.9,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "META",
+      "selected_strategy": "Diagonal Spread (bearish)",
+      "composite_score": 51.0,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "TSLA",
+      "selected_strategy": "Diagonal Spread (bullish)",
+      "composite_score": 61.3,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "AMD",
+      "selected_strategy": "APEX Benchmark Greeks Strategy",
+      "composite_score": 52.6,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "NFLX",
+      "selected_strategy": "Diagonal Spread (bearish)",
+      "composite_score": 57.6,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "AVGO",
+      "selected_strategy": "APEX Benchmark Greeks Strategy",
+      "composite_score": 58.4,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "CRM",
+      "selected_strategy": "Diagonal Spread (bearish)",
+      "composite_score": 56.5,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "ORCL",
+      "selected_strategy": "APEX Benchmark Greeks Strategy",
+      "composite_score": 65.4,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "INTC",
+      "selected_strategy": "Bull Put Spread (credit)",
+      "composite_score": 62.9,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "JPM",
+      "selected_strategy": "Diagonal Spread (bearish)",
+      "composite_score": 55.4,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "BAC",
+      "selected_strategy": "Diagonal Spread (bearish)",
+      "composite_score": 48.2,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "GS",
+      "selected_strategy": "Married Put",
+      "composite_score": 51.3,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "WFC",
+      "selected_strategy": "Diagonal Spread (bearish)",
+      "composite_score": 49.1,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "V",
+      "selected_strategy": "APEX Benchmark Greeks Strategy",
+      "composite_score": 64.6,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "MA",
+      "selected_strategy": "Diagonal Spread (bearish)",
+      "composite_score": 55.4,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "XOM",
+      "selected_strategy": "APEX Benchmark Greeks Strategy",
+      "composite_score": 52.0,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "CVX",
+      "selected_strategy": "APEX Benchmark Greeks Strategy",
+      "composite_score": 51.5,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "OXY",
+      "selected_strategy": "APEX Benchmark Greeks Strategy",
+      "composite_score": 58.2,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "JNJ",
+      "selected_strategy": "Diagonal Spread (bearish)",
+      "composite_score": 49.8,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "PFE",
+      "selected_strategy": "Bear Call Spread (credit)",
+      "composite_score": 52.9,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "MRK",
+      "selected_strategy": "Diagonal Spread (bearish)",
+      "composite_score": 51.5,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "UNH",
+      "selected_strategy": "Bull Put Spread (credit)",
+      "composite_score": 55.8,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "LLY",
+      "selected_strategy": "Bull Put Spread (credit)",
+      "composite_score": 53.5,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "ABBV",
+      "selected_strategy": "APEX Benchmark Greeks Strategy",
+      "composite_score": 53.4,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "KO",
+      "selected_strategy": "APEX Benchmark Greeks Strategy",
+      "composite_score": 49.7,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "PEP",
+      "selected_strategy": "Diagonal Spread (bearish)",
+      "composite_score": 52.4,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "WMT",
+      "selected_strategy": "Bull Put Spread (credit)",
+      "composite_score": 56.1,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "COST",
+      "selected_strategy": "Bull Put Spread (credit)",
+      "composite_score": 55.8,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "HD",
+      "selected_strategy": "Bear Call Spread (credit)",
+      "composite_score": 53.8,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "MCD",
+      "selected_strategy": "Bear Call Spread (credit)",
+      "composite_score": 55.3,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "NKE",
+      "selected_strategy": "Bear Call Spread (credit)",
+      "composite_score": 54.9,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "DIS",
+      "selected_strategy": "APEX Benchmark Greeks Strategy",
+      "composite_score": 47.9,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "BA",
+      "selected_strategy": "Diagonal Spread (bearish)",
+      "composite_score": 49.7,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "CAT",
+      "selected_strategy": "Diagonal Spread (bullish)",
+      "composite_score": 54.8,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "GE",
+      "selected_strategy": "Diagonal Spread (bearish)",
+      "composite_score": 52.6,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "F",
+      "selected_strategy": "Diagonal Spread (bullish)",
+      "composite_score": 50.6,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "GM",
+      "selected_strategy": "Diagonal Spread (bearish)",
+      "composite_score": 47.2,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "T",
+      "selected_strategy": "Diagonal Spread (bearish)",
+      "composite_score": 50.4,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "VZ",
+      "selected_strategy": "Diagonal Spread (bullish)",
+      "composite_score": 53.0,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "PLTR",
+      "selected_strategy": "Diagonal Spread (bearish)",
+      "composite_score": 65.9,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "COIN",
+      "selected_strategy": "APEX Benchmark Greeks Strategy",
+      "composite_score": 47.6,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "UBER",
+      "selected_strategy": "Diagonal Spread (bullish)",
+      "composite_score": 53.5,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    },
+    {
+      "symbol": "SOFI",
+      "selected_strategy": "Bear Call Spread (credit)",
+      "composite_score": 67.4,
+      "strategies_evaluated": 98,
+      "label_contains_no_trade": false
+    }
+  ]
+}

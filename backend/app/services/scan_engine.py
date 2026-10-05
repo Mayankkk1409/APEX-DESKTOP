@@ -31,7 +31,117 @@ from app.services.strategy_recommendation import (
     is_defined_risk_strategy,
     selection_rationale_for,
 )
+from app.analysis.options_rules import daily_theta_per_share, delta_theta_ratio
 from app.services.volatility_intel import build_volatility_payload
+
+
+def _recommended_contract_delta_theta(chain_analysis: dict[str, Any]) -> float | None:
+    """Delta/theta of the contract the card would buy, not the best ratio on the chain."""
+    recommended = chain_analysis.get("recommendedContract") or {}
+    if not isinstance(recommended, dict):
+        return None
+    target = recommended.get("contract_id") or recommended.get("symbol")
+    strike = recommended.get("strike")
+    side = recommended.get("side")
+    for row in chain_analysis.get("contracts") or []:
+        if not isinstance(row, dict):
+            continue
+        symbol_match = bool(target) and row.get("symbol") == target
+        strike_match = False
+        if side and strike is not None and row.get("side") == side and row.get("strike") is not None:
+            strike_match = abs(float(row["strike"]) - float(strike)) < 0.01
+        if not symbol_match and not strike_match:
+            continue
+        verdict = row.get("verdict") if isinstance(row.get("verdict"), dict) else {}
+        ratio = verdict.get("delta_theta_ratio") if isinstance(verdict, dict) else None
+        if isinstance(ratio, (int, float)) and not isinstance(ratio, bool):
+            return float(ratio)
+        bid, ask = row.get("bid"), row.get("ask")
+        mid = None
+        if isinstance(bid, (int, float)) and isinstance(ask, (int, float)) and bid > 0 and ask > 0:
+            mid = (float(bid) + float(ask)) / 2.0
+        theta = daily_theta_per_share(row.get("theta"), mid=mid, multiplier=row.get("multiplier") or 100)
+        return delta_theta_ratio(row.get("delta"), theta)
+    return None
+
+
+def _benchmark_rule_context(
+    chain_analysis: dict[str, Any],
+    *,
+    direction: str,
+    sentiment_score: float | None,
+    sentiment_bias: str | None,
+    spot: float | None,
+    hv20: float | None,
+    iv: float | None,
+    iv_rank: float | None,
+    rsi: float | None,
+) -> dict[str, Any]:
+    """Rule 1 and Rule 2 inputs from the scan's existing pillars and the live chain.
+
+    HV20 is the 20-day close-to-close historical volatility already computed with sqrt(252).
+    """
+    from datetime import date
+
+    contracts = [row for row in (chain_analysis.get("contracts") or []) if isinstance(row, dict)]
+    recommended = chain_analysis.get("recommendedContract") if isinstance(chain_analysis.get("recommendedContract"), dict) else {}
+    target = recommended.get("contract_id") or recommended.get("symbol")
+    strike = recommended.get("strike")
+    side = recommended.get("side")
+    chosen: dict[str, Any] | None = None
+    for row in contracts:
+        symbol_match = bool(target) and row.get("symbol") == target
+        strike_match = False
+        if side and strike is not None and row.get("side") == side and row.get("strike") is not None:
+            try:
+                strike_match = abs(float(row["strike"]) - float(strike)) < 0.01
+            except (TypeError, ValueError):
+                strike_match = False
+        if symbol_match or strike_match:
+            chosen = row
+            break
+    bid = ask = mid = delta = theta = contract_iv = dte = None
+    if chosen is not None:
+        bid, ask = chosen.get("bid"), chosen.get("ask")
+        if (
+            isinstance(bid, (int, float))
+            and isinstance(ask, (int, float))
+            and not isinstance(bid, bool)
+            and not isinstance(ask, bool)
+            and bid > 0
+            and ask > 0
+        ):
+            mid = (float(bid) + float(ask)) / 2.0
+        if isinstance(chosen.get("delta"), (int, float)) and not isinstance(chosen.get("delta"), bool):
+            delta = float(chosen["delta"])
+        theta = daily_theta_per_share(chosen.get("theta"), mid=mid, multiplier=chosen.get("multiplier") or 100)
+        raw_contract_iv = chosen.get("iv")
+        if isinstance(raw_contract_iv, (int, float)) and not isinstance(raw_contract_iv, bool):
+            contract_iv = float(raw_contract_iv)
+        expiry = chosen.get("expiry") or chain_analysis.get("expiry")
+        if isinstance(expiry, str) and len(expiry) >= 10:
+            try:
+                dte = (date.fromisoformat(expiry[:10]) - date.today()).days
+            except ValueError:
+                dte = None
+    return {
+        "technical_direction": direction,
+        "sentiment_score": sentiment_score,
+        "sentiment_bias": sentiment_bias,
+        "delta": delta,
+        "spot": spot,
+        "theta_per_share": theta,
+        "mid": mid,
+        "dte": dte,
+        "rule2_dte": dte,
+        "contract_iv": contract_iv if contract_iv is not None else iv,
+        "hv20": hv20,
+        "bid": bid,
+        "ask": ask,
+        "iv_rank": iv_rank,
+        "rsi": rsi,
+        "contracts": contracts,
+    }
 
 
 def build_layers(
@@ -51,6 +161,11 @@ def build_layers(
     auto_execution_threshold: float = DEFAULT_AUTO_EXEC_THRESHOLD,
     risk_profile: str = "moderate",
     back_month_chain: OptionChain | None = None,
+    shares_held: int = 0,
+    shares_encumbered: int = 0,
+    shares_short: int = 0,
+    share_avg_cost: float | None = None,
+    stock_ask: float | None = None,
 ) -> dict[str, Any]:
     """All layers reuse the captured bars/snapshot. Do not pull a different view."""
     highs = [float(b["h"]) for b in bars]
@@ -129,7 +244,7 @@ def build_layers(
         annotations = _pattern_annotations()
 
     vol_signal = vol_layer.get("signal") or "fair"
-    if vol_signal not in {"buy_premium", "sell_premium", "fair"}:
+    if vol_signal not in {"buy_premium", "sell_premium", "fair", "between_bands"}:
         vol_signal = "fair"
 
     direction_pre = tech_analysis.direction
@@ -167,12 +282,31 @@ def build_layers(
         fund_score = float(fundamentals_layer["score"])
     if sentiment_layer and isinstance(sentiment_layer.get("score_0_100"), (int, float)):
         sentiment_score = float(sentiment_layer["score_0_100"])
-    vol_component = 80 if vol_signal == "buy_premium" else 55 if vol_signal == "fair" else 72
+    vol_component = 80 if vol_signal == "buy_premium" else 72 if vol_signal == "sell_premium" else 55
     data_fresh = chain_analysis.get("status") not in {"stale", "unavailable"}
     spread_fails = chain_analysis.get("summary", {}).get("gate_failures", {}).get("spread", 0)
     median_spread = chain_analysis.get("summary", {}).get("median_spread_pct")
     # median_spread_pct is a fraction of mid (0.10 == 10%).
     wide_spreads = bool(median_spread is not None and float(median_spread) > 0.10)
+    from app.analysis.gate_config import earnings_before_expiry as earnings_inside_window
+
+    earnings_alert_early = (sentiment_layer or {}).get("earnings_alert") or {}
+    earnings_cal_early = (fundamentals_layer or {}).get("earnings_calendar") if isinstance(fundamentals_layer, dict) else None
+    earnings_next_early = None
+    if isinstance(earnings_cal_early, dict):
+        earnings_next_early = earnings_cal_early.get("next_date")
+    if not earnings_next_early:
+        earnings_next_early = earnings_alert_early.get("next_date")
+    latest_expiry = resolved_expiry
+    if back_month_chain and getattr(back_month_chain, "expiry", None):
+        back_exp = str(back_month_chain.expiry)
+        if latest_expiry is None or back_exp > str(latest_expiry):
+            latest_expiry = back_exp
+    earnings_inside, _earnings_note = earnings_inside_window(
+        earnings_next_early,
+        latest_expiry,
+        confirmed=bool(earnings_next_early),
+    )
     graded = chain_analysis["summary"].get("contract_count", 0) or 0
     liquidity_score = round(max(20.0, min(95.0, 95.0 - spread_fails * 8)), 1) if graded else 50.0
     earnings_alert = (sentiment_layer or {}).get("earnings_alert") or {}
@@ -189,6 +323,7 @@ def build_layers(
         direction_conflict=False,
         stale_data=not data_fresh,
         wide_spreads=wide_spreads,
+        earnings_before_expiry=earnings_inside,
     )
     composite = composite_breakdown.composite
     validate_scan_scores(
@@ -205,13 +340,20 @@ def build_layers(
 
     direction = direction_pre
     catalyst_active = bool((sentiment_layer or {}).get("earnings_alert", {}).get("active"))
-    best_delta_theta = 0.0
-    for row in chain_analysis.get("contracts") or []:
-        verdict = row.get("verdict") if isinstance(row, dict) else None
-        if isinstance(verdict, dict):
-            dt = verdict.get("delta_theta_ratio")
-            if isinstance(dt, (int, float)) and dt > best_delta_theta:
-                best_delta_theta = float(dt)
+    earnings_calendar = (fundamentals_layer or {}).get("earnings_calendar") if isinstance(fundamentals_layer, dict) else None
+    earnings_next = None
+    if isinstance(earnings_calendar, dict):
+        earnings_next = earnings_calendar.get("next_date")
+    if not earnings_next:
+        earnings_next = earnings_alert.get("next_date")
+    earnings_date_confirmed = bool(earnings_next)
+    if not earnings_date_confirmed:
+        catalyst_days = None
+    elif catalyst_days is None and isinstance(earnings_calendar, dict):
+        catalyst_days = earnings_calendar.get("dte")
+        if catalyst_days is None:
+            catalyst_days = earnings_calendar.get("days_until")
+    best_delta_theta = _recommended_contract_delta_theta(chain_analysis)
     apex_input = build_apex_strategy_input_from_scan(
         catalyst_days=int(catalyst_days) if catalyst_days is not None else None,
         vol_layer=vol_layer,
@@ -223,6 +365,17 @@ def build_layers(
     back_month_ready = bool(back_month_chain and back_month_chain.contracts)
     spread_pct_points = float(median_spread) * 100.0 if median_spread is not None else None
     raw_hv = vol_layer.get("hv")
+    rule_context = _benchmark_rule_context(
+        chain_analysis,
+        direction=direction,
+        sentiment_score=sentiment_score,
+        sentiment_bias=(sentiment_layer or {}).get("bias") if isinstance(sentiment_layer, dict) else None,
+        spot=last if isinstance(last, (int, float)) else None,
+        hv20=hv,
+        iv=iv,
+        iv_rank=ivr if isinstance(ivr, (int, float)) else vol_layer.get("iv_rank"),
+        rsi=rsi_v,
+    )
     decision = strategy_decision(
         composite=composite,
         direction=direction,
@@ -244,7 +397,10 @@ def build_layers(
         auto_exec_threshold=auto_execution_threshold,
         back_month_available=back_month_ready,
         catalyst_days=int(catalyst_days) if catalyst_days is not None else None,
+        earnings_date_confirmed=earnings_date_confirmed if earnings_next or earnings_alert or earnings_calendar else None,
         risk_profile=risk_profile,
+        rule_context=rule_context,
+        sentiment_bias=(sentiment_layer or {}).get("bias") if isinstance(sentiment_layer, dict) else None,
     )
     strategy = decision.best_match
 
@@ -312,6 +468,14 @@ def build_layers(
         back_expiry = back_month_chain.expiry
         back_month_rows = [c.model_dump() for c in back_month_chain.contracts]
     structure_for_legs = decision.leg_structure or strategy
+    chain_analysis = {
+        **chain_analysis,
+        "shares_held": int(shares_held or 0),
+        "shares_encumbered": int(shares_encumbered or 0),
+        "shares_short": int(shares_short or 0),
+        "share_avg_cost": share_avg_cost,
+        "stock_ask": stock_ask,
+    }
     # The playbook builder still blanks legs at or below the old blocked band. Ask for the
     # structure above that band, then restore the real score. 72 is not a second gate.
     layer_composite = composite if composite > EXECUTION_SCORE_BLOCKED_MAX else float(EXECUTION_SCORE_BLOCKED_MAX + 1)
@@ -333,6 +497,17 @@ def build_layers(
         leg_structure=decision.leg_structure,
         strategies_evaluated=decision.strategies_evaluated,
         risk_notes=list(decision.risk_notes),
+        benchmark_rule=(
+            "rule2"
+            if any(
+                "APEX Benchmark Greeks Strategy Rule 2" in note
+                for note in next(
+                    (row.gate_notes for row in decision.candidates if row.name == strategy and row.eligible),
+                    [],
+                )
+            )
+            else None
+        ),
     )
     if layer_composite != composite:
         _restore_scored_strategy_layer(strategy_layer, composite, auto_execution_threshold)
@@ -340,55 +515,19 @@ def build_layers(
     strategy_legs = []
     equity_legs = []
     strat_spec = None
-    metric_legs = (strategy_layer.get("metrics") or {}).get("legs") or []
-    has_option_legs = any(
-        isinstance(leg, dict) and leg.get("side") in {"call", "put"} and leg.get("symbol")
-        for leg in metric_legs
-    )
-    if strategy_layer.get("tradeable") or has_option_legs:
+    if strategy_layer.get("tradeable"):
+        from app.services.stock_leg import build_order_ticket
         from app.strategies.registry import get_strategy_spec, resolve_strategy_id
 
         strat_spec = get_strategy_spec(strategy_layer.get("selected_strategy") or strategy)
-        overlay_only = bool(
-            strat_spec
-            and strat_spec.equity_required
-            and strat_spec.equity_leg_spec
-            and strat_spec.equity_leg_spec.entry_mode == "pre_existing"
+        strategy_legs, equity_legs = build_order_ticket(
+            strategy_layer.get("metrics") or {},
+            tradeable=True,
+            equity_required=bool(strat_spec and strat_spec.equity_required),
+            ticker=snapshot.symbol,
         )
-        simultaneous_equity = bool(
-            strat_spec and strat_spec.equity_required and not overlay_only
-        )
-        for leg in (strategy_layer.get("metrics") or {}).get("legs") or []:
-            if leg.get("side") == "stock":
-                if not strat_spec or not strat_spec.equity_required:
-                    continue
-                if overlay_only:
-                    continue
-                equity_legs.append(
-                    {
-                        "symbol": leg.get("symbol") or snapshot.symbol.upper(),
-                        "side": leg.get("action") or "buy",
-                        "qty": leg.get("quantity") or 100,
-                        "asset_class": "us_equity",
-                    }
-                )
-                continue
-            occ = leg.get("symbol")
-            action = (leg.get("action") or "").lower()
-            if not occ or action not in {"buy", "sell"}:
-                continue
-            strategy_legs.append(
-                {
-                    "symbol": occ,
-                    "side": action,
-                    "qty": 1,
-                    "strike": leg.get("strike"),
-                    "option_side": leg.get("side"),
-                    "expiry": leg.get("expiry"),
-                    "asset_class": "us_option",
-                }
-            )
-        if simultaneous_equity and not equity_legs:
+        covered_by_holdings = bool((strategy_layer.get("metrics") or {}).get("equity_covered_by_holdings"))
+        if strat_spec and strat_spec.equity_required and not equity_legs and not covered_by_holdings:
             equity_error = {
                 "strategy_id": resolve_strategy_id(strategy) or strategy,
                 "ticker": snapshot.symbol,
@@ -406,11 +545,16 @@ def build_layers(
             strategy_legs = []
     displayed_name = str(strategy_layer.get("selected_strategy") or strategy)
     defined_risk = is_defined_risk_strategy(displayed_name)
-    auto_submit_on_ack = bool(strategy_layer.get("tradeable")) and allows_auto_execution(
-        displayed_name,
-        execution_tier=execution_tier,
-        composite=composite,
-        auto_exec_threshold=auto_execution_threshold,
+    auto_submit_on_ack = (
+        bool(strategy_layer.get("tradeable"))
+        and not strategy_layer.get("auto_exec_blocked")
+        and bool(decision.auto_exec_eligible)
+        and allows_auto_execution(
+            displayed_name,
+            execution_tier=execution_tier,
+            composite=composite,
+            auto_exec_threshold=auto_execution_threshold,
+        )
     )
     layers: dict[str, Any] = {
         DeepScanLayer.TECHNICAL: {
@@ -609,6 +753,8 @@ def build_layers(
             "strategy_legs": strategy_legs,
             "equity_legs": equity_legs,
             "equity_required": bool(strat_spec and strat_spec.equity_required),
+            "equity_note": strategy_layer.get("equity_note"),
+            "block_reason": None if strategy_legs else _order_block_reason(strategy_layer),
             "contracts_per_leg": 1,
             "asset_class": "us_option",
             "position_sizing": "2–5% of declared account capital per trade (configurable)",
@@ -641,6 +787,26 @@ def _pattern_annotations() -> list[dict]:
 
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _order_block_reason(strategy_layer: dict[str, Any]) -> str | None:
+    """Why the order step has no option legs. A built contract is not this sentence."""
+    metrics = strategy_layer.get("metrics") or {}
+    handler = metrics.get("validation_error")
+    if isinstance(handler, str) and handler.strip():
+        return handler.strip()
+    errors = strategy_layer.get("validation_errors") or []
+    if errors and isinstance(errors[0], dict):
+        first = errors[0]
+        return (
+            f"Pre-trade check {first.get('check')}: expected {first.get('expected')}; "
+            f"actual {first.get('actual')}."
+        )
+    note = strategy_layer.get("equity_note")
+    if isinstance(note, str) and note.strip():
+        return note.strip()
+    notes = [n for n in (strategy_layer.get("risk_notes") or []) if isinstance(n, str) and n.strip()]
+    return notes[0] if notes else None
 
 
 def _restore_scored_strategy_layer(layer: dict[str, Any], composite: float, threshold: float) -> None:

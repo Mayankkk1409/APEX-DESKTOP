@@ -93,6 +93,17 @@ class RegisterUserResponse(BaseModel):
     connection_status: str
 
 
+class BrokerageStatusResponse(BaseModel):
+    provider: str = "snaptrade"
+    configured: bool
+    upstream: str
+    http_status: int | None = None
+    connection_status: str | None = None
+    account_count: int = 0
+    host: str
+    missing: list[str] = Field(default_factory=list)
+
+
 class WebhookResponse(BaseModel):
     ok: bool = True
 

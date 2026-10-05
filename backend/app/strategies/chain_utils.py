@@ -131,7 +131,8 @@ def make_option_leg(
     }
 
 
-def make_stock_leg(action: str, spot: float, ticker: str) -> dict[str, Any]:
+def make_stock_leg(action: str, spot: float, ticker: str, *, quantity: int = 100) -> dict[str, Any]:
+    shares = int(quantity) if int(quantity) > 0 else 100
     return {
         "action": action,
         "side": "stock",
@@ -139,7 +140,8 @@ def make_stock_leg(action: str, spot: float, ticker: str) -> dict[str, Any]:
         "expiry": None,
         "mid": spot,
         "symbol": ticker,
-        "quantity": 100,
+        "quantity": shares,
+        "order_qty": shares,
     }
 
 

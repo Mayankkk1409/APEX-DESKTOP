@@ -6,12 +6,18 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from app.analysis.gate_config import PLAIN_LONG_PREMIUM, classify_vol_regime
 from app.analysis.layers import (
     APEX_STRATEGY_NAME,
     EXECUTION_SCORE_BLOCKED_MAX,
     SCORE_TIER_WATCHLIST_MAX,
 )
-from app.services.apex_strategy import ApexStrategyEligibility, ApexStrategyInput, check_apex_strategy_eligibility
+from app.services.apex_strategy import (
+    GAMMA_TRAMPOLINE_NAME,
+    ApexStrategyEligibility,
+    ApexStrategyInput,
+    check_apex_strategy_eligibility,
+)
 from app.strategies.registry import STRATEGY_REGISTRY, StrategySpec, get_strategy_spec
 
 EXTREME_IV_HV_MULTIPLE = 1.35
@@ -42,6 +48,7 @@ CONSERVATIVE_STRUCTURES: frozenset[str] = frozenset(
         "Diagonal Spread (bullish)",
         "Diagonal Spread (bearish)",
         APEX_STRATEGY_NAME,
+        GAMMA_TRAMPOLINE_NAME,
     }
 )
 
@@ -73,6 +80,7 @@ DEFINED_RISK_PLAYBOOK: dict[str, dict[str, str]] = {
     "Bull Put Spread (credit)": {"bias": "bullish", "iv": "rich"},
     "Bear Call Spread (credit)": {"bias": "bearish", "iv": "rich"},
     APEX_STRATEGY_NAME: {"bias": "neutral", "iv": "catalyst"},
+    GAMMA_TRAMPOLINE_NAME: {"bias": "neutral", "iv": "catalyst"},
     "APEX Benchmark Greeks Strategy": {"bias": "directional", "iv": "cheap"},
     "Married Put": {"bias": "bullish", "iv": "any"},
     "Married Call": {"bias": "bullish", "iv": "any"},  # legacy alias → APEX Benchmark Greeks Strategy
@@ -214,6 +222,49 @@ def format_vol_percent(value: Any) -> str | None:
     return f"{number * 100:.2f}%"
 
 
+def format_iv_rank(value: Any) -> str:
+    """IV rank for a card: a whole number or one decimal. Never the raw float."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "—"
+    number = float(value)
+    if not math.isfinite(number):
+        return "—"
+    rounded = round(number, 1)
+    if abs(rounded - round(rounded)) < 1e-9:
+        return str(int(round(rounded)))
+    return f"{rounded:.1f}"
+
+
+def vol_regime_phrase(iv: Any, hv: Any, vol_signal: str, iv_rank: Any = None) -> str:
+    """Plain-word regime. Sell premium requires IV rank above 50."""
+    if iv_rank is not None:
+        return classify_vol_regime(iv_rank=iv_rank, iv=iv, hv=hv)
+    pair = aligned_iv_hv(iv, hv)
+    if pair is not None and pair[0] < pair[1]:
+        return "buy premium"
+    if vol_signal == "buy_premium":
+        return "buy premium"
+    return "fair"
+
+
+def earnings_position_note(
+    strategy_name: str,
+    *,
+    days: int | None,
+    confirmed: bool,
+) -> tuple[bool, str | None]:
+    """Blackout note for a new position.
+
+    A missing date is unconfirmed and is not a blackout. A confirmed date
+    inside 1 day blocks auto-execute except for APEX Strategy.
+    """
+    if not confirmed:
+        return False, "Earnings date is unconfirmed."
+    if days is not None and int(days) <= 1:
+        return strategy_name != APEX_STRATEGY_NAME, "Earnings are within 1 day."
+    return False, None
+
+
 def real_strategy_count() -> int:
     """Registry size excluding advisory stand-ins that have no legs."""
     return sum(1 for spec in STRATEGY_REGISTRY.values() if spec.risk_type != "advisory" and spec.leg_count > 0)
@@ -236,7 +287,13 @@ def _is_defined_risk(name: str) -> bool:
     return True
 
 
-def _fallback_structure(direction: str) -> str:
+def _fallback_structure(direction: str, *, ivr: float | None = None) -> str:
+    if ivr is not None and ivr > 70:
+        if direction == "bearish":
+            return "Bear Put Spread"
+        if direction == "neutral":
+            return "Short Iron Condor"
+        return "Bull Call Spread"
     if direction == "bearish":
         return "Bear Put Spread"
     if direction == "neutral":
@@ -370,13 +427,13 @@ def _rank_candidates(
 
     iv_cheap = iv is not None and hv is not None and (hv - iv) > 0.10
     iv_rich = vol_signal == "sell_premium" or (iv is not None and hv is not None and (iv - hv) > 0.10)
+    if ivr is not None and float(ivr) > 50:
+        iv_rich = True
 
     if apex_eligible and catalyst_active:
-        add(APEX_STRATEGY_NAME, 12.0, ["APEX Strategy eligibility passed", "Catalyst window active"])
+        add(GAMMA_TRAMPOLINE_NAME, 14.0, ["Gamma Trampoline earnings gates passed", "Catalyst window active"])
 
     if iv_cheap and tech_score > 80 and direction == "bullish":
-        if delta_theta_ratio and delta_theta_ratio >= 10:
-            add("APEX Benchmark Greeks Strategy", 8.0, ["Δ/Θ ratio ≥ 10", "IV cheap vs HV"])
         add("Bull Call Spread", 6.0, ["Bullish technical alignment", "IV cheap"])
     if iv_cheap and tech_score > 80 and direction == "bearish":
         add("Bear Put Spread", 6.0, ["Bearish technical alignment", "IV cheap"])
@@ -388,8 +445,6 @@ def _rank_candidates(
         add("Bull Put Spread (credit)", 4.0, ["Mild bullish bias", "IV rich"])
     if iv_rich and direction == "bearish":
         add("Bear Call Spread (credit)", 4.0, ["Mild bearish bias", "IV rich"])
-    if direction == "bullish" and sentiment_score and sentiment_score > 60:
-        add("APEX Benchmark Greeks Strategy", 3.0, ["Sentiment supports bullish thesis"])
     if direction == "bullish":
         add("Married Put", 2.0, ["Protective hedge expression"])
     if back_month_available:
@@ -536,11 +591,155 @@ def selection_rationale_for(
         return None
     if direction not in {"bullish", "bearish"}:
         return None
-    return (
-        f"Neutral {strategy_name} selected despite {direction} technical bias (score {tech_score:.1f}). "
-        f"Volatility regime '{vol_signal}' overrides directional tilt — IV-rich premium-selling "
-        "structures apply when RSI is range-bound per §9.1."
+    lead = (
+        f"Neutral {strategy_name} selected despite {direction} technical bias "
+        f"(score {tech_score:.1f}). "
+        f"Volatility regime '{vol_signal.replace('_', ' ')}' overrides directional tilt. "
     )
+    if meta.get("iv") == "rich" or strategy_name == "Short Iron Condor":
+        return lead + "This sells an OTM put spread and an OTM call spread."
+    if "Straddle" in strategy_name:
+        return lead + "This buys the call and the put at the same strike."
+    if "Calendar" in strategy_name:
+        return lead + "This sells the near option and buys the same strike in a later expiry."
+    if strategy_name == APEX_STRATEGY_NAME:
+        return (
+            lead
+            + "This buys the back-week call and put and sells the same strikes in the front week."
+        )
+    return lead.rstrip()
+
+
+def _place_candidate(candidates: list[StrategyCandidate], candidate: StrategyCandidate) -> None:
+    """Keep an evaluated strategy on the list. An eligible pass is inserted by score."""
+    for index, existing in enumerate(candidates):
+        if existing.name != candidate.name:
+            continue
+        if candidate.eligible and candidate.score >= existing.score:
+            existing.score = candidate.score
+            existing.eligible = True
+            existing.defined_risk = candidate.defined_risk
+            existing.gate_notes = list(candidate.gate_notes)
+            existing.tier = candidate.tier
+            row = candidates.pop(index)
+            for insert_at, other in enumerate(candidates):
+                if other.eligible and other.score < row.score:
+                    candidates.insert(insert_at, row)
+                    return
+            candidates.append(row)
+        elif not existing.eligible and not candidate.eligible:
+            existing.gate_notes = list(candidate.gate_notes)
+        return
+    if not candidate.eligible:
+        candidates.append(candidate)
+        return
+    for index, existing in enumerate(candidates):
+        if existing.eligible and existing.score < candidate.score:
+            candidates.insert(index, candidate)
+            return
+    candidates.insert(0, candidate)
+
+
+def _merge_change11_evaluations(
+    candidates: list[StrategyCandidate],
+    *,
+    composite: float,
+    tier: str,
+    direction: str,
+    sentiment_score: float | None,
+    sentiment_bias: str | None,
+    iv_rank: float | None,
+    rsi: float | None,
+    rule_context: dict[str, Any] | None,
+    apex_input: ApexStrategyInput | None,
+    apex_result: ApexStrategyEligibility | None,
+) -> None:
+    """Score Rule 1, Rule 2, and Gamma Trampoline on every scan. A failed gate stays ineligible."""
+    from app.services.benchmark_greeks import RULE2_NAMES, evaluate_rule1, evaluate_rule2
+
+    ctx = rule_context or {}
+    rule1 = evaluate_rule1(
+        technical_direction=ctx.get("technical_direction", direction),
+        sentiment_score=ctx.get("sentiment_score", sentiment_score),
+        sentiment_bias=ctx.get("sentiment_bias", sentiment_bias),
+        delta=ctx.get("delta"),
+        spot=ctx.get("spot"),
+        theta_per_share=ctx.get("theta_per_share"),
+        mid=ctx.get("mid"),
+        dte=ctx.get("dte"),
+        contract_iv=ctx.get("contract_iv"),
+        hv20=ctx.get("hv20"),
+        bid=ctx.get("bid"),
+        ask=ctx.get("ask"),
+        spread_pct=ctx.get("spread_pct"),
+    )
+    rule1_score = round(min(98.0, float(composite) + 11.0), 1)
+    _place_candidate(
+        candidates,
+        StrategyCandidate(
+            name="APEX Benchmark Greeks Strategy",
+            score=rule1_score if rule1.eligible else 0.0,
+            tier=tier,
+            defined_risk=True,
+            gate_notes=list(rule1.passed if rule1.eligible else rule1.reasons),
+            eligible=rule1.eligible,
+        ),
+    )
+    rule2 = evaluate_rule2(
+        technical_direction=ctx.get("technical_direction", direction),
+        sentiment_score=ctx.get("sentiment_score", sentiment_score),
+        sentiment_bias=ctx.get("sentiment_bias", sentiment_bias),
+        iv_rank=ctx.get("iv_rank", iv_rank),
+        rsi=ctx.get("rsi", rsi),
+        dte=ctx.get("rule2_dte", ctx.get("dte")),
+        contracts=ctx.get("contracts"),
+        spot=ctx.get("spot"),
+    )
+    structure_name = RULE2_NAMES.get(rule2.structure or "", "")
+    if rule2.eligible and structure_name:
+        _place_candidate(
+            candidates,
+            StrategyCandidate(
+                name=structure_name,
+                score=round(min(98.0, float(composite) + 9.0), 1),
+                tier=tier,
+                defined_risk=True,
+                gate_notes=["APEX Benchmark Greeks Strategy Rule 2", *rule2.passed],
+                eligible=True,
+            ),
+        )
+    else:
+        rule2_notes = [f"Rule 2: {reason}" for reason in rule2.reasons] or ["Rule 2 gates did not pass"]
+        held = next((row for row in candidates if row.name == "APEX Benchmark Greeks Strategy"), None)
+        if held is not None and not held.eligible:
+            held.gate_notes = [*held.gate_notes, *rule2_notes]
+        elif held is None:
+            _place_candidate(
+                candidates,
+                StrategyCandidate(
+                    name="APEX Benchmark Greeks Strategy",
+                    score=0.0,
+                    tier=tier,
+                    defined_risk=True,
+                    gate_notes=rule2_notes,
+                    eligible=False,
+                ),
+            )
+    gamma_reasons = list(apex_result.rejection_reasons) if apex_result is not None else ["Earnings date is missing."]
+    gamma_ok = bool(apex_result and apex_result.eligible)
+    if not any(c.name == GAMMA_TRAMPOLINE_NAME for c in candidates):
+        _place_candidate(
+            candidates,
+            StrategyCandidate(
+                name=GAMMA_TRAMPOLINE_NAME,
+                score=round(min(98.0, float(composite) + 14.0), 1) if gamma_ok else 0.0,
+                tier=tier,
+                defined_risk=True,
+                gate_notes=["Gamma Trampoline earnings gates passed"] if gamma_ok else gamma_reasons,
+                eligible=gamma_ok,
+            ),
+        )
+    _ = apex_input
 
 
 def recommend_strategy(
@@ -556,12 +755,15 @@ def recommend_strategy(
     sentiment_score: float | None = None,
     catalyst_active: bool = False,
     catalyst_days: int | None = None,
+    earnings_date_confirmed: bool | None = None,
     delta_theta_ratio: float | None = None,
     apex_input: ApexStrategyInput | None = None,
     auto_exec_threshold: float = 85.0,
     back_month_available: bool = False,
     risk_profile: str = "moderate",
     structure_limits: frozenset[str] | None = None,
+    rule_context: dict[str, Any] | None = None,
+    sentiment_bias: str | None = None,
 ) -> StrategyRecommendation:
     """
     Staged gating: liquidity → defined-risk → data freshness → technical confirmation
@@ -591,16 +793,15 @@ def recommend_strategy(
     if not gates["technical_confirmation"]:
         rejection_reasons.append("Insufficient technical confirmation")
 
-    # Gate 6: Catalyst / APEX Strategy
-    apex_eligible = False
-    if apex_input is not None:
-        apex_result = check_apex_strategy_eligibility(apex_input)
-        apex_eligible = apex_result.eligible
-        gates["catalyst_fit"] = apex_eligible or not catalyst_active
-        if catalyst_active and not apex_eligible:
-            rejection_reasons.extend(apex_result.rejection_reasons)
-    else:
-        gates["catalyst_fit"] = True
+    # Gate 6: Gamma Trampoline earnings gates. A miss does not replace the ranked structure.
+    apex_result: ApexStrategyEligibility | None
+    if apex_input is None:
+        apex_input = ApexStrategyInput()
+    apex_result = check_apex_strategy_eligibility(apex_input)
+    apex_eligible = apex_result.eligible
+    gates["catalyst_fit"] = apex_eligible or not catalyst_active
+    if not apex_eligible:
+        rejection_reasons.extend(apex_result.rejection_reasons)
 
     direction = market.direction
     rsi_v = rsi if rsi is not None else 50.0
@@ -643,14 +844,36 @@ def recommend_strategy(
         delta_theta_ratio=delta_theta_ratio,
     )
     rejection_reasons.extend(registry_misses)
+    _merge_change11_evaluations(
+        candidates,
+        composite=composite,
+        tier=tier,
+        direction=direction,
+        sentiment_score=sentiment_score,
+        sentiment_bias=sentiment_bias,
+        iv_rank=ivr,
+        rsi=rsi_v,
+        rule_context=rule_context,
+        apex_input=apex_input,
+        apex_result=apex_result,
+    )
     viable = [c for c in candidates if c.defined_risk and c.eligible]
+    if ivr is not None and float(ivr) > 70:
+        viable = [c for c in viable if c.name not in PLAIN_LONG_PREMIUM]
     risk_notes: list[str] = []
 
     # The saved auto-execution minimum decides acknowledgement. It is not a selection gate.
     gates["composite_tier"] = True
 
-    gates["earnings_blackout"] = catalyst_days is None or int(catalyst_days) > 1
-    if catalyst_days is not None and int(catalyst_days) <= 1:
+    earnings_within_day = (
+        earnings_date_confirmed is not False
+        and catalyst_days is not None
+        and int(catalyst_days) <= 1
+    )
+    gates["earnings_blackout"] = not earnings_within_day
+    if earnings_date_confirmed is False:
+        risk_notes.append("Earnings date is unconfirmed.")
+    elif earnings_within_day:
         risk_notes.append("Earnings are within 1 day.")
 
     if not market.data_fresh:
@@ -659,17 +882,12 @@ def recommend_strategy(
     if not spread_ok and market.spread_pct is not None:
         risk_notes.append(f"Bid/ask spread is {market.spread_pct:.1f}% of mid.")
 
-    # IV versus HV warns only when the ratio is actually above 1.35. It never renames the structure.
+    # IV versus HV is not a stand-aside multiple. Rule 1 applies IV < HV only to Rule 1 names.
     gates["iv_regime"] = True
-    pair = aligned_iv_hv(iv, hv)
-    if extreme_iv_overhang(iv, hv) and pair is not None:
-        iv_pct = format_vol_percent(pair[0])
-        hv_pct = format_vol_percent(pair[1])
-        risk_notes.append(f"IV {iv_pct} versus HV {hv_pct} is above 1.35× historical volatility.")
 
     best = viable[0] if viable else None
     if best is None:
-        fallback_name = _fallback_structure(direction)
+        fallback_name = _fallback_structure(direction, ivr=float(ivr) if ivr is not None else None)
         best = StrategyCandidate(
             name=fallback_name,
             score=round(composite, 1),
@@ -680,12 +898,13 @@ def recommend_strategy(
         )
         candidates = [best, *candidates]
 
+    earnings_block = earnings_within_day and best.name not in {APEX_STRATEGY_NAME, GAMMA_TRAMPOLINE_NAME}
     auto_exec = allows_auto_execution(
         best.name,
         execution_tier="candidate",
         composite=composite,
         auto_exec_threshold=auto_exec_threshold,
-    )
+    ) and not earnings_block
 
     return StrategyRecommendation(
         best_match=best.name,

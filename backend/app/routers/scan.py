@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.alpaca import _is_cash_index
-from app.analysis.layers import DEEP_SCAN_LAYERS, SCAN_SLIDE_LAYERS
+from app.analysis.layers import DEFAULT_AUTO_EXEC_THRESHOLD, DEEP_SCAN_LAYERS, SCAN_SLIDE_LAYERS
 from app.config import Settings, get_settings
 from app.database import get_db
 from app.deps import current_user, get_adapter
@@ -83,16 +83,29 @@ async def create_scan(
     )
 
     trading_settings = await db.scalar(select(UserTradingSettings).where(UserTradingSettings.user_id == user.id))
+    # Saved account value is the only score gate. 85 applies only when no row exists yet.
     auto_exec_threshold = (
-        trading_settings.auto_execution_threshold if trading_settings else 85.0
+        float(trading_settings.auto_execution_threshold)
+        if trading_settings is not None
+        else float(DEFAULT_AUTO_EXEC_THRESHOLD)
     )
+    risk_profile = trading_settings.risk_profile if trading_settings else "moderate"
+    from app.models.trading import Position
+    from app.services.stock_leg import read_holdings
+
+    positions = (await db.scalars(select(Position).where(Position.user_id == user.id))).all()
+    held = read_holdings(list(positions), snap.symbol)
 
     layers = build_layers(
         snap,
         quote,
         bars,
         chain,
-        sentiment_score=float(sentiment.get("score_0_100") or 50.0),
+        sentiment_score=(
+            float(sentiment["score_0_100"])
+            if isinstance(sentiment.get("score_0_100"), (int, float))
+            else None
+        ),
         expiry=body.expiry,
         daily_bars=daily_bars,
         spread_max_pct=body.spread_max_pct,
@@ -101,7 +114,13 @@ async def create_scan(
         sentiment_layer=sentiment,
         fundamentals_layer=fundamentals,
         auto_execution_threshold=auto_exec_threshold,
+        risk_profile=risk_profile,
         back_month_chain=back_month_chain,
+        shares_held=held.shares_long,
+        shares_encumbered=held.shares_encumbered,
+        shares_short=held.shares_short,
+        share_avg_cost=float(held.avg_cost) if held.avg_cost is not None else None,
+        stock_ask=quote.ask,
     )
     score = layers["apex_score"]["composite_score"]
     scan = Scan(user_id=user.id, symbol=snap.symbol.upper(), snapshot=snap.model_dump(), layers=layers, composite_score=score)

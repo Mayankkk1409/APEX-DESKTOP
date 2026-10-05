@@ -24,6 +24,9 @@ class StrategyLegIn(BaseModel):
     strike: float | None = None
     option_side: str | None = None
     expiry: str | None = None
+    price: float | None = None
+    order_type: str | None = None
+    limit_price: float | None = None
 
 
 class OrderIn(BaseModel):
@@ -290,6 +293,7 @@ async def place_order(
         strategy_name: str | None = None
         certificate: dict | None = None
         equity_legs: list[dict] | None = None
+        equity_satisfied = False
         if body.scan_id:
             scan = await db.get(Scan, body.scan_id)
             if scan and scan.user_id == user.id:
@@ -306,9 +310,21 @@ async def place_order(
                     "max_loss": metrics.get("max_loss"),
                     "max_profit": metrics.get("max_profit"),
                     "breakevens": metrics.get("breakevens") or [],
+                    "greeks": metrics.get("greeks") or {},
+                    "net_debit_credit": metrics.get("net_debit_credit"),
+                    "net_type": metrics.get("net_type"),
                 }
                 if strategy_name and not strategy_layer.get("tradeable", True):
                     raise HTTPException(400, "Strategy layer is not tradeable — validation blocked this structure")
+                from app.analysis.gate_config import refuse_if_checks_failed
+
+                try:
+                    refuse_if_checks_failed(
+                        checks_passed=strategy_layer.get("checks_passed"),
+                        auto_execute=bool(strategy_layer.get("clears_threshold")),
+                    )
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc)) from exc
                 if strategy_name:
                     validation = validate_strategy_output(
                         strategy_name,
@@ -320,6 +336,25 @@ async def place_order(
                         detail = validation.errors[0].to_log_dict() if validation.errors else {"check": "validation"}
                         raise HTTPException(400, f"Strategy validation failed: {detail}")
                 equity_legs = (layers.get("risk_review") or {}).get("equity_legs") or []
+                from app.services.stock_leg import submission_equity
+
+                positions = (await db.scalars(select(Position).where(Position.user_id == user.id))).all()
+                ask = None
+                try:
+                    live = await adapter.quote(scan.symbol)
+                    ask = live.ask
+                except Exception:  # noqa: BLE001
+                    ask = None
+                planned = submission_equity(
+                    strategy_name=strategy_name,
+                    ticker=scan.symbol,
+                    contracts=body.contracts_per_leg,
+                    multiplier=int((metrics.get("per_contract_multiplier") or 100)),
+                    positions=list(positions),
+                    ask=ask,
+                )
+                equity_legs = planned.order_legs
+                equity_satisfied = planned.covered_by_holdings
         try:
             orders = await execute_strategy_legs(
                 user=user,
@@ -331,6 +366,7 @@ async def place_order(
                 strategy_name=strategy_name,
                 certificate=certificate,
                 equity_legs=equity_legs if body.scan_id else None,
+                equity_satisfied=equity_satisfied if body.scan_id else False,
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -355,6 +391,7 @@ async def place_order(
                     "qty": o.qty,
                     "fill_price": o.fill_price,
                     "asset_class": o.asset_class,
+                    "order_type": o.order_type,
                 }
                 for o in orders
             ],
