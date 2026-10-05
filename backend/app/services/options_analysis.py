@@ -18,6 +18,8 @@ from app.analysis.options_rules import (
     DEFAULT_THRESHOLDS,
     RuleThresholds,
     build_uoa_reference,
+    chain_quote_flags,
+    contract_clears_oi_and_volume,
     evaluate_chain,
 )
 from app.analysis.volatility import iv_rank_proxy
@@ -190,7 +192,13 @@ def pick_recommended_contract(
     if not scored:
         return None
 
-    _, best = max(scored, key=lambda item: item[0])
+    liquid = [
+        item
+        for item in scored
+        if contract_clears_oi_and_volume(by_symbol.get(item[1].symbol) or {}, ctx.thresholds)
+    ]
+    pool = liquid if liquid else scored
+    _, best = max(pool, key=lambda item: item[0])
     occ = by_symbol.get(best.symbol)
     return {
         "symbol": ctx.symbol,
@@ -198,6 +206,7 @@ def pick_recommended_contract(
         "strike": best.strike,
         "side": best.side,
         "contract_id": best.symbol if occ else None,
+        "liquidity_gate_cleared": bool(liquid),
     }
 
 
@@ -397,6 +406,7 @@ def build_chain_analysis(
         },
         "contracts": rows,
         "summary": summary,
+        "ledger_flags": summary.get("ledger_flags") or [],
         "cards": cards,
         "narrative": cards[0]["body"] if cards else "",
         "recommendedContract": None,
@@ -567,6 +577,14 @@ def _summary(
         "vega_cap_blocked": [v.symbol for v in verdicts if "vega_cap_blocked" in v.flags],
         "gamma_flagged": [v.symbol for v in verdicts if "gamma_risk_7dte" in v.flags],
         "greeks_available": sum(1 for c in contracts if c.delta is not None),
+        "ledger_flags": chain_quote_flags(
+            contracts,
+            atm_iv=ctx.atm_iv,
+            spot=ctx.spot,
+            feed=chain.feed,
+            source=chain.source,
+            timestamp=chain.as_of,
+        ),
         "quotes_two_sided": sum(1 for c in contracts if c.bid is not None and c.ask is not None),
         "feed": chain.feed,
     }
@@ -740,6 +758,7 @@ def _empty_payload(
             "single_sided": True,
             "verdict_counts": {},
             "gate_failures": {},
+            "ledger_flags": [],
             "gate_unknown": {},
             "hard_rejects": [],
             "top_buy_candidates": [],

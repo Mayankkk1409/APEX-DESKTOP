@@ -50,6 +50,24 @@ def _clean_html(text: str | None) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+def _annotate_earnings_status(event: dict[str, Any]) -> None:
+    """Attach confirmed / estimated / unknown without turning a missing date into none."""
+    if event.get("kind") != "earnings" or not event.get("symbol"):
+        return
+    from app.services.fundamentals_layer import resolve_earnings_info
+
+    day = str(event.get("event_date") or "")[:10]
+    source = str(event.get("source") or "NASDAQ Earnings Calendar")
+    info = resolve_earnings_info(
+        str(event["symbol"]),
+        provider_dates=[(day, source)] if day else [],
+    )
+    event["date_status"] = info["status"]
+    event["earnings_display"] = info["display"]
+    event["earnings_applicable"] = info["earnings_applicable"]
+    event["unverified"] = info["unverified"]
+
+
 def event_date_from_row(row: dict[str, Any], queried: date) -> str:
     """Prefer a date field on the provider row. Otherwise the calendar day that returned the row."""
     for key in ("date", "reportDate", "earningsDate", "eventDate"):
@@ -98,6 +116,7 @@ async def _nasdaq_earnings_day(day: date) -> list[dict[str, Any]]:
                 "event_time": _parse_nasdaq_time(row.get("time")),
                 "source": "NASDAQ Earnings Calendar",
                 "as_of": fetched,
+                "date_status": "estimated",
             }
         )
     return out
@@ -254,8 +273,17 @@ async def fetch_catalyst_calendar(
 
     ticker_events = sorted(ticker_earnings + list(corp), key=lambda e: (e["event_date"], e["title"]))
     market_events = sorted(macro + market_earnings, key=lambda e: (e["event_date"], e["title"]))
+    for event in ticker_events + market_events:
+        _annotate_earnings_status(event)
 
+    from app.services.fundamentals_layer import resolve_earnings_info
+
+    symbol_earnings = resolve_earnings_info(symbol)
     notes: list[str] = []
+    if symbol_earnings.get("earnings_applicable") is False:
+        notes.append(
+            f"{symbol} is classified as {symbol_earnings.get('securityType')}. An issuer earnings date does not apply."
+        )
     if not ticker_events:
         notes.append(
             f"No live corporate actions returned for {symbol} in the next {earnings_days} calendar days."
@@ -274,6 +302,7 @@ async def fetch_catalyst_calendar(
         ],
         "as_of": _now_iso(),
         "notes": notes,
+        "earnings": symbol_earnings,
     }
     _cache[cache_key] = (now, payload)
     return payload
