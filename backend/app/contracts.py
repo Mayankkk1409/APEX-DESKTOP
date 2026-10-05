@@ -1,7 +1,8 @@
 """Change 12 frozen contracts.
 
-Typed shapes and stubs only. The running app does not import this module.
-No scan, order, or score behavior changes until a later phase wires an owner.
+Field names and types are frozen. ``canAutoExecute`` stays an unwired stub.
+``Ledger.record`` drops the entry and ``Ledger.get`` returns an empty list.
+The live store is ``app.services.evidence_ledger``.
 """
 
 from __future__ import annotations
