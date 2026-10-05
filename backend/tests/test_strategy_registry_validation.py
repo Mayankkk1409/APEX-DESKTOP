@@ -485,3 +485,13 @@ def test_gamma_trampoline_label_stays_off_the_double_calendar() -> None:
     assert calendar.dte_min is None and calendar.dte_max is None
     assert apex.title == "APEX Strategy"
     assert GAMMA_CLASSIFIER in apex.when_not_to_use
+    assert apex.dte_min is None and apex.dte_max is None
+    buy = entry_for("apex_benchmark_greeks_buy")
+    sell = entry_for("apex_benchmark_greeks_sell")
+    assert buy is not None and sell is not None
+    assert (buy.dte_min, buy.dte_max) == (30, 90)
+    assert (sell.dte_min, sell.dte_max) == (30, 45)
+    assert (buy.vega_sign, buy.theta_sign, buy.gamma_sign) == ("long", "negative", "long")
+    assert (sell.vega_sign, sell.theta_sign, sell.gamma_sign) == ("short", "positive", "short")
+    married = entry_for("married_put")
+    assert married is not None and (married.dte_min, married.dte_max) == (30, 45)

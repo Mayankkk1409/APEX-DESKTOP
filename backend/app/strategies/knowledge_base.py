@@ -687,7 +687,7 @@ def _activity_rules(entry_id: str) -> dict[str, str]:
         exit_rule = ". ".join(pieces[1:]) + "."
     else:
         management = manage
-        exit_rule = "Close or roll before expiration."
+        exit_rule = manage
     return {
         "entry_rules": formulas["how"],
         "management_rules": management,
@@ -916,6 +916,9 @@ def knowledge_entries() -> dict[str, KnowledgeEntry]:
 
 def entry_for(strategy_name_or_id: str) -> KnowledgeEntry | None:
     entries = knowledge_entries()
+    # The registry alias points this name at apex_strategy. The trademark entry is separate.
+    if strategy_name_or_id in {"Gamma Trampoline™", "Gamma Trampoline", "gamma_trampoline"}:
+        return entries["gamma_trampoline"]
     if strategy_name_or_id in entries:
         return entries[strategy_name_or_id]
     from app.strategies.registry import resolve_strategy_id
@@ -923,8 +926,6 @@ def entry_for(strategy_name_or_id: str) -> KnowledgeEntry | None:
     sid = resolve_strategy_id(strategy_name_or_id)
     if sid and sid in entries:
         return entries[sid]
-    if strategy_name_or_id in {"Gamma Trampoline™", "Gamma Trampoline"}:
-        return entries["gamma_trampoline"]
     return None
 
 
