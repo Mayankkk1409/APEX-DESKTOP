@@ -400,6 +400,23 @@ def assess_vol_regime(
         "near": "IV near HV",
     }[chosen or "near"]
     rule = vol_regime_rule_text()
+    band = float(IV_MISMATCH_VOL_POINTS)
+    if chosen == "sell" and points is not None and not tie_break:
+        lead = (
+            f"IV is rich at {points:.2f} vol points versus the {band:.0f} vol point threshold, IV much above HV."
+        )
+    elif chosen == "buy" and points is not None and not tie_break:
+        lead = (
+            f"IV is cheap at {abs(points):.2f} vol points versus the {band:.0f} vol point threshold, IV much below HV."
+        )
+    elif tie_break and rank is not None and chosen in {"sell", "buy"}:
+        word = "rich" if chosen == "sell" else "cheap"
+        line = IV_RANK_RICH_ABOVE if chosen == "sell" else IV_RANK_CHEAP_BELOW
+        lead = (
+            f"IV rank {_rank_text(rank)} is {word} versus the {line:.0f} threshold, so IV rank breaks the tie."
+        )
+    else:
+        lead = f"{headline}."
     if points is None:
         primary_sentence = "IV versus HV cannot be computed because IV or HV is missing."
     else:
@@ -440,7 +457,7 @@ def assess_vol_regime(
             f"{front / back:.2f}x back IV {_pct_text(back)} "
             f"(threshold {gamma_front_back_iv_ratio_min():.2f}x)."
         )
-    verdict = f"{headline}. {primary_sentence} {rank_sentence} {inversion_sentence} Rule: {rule}"
+    verdict = f"{lead} {primary_sentence} {rank_sentence} {inversion_sentence} Rule: {rule}"
     return VolRegimeAssessment(
         label=label,
         iv_minus_hv_pts=None if points is None else round(points, 2),

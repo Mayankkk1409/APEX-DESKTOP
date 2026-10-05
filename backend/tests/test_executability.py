@@ -109,8 +109,11 @@ def test_quote_seventeen_minutes_old_is_not_current() -> None:
     assert stamped in problem
 
 
-def test_missing_timestamp_with_a_price_is_not_stale() -> None:
-    assert quote_problem({"price": 11.96, "bid": None, "ask": None, "as_of": None}) is None
+def test_missing_timestamp_with_a_price_is_stale() -> None:
+    problem = quote_problem({"price": 11.96, "bid": None, "ask": None, "as_of": None})
+    assert problem is not None
+    assert "Quote not current" in problem
+    assert "unknown time" in problem
 
 
 @pytest.mark.asyncio

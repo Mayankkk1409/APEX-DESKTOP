@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -211,7 +211,13 @@ class _SeqAdapter:
         self.symbols: list[str] = []
 
     async def quote(self, symbol: str) -> Quote:
-        return Quote(symbol=symbol, name=symbol, price=10.0, source="test")
+        return Quote(
+            symbol=symbol,
+            name=symbol,
+            price=10.0,
+            source="test",
+            as_of=datetime.now(timezone.utc).isoformat(),
+        )
 
     async def submit_order(self, **kwargs) -> dict:
         self.symbols.append(str(kwargs["symbol"]))
@@ -380,7 +386,13 @@ class _ClosedAdapter:
         self.symbols: list[str] = []
 
     async def quote(self, symbol: str) -> Quote:
-        return Quote(symbol=symbol, name=symbol, price=50.0, source="test")
+        return Quote(
+            symbol=symbol,
+            name=symbol,
+            price=50.0,
+            source="test",
+            as_of=datetime.now(timezone.utc).isoformat(),
+        )
 
     async def submit_order(self, **kwargs) -> dict:
         self.symbols.append(str(kwargs["symbol"]))

@@ -176,31 +176,29 @@ async def execute_market_fill(
     spread_confirmed: bool = False,
     spread_max: float = DEFAULT_SPREAD_MAX,
     submission_path: str = "market_fill",
-    skip_quote_check: bool = False,
 ) -> Order:
-    if not skip_quote_check:
-        from app.services.executability import enforce_submission_quotes, marketable_limit
+    from app.services.executability import enforce_submission_quotes, marketable_limit
 
-        await enforce_submission_quotes(
-            adapter,
-            [symbol],
-            path=submission_path,
-            spread_confirmed=spread_confirmed,
-            contracts=qty,
-            multiplier=position_multiplier(asset_class),
-            spread_max=spread_max,
-        )
-        if asset_class == "us_option":
-            quote = await adapter.quote(symbol)
-            live = marketable_limit(side, quote)
-            live_limit = live[0] if live is not None else None
-            if live_limit is not None:
-                order_type = "limit"
-                limit_price = live_limit
-            elif order_type != "limit":
-                order_type = "limit"
-                if limit_price is None:
-                    limit_price = _positive_mark(getattr(quote, "price", None))
+    await enforce_submission_quotes(
+        adapter,
+        [symbol],
+        path=submission_path,
+        spread_confirmed=spread_confirmed,
+        contracts=qty,
+        multiplier=position_multiplier(asset_class),
+        spread_max=spread_max,
+    )
+    if asset_class == "us_option":
+        quote = await adapter.quote(symbol)
+        live = marketable_limit(side, quote)
+        live_limit = live[0] if live is not None else None
+        if live_limit is not None:
+            order_type = "limit"
+            limit_price = live_limit
+        elif order_type != "limit":
+            order_type = "limit"
+            if limit_price is None:
+                limit_price = _positive_mark(getattr(quote, "price", None))
     mark = _positive_mark(mark_price)
     if asset_class == "us_option" and mark is not None:
         px = mark

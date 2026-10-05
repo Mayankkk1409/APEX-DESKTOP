@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
@@ -323,7 +324,13 @@ class _LimitAdapter:
         self.orders: list[dict] = []
 
     async def quote(self, symbol: str) -> Quote:
-        return Quote(symbol=symbol, name=symbol, price=11.96, source="test")
+        return Quote(
+            symbol=symbol,
+            name=symbol,
+            price=11.96,
+            source="test",
+            as_of=datetime.now(timezone.utc).isoformat(),
+        )
 
     async def submit_order(self, **kwargs: object) -> dict:
         self.orders.append(dict(kwargs))

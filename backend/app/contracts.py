@@ -1,8 +1,10 @@
 """Change 12 frozen contracts.
 
-Field names and types are frozen. ``canAutoExecute`` stays an unwired stub.
+Field names and types are frozen. ``canAutoExecute`` delegates to
+``app.services.executability.can_auto_execute`` and returns the same shape.
 ``Ledger.record`` drops the entry and ``Ledger.get`` returns an empty list.
-The live store is ``app.services.evidence_ledger``.
+The live store is ``app.services.evidence_ledger``. Do not call ``ledger.record``
+for persistence.
 """
 
 from __future__ import annotations
@@ -73,8 +75,11 @@ class LedgerEntry:
 
 
 def canAutoExecute(scan: Any, userSettings: Any) -> AutoExecuteDecision:
-    """Frozen signature. Not wired. Raises so a stray call cannot mark a trade eligible."""
-    raise NotImplementedError("canAutoExecute is a Change 12 stub and is not wired")
+    """Same decision as ``app.services.executability.can_auto_execute``."""
+    from app.services.executability import can_auto_execute
+
+    decision = can_auto_execute(scan, userSettings)
+    return AutoExecuteDecision(eligible=bool(decision.eligible), reasons=list(decision.reasons))
 
 
 class Ledger:

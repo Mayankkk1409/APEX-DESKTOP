@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Literal
 
 from app.analysis.gate_config import (
+    IV_MISMATCH_VOL_POINTS,
     LONG_VEGA_RICH_PENALTY,
     PLAIN_LONG_PREMIUM,
     assess_vol_regime,
@@ -509,11 +510,146 @@ def _apply_long_vega_penalty(candidates: list[StrategyCandidate], *, rich: bool,
         candidate.score = round(float(candidate.score) - LONG_VEGA_RICH_PENALTY, 1)
         note = (
             f"Long-vega penalty: {candidate.name} is long vega in a rich IV regime "
-            f"({LONG_VEGA_RICH_PENALTY:g} points). A long-vega structure in a sell-premium regime "
+            f"({LONG_VEGA_RICH_PENALTY:g} points versus the {IV_MISMATCH_VOL_POINTS:.0f} vol point threshold). "
+            "A long-vega structure in a sell-premium regime "
             "is penalized unless term-structure inversion justifies a diagonal or calendar."
         )
         if note not in candidate.gate_notes:
             candidate.gate_notes.append(note)
+
+
+def _parse_span_day(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return date.fromisoformat(value.strip()[:10])
+    except ValueError:
+        return None
+
+
+def _long_option_side(name: str) -> str | None:
+    """The long option side a time spread would buy. None when the chain may use either side."""
+    lowered = name.lower()
+    if "diagonal" in lowered and "bull" in lowered:
+        return "call"
+    if "diagonal" in lowered and "bear" in lowered:
+        return "put"
+    return None
+
+
+def long_leg_iv_from_chain(
+    contracts: Any,
+    *,
+    side: str | None,
+    spot: Any,
+) -> float | None:
+    """Nearest listed strike's IV on the live chain. None when that IV is not on the chain."""
+    rows: list[tuple[float, float]] = []
+    spot_n = spot if isinstance(spot, (int, float)) and not isinstance(spot, bool) else None
+    for raw in contracts or []:
+        row = raw if isinstance(raw, dict) else None
+        if row is None and hasattr(raw, "model_dump"):
+            row = raw.model_dump()
+        if not isinstance(row, dict):
+            continue
+        iv = row.get("iv")
+        if isinstance(iv, bool) or not isinstance(iv, (int, float)):
+            continue
+        if side is not None and str(row.get("side") or "") != side:
+            continue
+        strike = row.get("strike")
+        if spot_n is not None and isinstance(strike, (int, float)) and not isinstance(strike, bool):
+            distance = abs(float(strike) - float(spot_n))
+        else:
+            distance = 0.0
+        rows.append((distance, float(iv)))
+    if not rows:
+        return None
+    rows.sort(key=lambda item: item[0])
+    return rows[0][1]
+
+
+def measure_event_vega(
+    *,
+    earnings_on: Any,
+    short_expiry: Any,
+    long_expiry: Any,
+    long_leg_iv: Any,
+    normal_iv: Any,
+    long_side: str | None,
+) -> tuple[float | None, str | None]:
+    """Vol points to subtract when only the long expiry spans earnings.
+
+    The points are the long-leg IV premium over normal IV from the chain.
+    A missing IV returns no number and must not be subtracted.
+    """
+    earn = _parse_span_day(earnings_on)
+    short_on = _parse_span_day(short_expiry)
+    long_on = _parse_span_day(long_expiry)
+    if earn is None or short_on is None or long_on is None:
+        return None, None
+    if short_on >= earn or long_on <= earn:
+        return None, None
+    side = long_side or "option"
+    base = (
+        f"Event-vega penalty: the long {side} expiring {long_on.isoformat()} spans earnings on {earn.isoformat()}. "
+        f"The short expiry {short_on.isoformat()} is before the event."
+    )
+    from app.analysis.gate_config import _as_fraction
+
+    long_f = _as_fraction(long_leg_iv)
+    normal = _as_fraction(normal_iv)
+    if long_f is None or normal is None:
+        return None, base + " Long-leg IV premium over normal IV could not be measured."
+    premium = (long_f - normal) * 100.0
+    shown = round(premium, 2)
+    if shown <= 0:
+        return None, (
+            base
+            + f" Long-leg IV {long_f * 100:.2f}% is {shown:.2f} vol points versus normal IV {normal * 100:.2f}%."
+            + " No penalty is subtracted."
+        )
+    return shown, (
+        base
+        + f" Long-leg IV {long_f * 100:.2f}% is {shown:.2f} vol points over normal IV {normal * 100:.2f}%."
+        + f" Penalty {shown:.2f} points."
+    )
+
+
+def _event_vega_for_candidate(name: str, span: dict[str, Any]) -> tuple[float | None, str | None]:
+    side = _long_option_side(name)
+    iv = span.get("long_leg_iv")
+    if iv is None:
+        iv = long_leg_iv_from_chain(span.get("contracts"), side=side, spot=span.get("spot"))
+    return measure_event_vega(
+        earnings_on=span.get("earnings_date"),
+        short_expiry=span.get("short_expiry"),
+        long_expiry=span.get("long_expiry"),
+        long_leg_iv=iv,
+        normal_iv=span.get("normal_iv"),
+        long_side=side,
+    )
+
+
+def _apply_event_vega_penalty(candidates: list[StrategyCandidate], span: dict[str, Any] | None) -> None:
+    """Subtract the measured long-leg premium before rank. Do not invent the points."""
+    if not span:
+        return
+    for candidate in candidates:
+        if not candidate.eligible or not _time_spread(candidate.name):
+            continue
+        if any(str(note).startswith("Event-vega penalty:") for note in candidate.gate_notes):
+            continue
+        points, note = _event_vega_for_candidate(candidate.name, span)
+        if note is None:
+            continue
+        if points is not None and points > 0:
+            candidate.score = round(float(candidate.score) - float(points), 1)
+        candidate.gate_notes.append(note)
 
 
 def _rank_candidates(
@@ -534,6 +670,7 @@ def _rank_candidates(
     front_iv: Any = None,
     back_iv: Any = None,
     inversion_flagged: bool = False,
+    event_span: dict[str, Any] | None = None,
 ) -> list[StrategyCandidate]:
     """Rule-based candidate scoring — deterministic, not LLM."""
     candidates: list[StrategyCandidate] = []
@@ -604,6 +741,7 @@ def _rank_candidates(
         add("Calendar Spread", 1.0, ["Neutral time-spread when back-month chain available"])
 
     _apply_long_vega_penalty(candidates, rich=rule_rich, inverted=regime.inverted)
+    _apply_event_vega_penalty(candidates, event_span)
     candidates.sort(key=lambda c: c.score, reverse=True)
     return candidates
 
@@ -805,6 +943,7 @@ def _merge_change11_evaluations(
     apex_result: ApexStrategyEligibility | None,
     rich: bool = False,
     inverted: bool = False,
+    event_span: dict[str, Any] | None = None,
 ) -> None:
     """Score Rule 1, Rule 2, and Gamma Trampoline on every scan. A failed gate stays ineligible."""
     from app.services.benchmark_greeks import RULE2_NAMES, evaluate_rule1, evaluate_rule2
@@ -891,6 +1030,7 @@ def _merge_change11_evaluations(
         )
         if gamma_ok:
             _apply_long_vega_penalty([gamma_row], rich=rich, inverted=inverted)
+            _apply_event_vega_penalty([gamma_row], event_span)
         _place_candidate(candidates, gamma_row)
     _ = apex_input
 
@@ -930,16 +1070,17 @@ def _evaluate_rich_iv_collar(
             candidates.insert(0, collar)
         else:
             candidates.append(collar)
+    band = f"{IV_MISMATCH_VOL_POINTS:.0f}"
     if winner.name == "Collar":
         reason = (
-            f"Collar ranked first at {collar_score:g} because the short call finances the long put "
-            f"in a rich IV regime. {hedge.name} scored {hedge.score:g} after the long-vega penalty."
+            f"Collar ranked first at {collar_score:g} in a rich IV regime versus the {band} vol point threshold. "
+            f"The short call finances the long put. {hedge.name} scored {hedge.score:g} after the long-vega penalty."
         )
     else:
         reason = (
-            f"{winner.name} ranked first at {winner.score:g}. Collar scored {collar_score:g} "
-            f"because a short call would finance the long put. {hedge.name} scored {hedge.score:g} "
-            f"after the long-vega penalty. {winner.name} leads the collar on score."
+            f"{winner.name} ranked first at {winner.score:g} in a rich IV regime versus the {band} vol point threshold. "
+            f"Collar scored {collar_score:g} because a short call would finance the long put. "
+            f"{hedge.name} scored {hedge.score:g} after the long-vega penalty. {winner.name} leads the collar on score."
         )
     return winner, reason
 
@@ -994,15 +1135,29 @@ def _record_recommendation(
             fn="recommend_strategy",
             source="strategy_recommendation",
         )
+        penalty_note = next(
+            (note for note in candidate.gate_notes if str(note).startswith("Event-vega penalty:")),
+            None,
+        )
         record_ledger(
             scan_id=scan_id,
             kind="score",
             key=f"{candidate.name}:score",
             value=candidate.score,
-            inputs={"eligible": candidate.eligible},
+            inputs={"eligible": candidate.eligible, "event_vega_note": penalty_note},
             fn="recommend_strategy",
             source="strategy_recommendation",
         )
+        if penalty_note is not None:
+            record_ledger(
+                scan_id=scan_id,
+                kind="score",
+                key=f"{candidate.name}:event_vega_penalty",
+                value=penalty_note,
+                inputs={"score": candidate.score, "strategy": candidate.name},
+                fn="recommend_strategy",
+                source="strategy_recommendation",
+            )
     record_ledger(
         scan_id=scan_id,
         kind="score",
@@ -1036,6 +1191,7 @@ def recommend_strategy(
     structure_limits: frozenset[str] | None = None,
     rule_context: dict[str, Any] | None = None,
     sentiment_bias: str | None = None,
+    event_span: dict[str, Any] | None = None,
 ) -> StrategyRecommendation:
     """
     Staged gating: liquidity → defined-risk → data freshness → technical confirmation
@@ -1103,6 +1259,7 @@ def recommend_strategy(
         front_iv=apex_input.front_iv,
         back_iv=apex_input.back_iv,
         inversion_flagged=bool(apex_input.term_structure_inverted),
+        event_span=event_span,
     )
     ranked = order_candidates_for_risk_profile(
         matrix_matches,
@@ -1140,6 +1297,7 @@ def recommend_strategy(
         apex_result=apex_result,
         rich=iv_rich,
         inverted=regime.inverted,
+        event_span=event_span,
     )
     viable = [c for c in candidates if c.defined_risk and c.eligible]
     if ivr is not None and float(ivr) > 70:
@@ -1196,6 +1354,9 @@ def recommend_strategy(
     if rank_note is not None:
         best = rank_note[0]
         risk_notes.append(rank_note[1])
+    for note in best.gate_notes:
+        if str(note).startswith("Event-vega penalty:") and note not in risk_notes:
+            risk_notes.append(note)
 
     earnings_block = earnings_within_day and best.name not in {APEX_STRATEGY_NAME, GAMMA_TRAMPOLINE_NAME}
     auto_exec = allows_auto_execution(

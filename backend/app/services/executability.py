@@ -137,9 +137,11 @@ def quote_age_phrase(quote_as_of: Any, *, now: datetime | None = None) -> str | 
 
 
 def quote_problem(quote: Any, *, now: datetime | None = None) -> str | None:
-    """Stale, missing, or suspect. A price with no timestamp is not stale.
+    """Stale, missing, or suspect.
 
-    ``quote_is_stale`` treats a missing timestamp as not stale. Do not tighten that here.
+    A price, bid, or ask with no timestamp is not fresh. Order paths re-check here.
+    ``quote_is_stale`` still treats a missing timestamp as not an age failure; this
+    function does not.
     """
     if quote is None:
         return "Quote not current."
@@ -151,6 +153,9 @@ def quote_problem(quote: Any, *, now: datetime | None = None) -> str | None:
     price = _number(_attr(quote, "price"))
     if bid is not None and ask is not None and bid > ask:
         return "Quote not current. Bid is above the ask."
+    has_price = price is not None or bid is not None or ask is not None
+    if has_price and _parse_time(as_of) is None:
+        return "Quote not current. Quoted unknown time."
     if _quote_failed_stale(quote, as_of, now=now):
         age = quote_age_phrase(as_of, now=now)
         stamp = _text(as_of) or "unknown time"

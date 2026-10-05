@@ -141,6 +141,28 @@ def _benchmark_rule_context(
     }
 
 
+def _event_span_from_scan(
+    *,
+    earnings_date: Any,
+    short_expiry: Any,
+    long_expiry: Any,
+    normal_iv: Any,
+    contracts: list[dict[str, Any]] | None,
+    spot: Any,
+) -> dict[str, Any] | None:
+    """Chain inputs for the event-vega penalty. Missing dates are not a made-up window."""
+    if not earnings_date or not short_expiry or not long_expiry:
+        return None
+    return {
+        "earnings_date": earnings_date,
+        "short_expiry": short_expiry,
+        "long_expiry": long_expiry,
+        "normal_iv": normal_iv,
+        "contracts": contracts or [],
+        "spot": spot,
+    }
+
+
 def build_layers(
     snapshot: ChartSnapshot,
     quote: Quote,
@@ -241,7 +263,7 @@ def build_layers(
         annotations = _pattern_annotations()
 
     vol_signal = vol_layer.get("signal") or "fair"
-    if vol_signal not in {"buy_premium", "sell_premium", "fair", "between_bands"}:
+    if vol_signal not in {"buy_premium", "sell_premium", "fair"}:
         vol_signal = "fair"
 
     direction_pre = tech_analysis.direction
@@ -415,6 +437,16 @@ def build_layers(
         risk_profile=risk_profile,
         rule_context=rule_context,
         sentiment_bias=(sentiment_layer or {}).get("bias") if isinstance(sentiment_layer, dict) else None,
+        event_span=_event_span_from_scan(
+            earnings_date=None if earnings_not_applicable else earnings_next_early,
+            short_expiry=resolved_expiry,
+            long_expiry=str(back_month_chain.expiry) if back_month_chain and getattr(back_month_chain, "expiry", None) else None,
+            normal_iv=raw_hv if isinstance(raw_hv, (int, float)) and not isinstance(raw_hv, bool) else None,
+            contracts=[c.model_dump() for c in back_month_chain.contracts]
+            if back_month_chain and back_month_chain.contracts
+            else None,
+            spot=last if isinstance(last, (int, float)) else None,
+        ),
     )
     strategy = decision.best_match
 

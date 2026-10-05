@@ -15,6 +15,7 @@ from app.analysis.layers import (
 )
 from app.analysis.gate_config import (
     CREDIT_STRUCTURES,
+    IV_MISMATCH_VOL_POINTS,
     LONG_VEGA_RICH_PENALTY,
     NOT_EXECUTABLE,
     PLAIN_LONG_PREMIUM,
@@ -23,6 +24,7 @@ from app.analysis.gate_config import (
     direction_margin_min,
     earnings_before_expiry,
     entry_composite_min,
+    theta_max_pct_per_day,
     exit_composite_min,
     hysteresis_action,
     iv_below_hv,
@@ -756,6 +758,7 @@ def strategy_decision(
     rule_context: dict[str, Any] | None = None,
     sentiment_bias: str | None = None,
     executable_by_name: dict[str, bool] | None = None,
+    event_span: dict[str, Any] | None = None,
 ) -> StrategyRecommendation:
     """One Best Match. Risk notes stay beside the structure and do not replace it."""
     from app.services.apex_strategy import ApexStrategyInput
@@ -793,6 +796,7 @@ def strategy_decision(
         structure_limits=structure_limits,
         rule_context=rule_context,
         sentiment_bias=sentiment_bias,
+        event_span=event_span,
     )
     return _prefer_executable_match(rec, executable_by_name)
 
@@ -2819,10 +2823,10 @@ def _event_vega_note(
     earnings_label: str,
     hv: Any,
     pools: list[list[dict[str, Any]]],
-) -> str | None:
-    """Penalty when the short expiry is before earnings and the long expiry is after."""
+) -> tuple[str | None, float | None]:
+    """Penalty sentence and the measured vol points. Missing IV returns no points."""
     if earnings_on is None:
-        return None
+        return None, None
     shorts = [
         leg
         for leg in legs
@@ -2834,17 +2838,17 @@ def _event_vega_note(
         if str(leg.get("action") or "").lower() == "buy" and leg.get("side") in {"call", "put"} and leg.get("expiry")
     ]
     if not shorts or not longs:
-        return None
+        return None, None
     short_dates = [_parse_iso_date(leg.get("expiry")) for leg in shorts]
     if any(parsed is not None and parsed >= earnings_on for parsed in short_dates):
-        return None
+        return None, None
     spanning = []
     for leg in longs:
         parsed = _parse_iso_date(leg.get("expiry"))
         if parsed is not None and parsed > earnings_on:
             spanning.append(leg)
     if not spanning:
-        return None
+        return None, None
     long_leg = spanning[0]
     short_leg = shorts[0]
     long_iv = _option_iv(long_leg, pools)
@@ -2862,12 +2866,13 @@ def _event_vega_note(
         f"The short {short_side} expiring {short_leg.get('expiry')} is before the event."
     )
     if premium is None or premium <= 0 or normal is None or long_fraction is None:
-        return base + " Long-leg IV premium over normal IV could not be measured."
+        return base + " Long-leg IV premium over normal IV could not be measured.", None
+    shown = round(premium, 2)
     return (
         base
-        + f" Long-leg IV {long_fraction * 100:.2f}% is {premium:.2f} vol points over normal IV {normal * 100:.2f}%."
-        + f" Penalty {premium:.2f} points."
-    )
+        + f" Long-leg IV {long_fraction * 100:.2f}% is {shown:.2f} vol points over normal IV {normal * 100:.2f}%."
+        + f" Penalty {shown:.2f} points."
+    ), shown
 
 
 def _sentiment_direction(score: Any, bias: Any) -> str | None:
@@ -2941,7 +2946,8 @@ def _selected_vega_note(strategy_name: str, regime_view: Any) -> str | None:
         )
     return (
         f"Long-vega penalty: {strategy_name} is long vega in a rich IV regime "
-        f"({LONG_VEGA_RICH_PENALTY:g} points). A long-vega structure in a sell-premium regime "
+        f"({LONG_VEGA_RICH_PENALTY:g} points versus the {IV_MISMATCH_VOL_POINTS:.0f} vol point threshold). "
+        "A long-vega structure in a sell-premium regime "
         "is penalized unless term-structure inversion justifies a diagonal or calendar."
     )
 
@@ -2953,11 +2959,11 @@ def _earnings_span_note(
     sentiment_layer: dict[str, Any],
     hv: Any,
     pools: list[list[dict[str, Any]]],
-) -> str | None:
+) -> tuple[str | None, float | None]:
     calendar = fundamentals_layer.get("earnings_calendar") if isinstance(fundamentals_layer, dict) else None
     alert = sentiment_layer.get("earnings_alert") if isinstance(sentiment_layer, dict) else None
     if isinstance(calendar, dict) and calendar.get("earnings_applicable") is False:
-        return None
+        return None, None
     raw = None
     label = None
     if isinstance(calendar, dict):
@@ -3097,6 +3103,114 @@ def _sentiment_fit_note(
         f"weight {tech_w * 100:.0f}%. {lead} {conviction}"
     )
     return note, low
+
+
+def _card_stamp(quote_as_of: Any) -> str:
+    if isinstance(quote_as_of, str) and quote_as_of.strip():
+        return quote_as_of.strip()
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _record_card_figures(
+    scan_id: str,
+    strategy_name: str,
+    figures: dict[str, Any],
+    *,
+    feed: Any,
+    timestamp: str,
+) -> None:
+    """Persist the numbers the card is allowed to print. Does not read the prose."""
+    from app.services.evidence_ledger import record_card_value
+
+    feed_text = feed if isinstance(feed, str) and feed.strip() else None
+    for key, value in figures.items():
+        if value is None or value == "":
+            continue
+        inputs: dict[str, Any] = {"strategy": strategy_name}
+        if str(key).startswith("threshold_"):
+            inputs["threshold"] = value
+        else:
+            inputs["measured"] = value
+        record_card_value(
+            scan_id,
+            str(key),
+            value,
+            inputs=inputs,
+            source="strategy_layer",
+            feed=feed_text,
+            timestamp=timestamp,
+            fn="build_strategy_layer",
+            strategy_id=strategy_name,
+        )
+
+
+def _without_catalog_sentences(text: str, strategy_name: str) -> str:
+    """Drop verbatim knowledge-base sentences so the check can judge the generated remainder."""
+    try:
+        from app.strategies.knowledge_base import entry_for
+    except Exception:
+        return text
+    entry = entry_for(strategy_name)
+    if entry is None:
+        return text
+    catalog = "\n".join(
+        str(getattr(entry, name, "") or "")
+        for name in ("title", "summary", "why_it_fits", "how_to_use", "key_risks", "greeks_profile")
+    )
+    pieces = []
+    for sentence in re.split(r"(?<=[.!?])\s+", text.strip()):
+        cleaned = sentence.strip()
+        if cleaned and cleaned not in catalog and catalog.find(cleaned.rstrip(".")) < 0:
+            pieces.append(cleaned)
+    return " ".join(pieces)
+
+
+def _guard_card_text(text: str, *, scan_id: str, strategy_name: str) -> str:
+    from app.services.narrative_guard import check_narrative
+
+    result = check_narrative(text or "", scan_id=scan_id, strategy_id=strategy_name)
+    if result.accepted:
+        return result.text
+    remainder = _without_catalog_sentences(text or "", strategy_name)
+    if remainder != (text or ""):
+        again = check_narrative(remainder, scan_id=scan_id, strategy_id=strategy_name)
+        if again.accepted:
+            return text
+    return result.text
+
+
+def _guard_strategy_card(
+    *,
+    scan_id: str,
+    strategy_name: str,
+    fit: str,
+    execution: str,
+    notes: list[str],
+    summary: str,
+    status_line: str,
+    narrative: str,
+    figures: dict[str, Any],
+    feed: Any,
+    quote_as_of: Any,
+) -> tuple[str, str, list[str], str, str, str]:
+    _record_card_figures(
+        scan_id,
+        strategy_name,
+        figures,
+        feed=feed,
+        timestamp=_card_stamp(quote_as_of),
+    )
+    guarded_notes = [
+        _guard_card_text(note, scan_id=scan_id, strategy_name=strategy_name) for note in notes if note
+    ]
+    return (
+        _guard_card_text(fit, scan_id=scan_id, strategy_name=strategy_name),
+        _guard_card_text(execution, scan_id=scan_id, strategy_name=strategy_name),
+        guarded_notes,
+        _guard_card_text(summary, scan_id=scan_id, strategy_name=strategy_name),
+        _guard_card_text(status_line, scan_id=scan_id, strategy_name=strategy_name),
+        _guard_card_text(narrative, scan_id=scan_id, strategy_name=strategy_name),
+    )
 
 
 def build_strategy_layer(
@@ -3495,7 +3609,7 @@ def build_strategy_layer(
     if vega_note:
         notes.append(vega_note)
         why_parts.append(vega_note)
-    event_note = _earnings_span_note(
+    event_note, event_points = _earnings_span_note(
         option_legs,
         fundamentals_layer=fundamentals_layer,
         sentiment_layer=sentiment_layer,
@@ -3655,6 +3769,162 @@ def build_strategy_layer(
             fn="build_strategy_layer",
         )
     fit = " ".join(why_parts)
+    from app.analysis.gate_config import IV_RANK_CHEAP_BELOW, IV_RANK_RICH_ABOVE, gamma_front_back_iv_ratio_min
+
+    sent_score = sentiment_layer.get("score_0_100") if isinstance(sentiment_layer, dict) else None
+    margin = None
+    if isinstance(sent_score, (int, float)) and not isinstance(sent_score, bool):
+        margin = direction_margin(tech_score=float(tech_score), sentiment_score=float(sent_score))
+    fund_score = fundamentals_layer.get("score") if isinstance(fundamentals_layer, dict) else None
+    figures: dict[str, Any] = {
+        "composite": float(composite),
+        "technical": float(tech_score),
+        "sentiment": float(sent_score) if isinstance(sent_score, (int, float)) and not isinstance(sent_score, bool) else None,
+        "fundamentals": float(fund_score) if isinstance(fund_score, (int, float)) and not isinstance(fund_score, bool) else None,
+        "iv": regime_iv if isinstance(regime_iv, (int, float)) and not isinstance(regime_iv, bool) else None,
+        "hv": vol_layer.get("hv") if isinstance(vol_layer.get("hv"), (int, float)) else None,
+        "iv_rank": regime_view.iv_rank,
+        "iv_minus_hv_pts": regime_view.iv_minus_hv_pts,
+        "iv_to_hv": regime_view.iv_to_hv,
+        "threshold_auto_exec": float(auto_exec_threshold),
+        "threshold_entry": float(entry_composite_min()),
+        "threshold_exit": float(exit_composite_min()),
+        "threshold_vol_band": float(IV_MISMATCH_VOL_POINTS),
+        "threshold_iv_rank_cheap": float(IV_RANK_CHEAP_BELOW),
+        "threshold_iv_rank_rich": float(IV_RANK_RICH_ABOVE),
+        "threshold_inversion": float(gamma_front_back_iv_ratio_min()),
+        "threshold_direction_margin": float(direction_margin_min()),
+        "vega_penalty": float(LONG_VEGA_RICH_PENALTY),
+        "direction_margin": margin,
+        "technical_weighted_vote": (
+            abs(float(tech_score)) * float(APEX_COMPOSITE_WEIGHTS["technicals"])
+            if isinstance(sent_score, (int, float)) and not isinstance(sent_score, bool)
+            else None
+        ),
+        "sentiment_weighted_vote": (
+            abs((float(sent_score) - 50.0) * 2.0) * float(APEX_COMPOSITE_WEIGHTS["sentiment"])
+            if isinstance(sent_score, (int, float)) and not isinstance(sent_score, bool)
+            else None
+        ),
+        "event_vega_points": event_points,
+        "weight_technical": float(APEX_COMPOSITE_WEIGHTS["technicals"]),
+        "weight_sentiment": float(APEX_COMPOSITE_WEIGHTS["sentiment"]),
+        "scale_low": 0,
+        "scale_high": 100,
+        "leg_count": len(option_legs),
+        "threshold_theta_cap_pct": round(float(theta_max_pct_per_day()) * 100.0, 2),
+        "threshold_rule1_theta": 0.05,
+        "threshold_rule1_delta": 0.55,
+        "threshold_delta_theta": 10,
+        "symbol": str(ticker or chain_analysis.get("symbol") or ""),
+    }
+    calendar = fundamentals_layer.get("earnings_calendar") if isinstance(fundamentals_layer, dict) else None
+    if isinstance(calendar, dict) and calendar.get("next_date"):
+        figures["earnings_date"] = str(calendar.get("next_date"))[:10]
+    window = dte_window_for(strategy_name)
+    if window is not None:
+        figures["threshold_dte_min"] = int(window[0])
+        if window[1] is not None:
+            figures["threshold_dte_max"] = int(window[1])
+    selected_expiry = chain_analysis.get("expiry") or (option_legs[0].get("expiry") if option_legs else None)
+    selected_dte = _dte_from_expiry(str(selected_expiry) if selected_expiry else None)
+    if selected_dte is not None:
+        figures["selected_dte"] = int(selected_dte)
+    for index, leg in enumerate(option_legs):
+        source = _contract_for_leg(leg, chain_rows)
+        for field in ("strike", "bid", "ask", "delta", "iv", "theta", "mid", "quantity"):
+            raw = source.get(field) if isinstance(source, dict) else None
+            if raw is None:
+                raw = leg.get(field)
+            if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                figures[f"leg{index}_{field}"] = float(raw)
+        mid = leg.get("mid")
+        theta = leg.get("theta")
+        if (
+            isinstance(mid, (int, float))
+            and isinstance(theta, (int, float))
+            and not isinstance(mid, bool)
+            and not isinstance(theta, bool)
+            and float(mid) > 0
+        ):
+            figures[f"leg{index}_theta_pct"] = round(abs(float(theta)) / float(mid) * 100.0, 2)
+        theta_raw = figures.get(f"leg{index}_theta")
+        delta_raw = figures.get(f"leg{index}_delta")
+        if isinstance(theta_raw, float):
+            figures[f"leg{index}_theta_abs"] = abs(theta_raw)
+        if isinstance(theta_raw, float) and isinstance(delta_raw, float) and theta_raw != 0:
+            figures[f"leg{index}_delta_over_theta"] = abs(delta_raw) / abs(theta_raw)
+        expiry = leg.get("expiry") or (source.get("expiry") if isinstance(source, dict) else None)
+        if expiry:
+            figures[f"leg{index}_expiry"] = str(expiry)[:10]
+        occ = leg.get("symbol") or (source.get("symbol") if isinstance(source, dict) else None)
+        if isinstance(occ, str) and occ.strip():
+            figures[f"leg{index}_symbol"] = occ.strip()
+        spread = _leg_spread_pct(source) if isinstance(source, dict) else None
+        if spread is not None:
+            figures[f"leg{index}_spread"] = float(spread)
+            bid, ask = source.get("bid"), source.get("ask")
+            if (
+                isinstance(bid, (int, float))
+                and isinstance(ask, (int, float))
+                and not isinstance(bid, bool)
+                and not isinstance(ask, bool)
+                and float(ask) >= float(bid)
+            ):
+                figures[f"leg{index}_slippage"] = round((float(ask) - float(bid)) / 2.0 * 100.0, 2)
+    for index, row in enumerate(chain_rows):
+        if not isinstance(row, dict):
+            continue
+        for field in ("strike", "bid", "ask", "delta", "iv", "theta"):
+            raw = row.get(field)
+            if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                figures[f"chain{index}_{field}"] = float(raw)
+        if row.get("expiry"):
+            figures[f"chain{index}_expiry"] = str(row.get("expiry"))[:10]
+        if isinstance(row.get("symbol"), str) and row.get("symbol").strip():
+            figures[f"chain{index}_symbol"] = str(row.get("symbol")).strip()
+    metric_queue: list[tuple[str, Any]] = [("metric", metrics)]
+    while metric_queue and len(figures) < 400:
+        prefix, node = metric_queue.pop()
+        if isinstance(node, dict):
+            for key, val in node.items():
+                if key in {"legs", "validation_error"}:
+                    continue
+                metric_queue.append((f"{prefix}_{key}", val))
+        elif isinstance(node, (list, tuple)):
+            for offset, val in enumerate(node[:12]):
+                metric_queue.append((f"{prefix}_{offset}", val))
+        elif isinstance(node, (int, float)) and not isinstance(node, bool):
+            figures[prefix] = float(node)
+        elif isinstance(node, str) and re.fullmatch(r"[A-Z]{1,5}", node.strip()):
+            figures[prefix] = node.strip()
+    if strategy_name == "APEX Benchmark Greeks Strategy" or benchmark_rule:
+        figures.update({"rule_ratio": 10, "rule_move_pct": 0.01, "rule_final_dte": 21})
+    if benchmark_rule == "rule2":
+        figures.update({"short_delta_cap": 0.20, "model_probability": 0.80, "profit_take": 0.50, "loss_multiple": 2})
+    if strategy_name == "Gamma Trampoline™":
+        figures.update({"gamma_days_min": 5, "gamma_days_max": 10})
+    outlook = _outlook_for(strategy_name, direction)
+    if low_conviction and margin is not None:
+        outlook = (
+            f"{outlook}, low conviction, direction margin {margin:.1f} "
+            f"versus threshold {direction_margin_min():g}."
+        )
+    narrative = f"Recommended: {strategy_name}. {summary} {execution}"
+    fit, execution, notes, summary, status_line, narrative = _guard_strategy_card(
+        scan_id=scan_key,
+        strategy_name=strategy_name,
+        fit=fit,
+        execution=execution,
+        notes=notes,
+        summary=summary,
+        status_line=status_line,
+        narrative=narrative,
+        figures=figures,
+        feed=vol_layer.get("feed") if isinstance(vol_layer, dict) else None,
+        quote_as_of=quote_as_of,
+    )
+    outlook = _guard_card_text(outlook, scan_id=scan_key, strategy_name=strategy_name)
     return {
         "title": "Strategy playbook",
         "tradeable": checks_passed,
@@ -3677,11 +3947,7 @@ def build_strategy_layer(
         "what_is_this": summary,
         "why_recommended": fit,
         "why_it_fits": fit,
-        "outlook": (
-            f"{_outlook_for(strategy_name, direction)}, low conviction"
-            if low_conviction
-            else _outlook_for(strategy_name, direction)
-        ),
+        "outlook": outlook,
         "strategies_evaluated": strategies_evaluated,
         "selection_rationale": selection_rationale,
         "how_to_execute": execution,
@@ -3697,5 +3963,5 @@ def build_strategy_layer(
         "quote_as_of": quote_as_of,
         "metrics": metrics,
         "validation_errors": validation_errors,
-        "narrative": f"Recommended: {strategy_name}. {summary} {execution}",
+        "narrative": narrative,
     }

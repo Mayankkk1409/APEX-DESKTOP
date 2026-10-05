@@ -46,7 +46,13 @@ class StubAdapter:
 
     async def quote(self, symbol: str) -> Quote:
         self.quotes.append(symbol)
-        return Quote(symbol=symbol, name=symbol, price=self.price, source="test")
+        return Quote(
+            symbol=symbol,
+            name=symbol,
+            price=self.price,
+            source="test",
+            as_of=datetime.now(ZoneInfo("UTC")).isoformat(),
+        )
 
     async def submit_order(self, **kwargs) -> dict:
         self.submits.append(kwargs)

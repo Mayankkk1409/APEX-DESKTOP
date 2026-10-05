@@ -140,6 +140,7 @@ _STOP = frozenset(
         "OK",
         "NO",
         "YES",
+        "APEX",
     }
 )
 
@@ -182,12 +183,53 @@ def check_narrative(text: str, *, scan_id: str, strategy_id: str | None = None) 
     """Accept text only when every extracted token is on the scan ledger."""
     entries = get(scan_id)
     values, thresholds, dates, tickers = _collect(entries)
-    unmatched, qualitative = _problems(text or "", values, thresholds, dates, tickers)
+    unmatched, qualitative = _problems(
+        text or "",
+        values,
+        thresholds,
+        dates,
+        tickers,
+        _identifier_strings(entries),
+    )
     if not unmatched and not qualitative:
         return NarrativeResult(True, text, False, (), ())
     _remember(scan_id, strategy_id, unmatched, qualitative)
     fallback = _fallback(strategy_id, entries, values, thresholds, dates, tickers)
     return NarrativeResult(False, fallback, True, unmatched, qualitative)
+
+
+def _scenario_label(text: str, token: _Token) -> bool:
+    """Scenario B and Scenario C are labels, not the tickers B and C."""
+    if len(token.normalized) != 1:
+        return False
+    prior = text[max(0, token.start - 12) : token.start].lower()
+    return prior.endswith("scenario ") or prior.endswith("strike ")
+
+
+def _inside_identifier(surface: str, identifiers: list[str]) -> bool:
+    """Digits that are part of a recorded contract symbol are not a separate figure."""
+    if len(surface) < 4:
+        return False
+    return any(surface in ident for ident in identifiers)
+
+
+def _identifier_strings(entries: list[LedgerEntry]) -> list[str]:
+    found: list[str] = []
+
+    def walk(obj: Any) -> None:
+        if isinstance(obj, dict):
+            for val in obj.values():
+                walk(val)
+        elif isinstance(obj, (list, tuple)):
+            for val in obj:
+                walk(val)
+        elif isinstance(obj, str) and len(obj) >= 8 and any(ch.isdigit() for ch in obj):
+            found.append(obj)
+
+    for entry in entries:
+        walk(entry.value)
+        walk(entry.inputs)
+    return found
 
 
 def _problems(
@@ -196,20 +238,26 @@ def _problems(
     thresholds: list[float],
     dates: set[str],
     tickers: set[str],
+    identifiers: list[str] | None = None,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     grounded = values + thresholds
+    identifiers = identifiers or []
     unmatched: list[str] = []
     for token in _tokenize(text):
         if token.kind == "date":
             if token.normalized not in dates:
                 unmatched.append(token.surface)
         elif token.kind == "ticker":
-            if token.normalized not in tickers:
+            if token.normalized not in tickers and not _scenario_label(text, token):
                 unmatched.append(token.surface)
         elif token.kind == "percent":
-            if not _number_matches(token.surface, grounded, percent=True):
+            if not _number_matches(token.surface, grounded, percent=True) and not _inside_identifier(
+                token.surface, identifiers
+            ):
                 unmatched.append(token.surface)
-        elif not _number_matches(token.surface, grounded, percent=False):
+        elif not _number_matches(token.surface, grounded, percent=False) and not _inside_identifier(
+            token.surface, identifiers
+        ):
             unmatched.append(token.surface)
     qualitative = _claim_words(text, values, thresholds)
     return tuple(unmatched), tuple(qualitative)

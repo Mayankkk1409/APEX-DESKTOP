@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -709,7 +709,13 @@ class _ComboAdapter:
         self.payloads: list[dict] = []
 
     async def quote(self, symbol: str) -> Quote:
-        return Quote(symbol=symbol, name=symbol, price=1.0, source="test")
+        return Quote(
+            symbol=symbol,
+            name=symbol,
+            price=1.0,
+            source="test",
+            as_of=datetime.now(timezone.utc).isoformat(),
+        )
 
     async def submit_order(self, **kwargs: object) -> dict:
         self.payloads.append(dict(kwargs))

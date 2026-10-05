@@ -452,28 +452,40 @@ def _term_structure_label(legs: Sequence[dict[str, Any]]) -> tuple[str, str]:
 
 
 def _iv_hv_signal(iv: float | None, hv: float | None) -> dict[str, Any]:
-    """Documented §6.1 bands — only when both legs exist."""
+    """Same ±5 vol-point rule as ``assess_vol_regime``. There is no 10-point band."""
     if iv is None or hv is None:
         return {
             "signal": "unavailable",
             "gap_pts": None,
             "reason": "ATM IV or HV is unavailable, so no rich/cheap verdict is claimed.",
         }
-    gap = (iv - hv) * 100.0
-    if gap > 10:
-        signal, reason = "sell_premium", f"IV is {gap:.1f} pts above HV (>10) — options rich vs realised."
-    elif gap < -10:
-        signal, reason = "buy_premium", f"IV is {abs(gap):.1f} pts below HV (>10) — options cheap vs realised."
-    elif abs(gap) <= 5:
-        if gap > 0:
-            signal, reason = "fair", f"IV is {gap:.1f} pts above HV."
-        elif gap < 0:
-            signal, reason = "fair", f"IV is {abs(gap):.1f} pts below HV."
-        else:
-            signal, reason = "fair", f"IV ≈ HV within 5 pts (gap {gap:+.1f}) — fair value band."
+    from app.analysis.gate_config import IV_MISMATCH_VOL_POINTS, assess_vol_regime
+
+    view = assess_vol_regime(iv=iv, hv=hv, iv_rank=None)
+    gap = view.iv_minus_hv_pts
+    signal = {"sell premium": "sell_premium", "buy premium": "buy_premium", "fair": "fair"}[view.label]
+    band = float(IV_MISMATCH_VOL_POINTS)
+    if gap is None:
+        reason = view.verdict
+    elif signal == "sell_premium":
+        reason = (
+            f"IV is {gap:.1f} pts above HV (more than {band:.0f}) — options rich vs realised. "
+            f"{view.verdict}"
+        )
+    elif signal == "buy_premium":
+        reason = (
+            f"IV is {abs(gap):.1f} pts below HV (more than {band:.0f}) — options cheap vs realised. "
+            f"{view.verdict}"
+        )
     else:
-        signal, reason = "between_bands", f"IV/HV gap is {gap:+.1f} pts — between the 5-pt fair and 10-pt rich/cheap bands."
-    return {"signal": signal, "gap_pts": gap, "reason": reason}
+        reason = f"IV versus HV gap is {gap:+.1f} pts, within ±{band:.0f}. {view.verdict}"
+    return {
+        "signal": signal,
+        "gap_pts": gap,
+        "reason": reason,
+        "verdict": view.verdict,
+        "rule": view.rule,
+    }
 
 
 def _fmt_pct(v: float | None, digits: int = 1) -> str:
@@ -582,8 +594,8 @@ def build_analysis_cards(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
                 + (f" (ATM–RV gap {gap_pts:+.1f} pts)." if gap_pts is not None else ".")
                 + " "
                 + (signal.get("reason") or "")
-                + " Desk read: >10 pts rich favours premium selling structures; >10 pts cheap favours "
-                "long premium / spreads; ±5 pts is the fair-value band where defined-risk dominates. "
+                + " Desk read: more than 5 vol points above HV is rich and favours selling premium; "
+                "more than 5 below is cheap and favours long premium; within ±5 is fair. "
                 + (
                     f"IV Rank {_fmt_num(ivr)} / percentile {_fmt_num(ivp)} use {iv_pts} daily points "
                     f"from the {iv_source.replace('_', ' ')} series."

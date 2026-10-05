@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -243,7 +243,13 @@ class _SeqAdapter:
         self.payloads: list[dict] = []
 
     async def quote(self, symbol: str) -> Quote:
-        return Quote(symbol=symbol, name=symbol, price=2.0, source="test")
+        return Quote(
+            symbol=symbol,
+            name=symbol,
+            price=2.0,
+            source="test",
+            as_of=datetime.now(timezone.utc).isoformat(),
+        )
 
     async def submit_order(self, **kwargs) -> dict:
         self.symbols.append(str(kwargs["symbol"]))
@@ -390,7 +396,13 @@ class _InflatedQuote:
         self.symbols: list[str] = []
 
     async def quote(self, symbol: str) -> Quote:
-        return Quote(symbol=symbol, name=symbol, price=100.0, source="test")
+        return Quote(
+            symbol=symbol,
+            name=symbol,
+            price=100.0,
+            source="test",
+            as_of=datetime.now(timezone.utc).isoformat(),
+        )
 
     async def submit_order(self, **kwargs) -> dict:
         self.symbols.append(str(kwargs["symbol"]))
@@ -402,7 +414,13 @@ class _MarketHours:
         self.symbols: list[str] = []
 
     async def quote(self, symbol: str) -> Quote:
-        return Quote(symbol=symbol, name=symbol, price=2.0, source="test")
+        return Quote(
+            symbol=symbol,
+            name=symbol,
+            price=2.0,
+            source="test",
+            as_of=datetime.now(timezone.utc).isoformat(),
+        )
 
     async def submit_order(self, **kwargs) -> dict:
         self.symbols.append(str(kwargs["symbol"]))

@@ -1374,15 +1374,15 @@ def _cards(
                 else "ATM implied volatility is unavailable on this chain, so no IV verdict is claimed."
             ),
             (
-                f"Documented framework: IV below HV by more than 10 points means options are cheap and buying premium is "
-                f"favoured; within 5 points is fair value and defined-risk spreads apply; above HV by more than 10 points "
+                f"Documented framework: IV below HV by more than 5 vol points means options are cheap and buying premium is "
+                f"favoured; within plus or minus 5 is fair; above HV by more than 5 vol points "
                 f"means options are rich and selling premium is favoured. Current gap of "
                 f"{_f(((ctx.atm_iv or 0) - (ctx.hv or 0)) * 100)} points therefore reads as "
                 + (
                     "RICH — sell premium."
-                    if (ctx.atm_iv or 0) - (ctx.hv or 0) > 0.10
+                    if (ctx.atm_iv or 0) - (ctx.hv or 0) > 0.05
                     else "CHEAP — buy premium."
-                    if (ctx.atm_iv or 0) - (ctx.hv or 0) < -0.10
+                    if (ctx.atm_iv or 0) - (ctx.hv or 0) < -0.05
                     else "FAIR VALUE — defined-risk spreads and diagonals rather than naked directional premium."
                 )
                 if ctx.atm_iv is not None and ctx.hv
