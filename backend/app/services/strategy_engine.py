@@ -1269,7 +1269,7 @@ def _volatility_apex_section(
             "note": "0–100 vs IV history, or the reason the rank is missing",
         },
         {"label": "IV Percentile", "value": vol_layer.get("iv_percentile"), "note": "Historical percentile"},
-        {"label": "Signal", "value": signal_label, "note": "buy premium / sell premium / between bands"},
+        {"label": "Signal", "value": signal_label, "note": "IV much below HV / fair / IV much above HV"},
         {"label": "Expected move", "value": f"±{_apex_fmt(em_pct, 1)}%", "note": f"${_apex_fmt(em_dollar)} at {dte or '—'} DTE"},
         {"label": "Weighted contribution", "value": contribution, "note": f"{int(weight * 100)}% of composite"},
     ]
