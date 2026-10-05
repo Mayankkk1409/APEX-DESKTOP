@@ -15,8 +15,12 @@ from app.analysis.layers import (
 )
 from app.analysis.gate_config import (
     CREDIT_STRUCTURES,
+    LONG_VEGA_RICH_PENALTY,
     NOT_EXECUTABLE,
     PLAIN_LONG_PREMIUM,
+    assess_vol_regime,
+    direction_margin,
+    direction_margin_min,
     earnings_before_expiry,
     entry_composite_min,
     exit_composite_min,
@@ -39,12 +43,13 @@ from app.services.strategy_recommendation import (
     StrategyRecommendation,
     TechnicalAnalysisResultRef,
     earnings_position_note,
-    format_iv_rank,
+    format_iv_rank_with_reason,
     format_vol_percent,
     is_defined_risk_strategy,
     recommend_strategy,
+    record_ledger,
     selection_rationale_for,
-    vol_regime_phrase,
+    strategy_vega_sign,
 )
 from app.strategies.payoffs import apex_strategy_payoff, calendar_spread_payoff, long_straddle_payoff
 from app.strategies.registry import STRATEGY_REGISTRY, get_strategy_spec, resolve_strategy_id
@@ -1189,7 +1194,8 @@ def _volatility_apex_section(
     iv_rank = vol_layer.get("iv_rank")
     iv_pct = vol_layer.get("iv_percentile")
     signal = vol_layer.get("signal") or "fair"
-    signal_label = vol_regime_phrase(iv, hv, str(signal))
+    regime_view = assess_vol_regime(iv=iv, hv=hv, iv_rank=iv_rank, vol_signal=str(signal))
+    signal_label = regime_view.display
     em = vol_layer.get("expected_move") or {}
     em_pct = em.get("percent")
     em_dollar = em.get("dollar")
@@ -1214,7 +1220,7 @@ def _volatility_apex_section(
 
     score_meaning = (
         f"Volatility component score {vol_score}/100 ({band}) with signal '{signal_label}'. "
-        f"IV Rank {format_iv_rank(iv_rank)} / percentile {_apex_fmt(iv_pct, 1)}. "
+        f"IV Rank {format_iv_rank_with_reason(iv_rank, vol_layer.get('iv_rank_gap') if isinstance(vol_layer.get('iv_rank_gap'), str) else None)} / percentile {_apex_fmt(iv_pct, 1)}. "
         f"This score does not predict direction — it tells you which strategy families §9.1 should prefer "
         f"(debit vs credit vs neutral)."
     )
@@ -1231,12 +1237,12 @@ def _volatility_apex_section(
         "IV versus HV is a scoring input and a risk note. It does not replace the recommended structure."
     )
 
-    if signal_label == "buy premium":
+    if regime_view.short == "buy premium":
         action = (
             "Actionable view: IV is relatively cheap — favor long premium, debit spreads, and structures "
             "that benefit from vol expansion; avoid naked short vol unless hedged."
         )
-    elif signal_label == "sell premium":
+    elif regime_view.short == "sell premium":
         action = (
             "Actionable view: IV is rich versus HV — favor credit spreads, iron condors, and short strangles "
             "with defined risk; be cautious adding long gamma unless catalyst justifies it."
@@ -1250,7 +1256,14 @@ def _volatility_apex_section(
     breakdown = [
         {"label": "IV", "value": iv, "note": "ATM or recommended contract"},
         {"label": "HV (30D)", "value": hv, "note": "Realized on captured daily window"},
-        {"label": "IV Rank", "value": format_iv_rank(iv_rank), "note": "0–100 vs IV history"},
+        {
+            "label": "IV Rank",
+            "value": format_iv_rank_with_reason(
+                iv_rank,
+                vol_layer.get("iv_rank_gap") if isinstance(vol_layer.get("iv_rank_gap"), str) else None,
+            ),
+            "note": "0–100 vs IV history, or the reason the rank is missing",
+        },
         {"label": "IV Percentile", "value": vol_layer.get("iv_percentile"), "note": "Historical percentile"},
         {"label": "Signal", "value": signal_label, "note": "buy premium / sell premium / between bands"},
         {"label": "Expected move", "value": f"±{_apex_fmt(em_pct, 1)}%", "note": f"${_apex_fmt(em_dollar)} at {dte or '—'} DTE"},
@@ -2694,6 +2707,375 @@ def _earnings_inputs(
     return days, True, True
 
 
+_DTE_RANGE = re.compile(r"(\d+)\s*(?:–|—|-|to)\s*(\d+)\s*DTE", re.IGNORECASE)
+_DTE_IS = re.compile(r"DTE\s+is\s+(\d+)\s+to\s+(\d+)", re.IGNORECASE)
+
+
+def _window_from_text(text: str) -> tuple[int, int] | None:
+    match = _DTE_RANGE.search(text) or _DTE_IS.search(text)
+    if match is None:
+        return None
+    low, high = int(match.group(1)), int(match.group(2))
+    if low > high:
+        low, high = high, low
+    return low, high
+
+
+def dte_window_for(strategy_name: str) -> tuple[int, int] | None:
+    """DTE window from the knowledge base when 2C stored one, else the how-to text."""
+    names = [strategy_name]
+    if strategy_name in {"Protective Put", "Stock + Long Put"}:
+        names.append("Married Put")
+    from app.strategies.knowledge_base import entry_for
+
+    for name in names:
+        entry = entry_for(name)
+        if entry is None:
+            continue
+        explicit = getattr(entry, "dte_window", None)
+        if isinstance(explicit, (tuple, list)) and len(explicit) == 2:
+            return int(explicit[0]), int(explicit[1])
+        low = getattr(entry, "dte_min", None)
+        high = getattr(entry, "dte_max", None)
+        if isinstance(low, int) and isinstance(high, int):
+            return low, high
+        blob = " ".join(
+            str(getattr(entry, field, "") or "")
+            for field in ("how_to_use", "ideal_conditions", "entry_management_exit")
+        )
+        found = _window_from_text(blob)
+        if found is not None:
+            return found
+    for name in names:
+        play = PLAYBOOK.get(name) or {}
+        found = _window_from_text(f"{play.get('execution', '')} {play.get('summary', '')}")
+        if found is not None:
+            return found
+    return None
+
+
+def _listed_expiries(chain_analysis: dict[str, Any], vol_layer: dict[str, Any]) -> list[str]:
+    found: list[str] = []
+    for key in ("expiration_dates", "expiries"):
+        raw = chain_analysis.get(key)
+        if isinstance(raw, list):
+            found.extend(str(item)[:10] for item in raw if item)
+    for row in chain_analysis.get("contracts") or []:
+        if isinstance(row, dict) and row.get("expiry"):
+            found.append(str(row["expiry"])[:10])
+    term = vol_layer.get("term_structure")
+    legs = term.get("legs") if isinstance(term, dict) else None
+    if isinstance(legs, list):
+        found.extend(str(leg.get("expiry"))[:10] for leg in legs if isinstance(leg, dict) and leg.get("expiry"))
+    return found
+
+
+def _option_iv(leg: dict[str, Any], pools: list[list[dict[str, Any]]]) -> float | None:
+    if isinstance(leg.get("iv"), (int, float)) and not isinstance(leg.get("iv"), bool):
+        return float(leg["iv"])
+    for pool in pools:
+        row = _contract_for_leg(leg, pool)
+        iv = row.get("iv")
+        if isinstance(iv, (int, float)) and not isinstance(iv, bool):
+            return float(iv)
+    return None
+
+
+def _parse_iso_date(value: Any) -> date | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return date.fromisoformat(value.strip()[:10])
+    except ValueError:
+        return None
+
+
+def _event_vega_note(
+    legs: list[dict[str, Any]],
+    *,
+    earnings_on: date | None,
+    earnings_label: str,
+    hv: Any,
+    pools: list[list[dict[str, Any]]],
+) -> str | None:
+    """Penalty when the short expiry is before earnings and the long expiry is after."""
+    if earnings_on is None:
+        return None
+    shorts = [
+        leg
+        for leg in legs
+        if str(leg.get("action") or "").lower() == "sell" and leg.get("side") in {"call", "put"} and leg.get("expiry")
+    ]
+    longs = [
+        leg
+        for leg in legs
+        if str(leg.get("action") or "").lower() == "buy" and leg.get("side") in {"call", "put"} and leg.get("expiry")
+    ]
+    if not shorts or not longs:
+        return None
+    short_dates = [_parse_iso_date(leg.get("expiry")) for leg in shorts]
+    if any(parsed is not None and parsed >= earnings_on for parsed in short_dates):
+        return None
+    spanning = []
+    for leg in longs:
+        parsed = _parse_iso_date(leg.get("expiry"))
+        if parsed is not None and parsed > earnings_on:
+            spanning.append(leg)
+    if not spanning:
+        return None
+    long_leg = spanning[0]
+    short_leg = shorts[0]
+    long_iv = _option_iv(long_leg, pools)
+    from app.analysis.gate_config import _as_fraction
+
+    normal = _as_fraction(hv)
+    long_fraction = _as_fraction(long_iv)
+    premium = None
+    if long_fraction is not None and normal is not None:
+        premium = (long_fraction - normal) * 100.0
+    side = str(long_leg.get("side") or "option")
+    short_side = str(short_leg.get("side") or "option")
+    base = (
+        f"Event-vega penalty: the long {side} expiring {long_leg.get('expiry')} spans earnings on {earnings_label}. "
+        f"The short {short_side} expiring {short_leg.get('expiry')} is before the event."
+    )
+    if premium is None or premium <= 0 or normal is None or long_fraction is None:
+        return base + " Long-leg IV premium over normal IV could not be measured."
+    return (
+        base
+        + f" Long-leg IV {long_fraction * 100:.2f}% is {premium:.2f} vol points over normal IV {normal * 100:.2f}%."
+        + f" Penalty {premium:.2f} points."
+    )
+
+
+def _sentiment_direction(score: Any, bias: Any) -> str | None:
+    text = str(bias or "").lower()
+    if "bull" in text and "bear" not in text:
+        return "bullish"
+    if "bear" in text:
+        return "bearish"
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        return None
+    if float(score) > 50:
+        return "bullish"
+    if float(score) < 50:
+        return "bearish"
+    return "neutral"
+
+
+def _structure_direction(strategy_name: str, direction: str) -> str | None:
+    bias = DEFINED_RISK_PLAYBOOK.get(strategy_name, {}).get("bias")
+    if bias in {"bullish", "bearish"}:
+        return str(bias)
+    if direction in {"bullish", "bearish"}:
+        return direction
+    return None
+
+
+def _front_back_iv(
+    legs: list[dict[str, Any]],
+    pools: list[list[dict[str, Any]]],
+    vol_layer: dict[str, Any],
+) -> tuple[Any, Any]:
+    dated: list[tuple[date, float]] = []
+    for leg in legs:
+        exp = _parse_iso_date(leg.get("expiry"))
+        if exp is None or leg.get("side") not in {"call", "put"}:
+            continue
+        iv = _option_iv(leg, pools)
+        if iv is not None:
+            dated.append((exp, iv))
+    expiries = {row[0] for row in dated}
+    if len(expiries) >= 2:
+        dated.sort(key=lambda row: row[0])
+        return dated[0][1], dated[-1][1]
+    term = vol_layer.get("term_structure")
+    term_legs = term.get("legs") if isinstance(term, dict) else None
+    points: list[tuple[int, float]] = []
+    if isinstance(term_legs, list):
+        for leg in term_legs:
+            if not isinstance(leg, dict):
+                continue
+            dte = leg.get("dte")
+            iv = leg.get("atm_iv")
+            if isinstance(dte, int) and isinstance(iv, (int, float)) and not isinstance(iv, bool):
+                points.append((dte, float(iv)))
+    if len(points) >= 2:
+        points.sort(key=lambda row: row[0])
+        return points[0][1], points[-1][1]
+    return vol_layer.get("front_iv"), vol_layer.get("back_iv")
+
+
+def _selected_vega_note(strategy_name: str, regime_view: Any) -> str | None:
+    if regime_view.short != "sell premium" or strategy_vega_sign(strategy_name) != "long":
+        return None
+    time_spread = "Diagonal" in strategy_name or "Calendar" in strategy_name or strategy_name in {
+        APEX_STRATEGY_NAME,
+        "Gamma Trampoline™",
+    }
+    if regime_view.inverted and time_spread:
+        return (
+            "Term-structure inversion justifies the long vega: front IV is at least 1.25 times back IV."
+        )
+    return (
+        f"Long-vega penalty: {strategy_name} is long vega in a rich IV regime "
+        f"({LONG_VEGA_RICH_PENALTY:g} points). A long-vega structure in a sell-premium regime "
+        "is penalized unless term-structure inversion justifies a diagonal or calendar."
+    )
+
+
+def _earnings_span_note(
+    legs: list[dict[str, Any]],
+    *,
+    fundamentals_layer: dict[str, Any],
+    sentiment_layer: dict[str, Any],
+    hv: Any,
+    pools: list[list[dict[str, Any]]],
+) -> str | None:
+    calendar = fundamentals_layer.get("earnings_calendar") if isinstance(fundamentals_layer, dict) else None
+    alert = sentiment_layer.get("earnings_alert") if isinstance(sentiment_layer, dict) else None
+    if isinstance(calendar, dict) and calendar.get("earnings_applicable") is False:
+        return None
+    raw = None
+    label = None
+    if isinstance(calendar, dict):
+        raw = calendar.get("next_date")
+        label = calendar.get("display") or raw
+    if not raw and isinstance(alert, dict):
+        raw = alert.get("next_date")
+        label = label or raw
+    return _event_vega_note(
+        legs,
+        earnings_on=_parse_iso_date(raw),
+        earnings_label=str(label or raw or ""),
+        hv=hv,
+        pools=pools,
+    )
+
+
+def _retarget_dte_window(
+    strategy_name: str,
+    *,
+    contracts: list[dict[str, Any]],
+    front_expiry: str | None,
+    back_month_contracts: list[dict[str, Any]] | None,
+    back_expiry: str | None,
+) -> tuple[list[dict[str, Any]], str, list[dict[str, Any]] | None, str | None, str] | None:
+    """Move the candidate onto the nearest listed expiry inside the how-to window."""
+    window = dte_window_for(strategy_name)
+    if window is None or not front_expiry:
+        return None
+    low, high = window
+    today = datetime.now(timezone.utc).date()
+    user_dte = _dte_from_expiry(str(front_expiry), today=today)
+    if user_dte is None or low <= user_dte <= high:
+        return None
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in contracts:
+        if not isinstance(row, dict):
+            continue
+        exp = str(row.get("expiry") or front_expiry)[:10]
+        groups.setdefault(exp, []).append(row)
+    compliant: list[tuple[float, str, list[dict[str, Any]], int]] = []
+    midpoint = (low + high) / 2.0
+    for exp, rows in groups.items():
+        dte = _dte_from_expiry(exp, today=today)
+        if dte is None or dte < low or dte > high:
+            continue
+        compliant.append((abs(dte - midpoint), exp, rows, dte))
+    if not compliant:
+        return None
+    compliant.sort()
+    _, exp, rows, dte = compliant[0]
+    if exp == str(front_expiry)[:10]:
+        return None
+    note = (
+        f"User expiry {front_expiry} is {user_dte} DTE, outside the {low} to {high} DTE window. "
+        f"The candidate uses {exp} ({dte} DTE)."
+    )
+    return rows, exp, back_month_contracts, back_expiry, note
+
+
+def _dte_window_note(
+    strategy_name: str,
+    *,
+    chain_analysis: dict[str, Any],
+    vol_layer: dict[str, Any],
+    option_legs: list[dict[str, Any]],
+) -> str | None:
+    window = dte_window_for(strategy_name)
+    if window is None:
+        return None
+    low, high = window
+    user_expiry = chain_analysis.get("expiry")
+    if not user_expiry and option_legs:
+        user_expiry = option_legs[0].get("expiry")
+    dte = _dte_from_expiry(str(user_expiry) if user_expiry else None)
+    if dte is None or low <= dte <= high:
+        return None
+    from app.strategies.expiry_utils import nearest_expiry_in_window
+
+    today = datetime.now(timezone.utc).date()
+    nearest = nearest_expiry_in_window(
+        _listed_expiries(chain_analysis, vol_layer),
+        low=low,
+        high=high,
+        today=today,
+    )
+    base = (
+        f"DTE penalty: selected expiry {user_expiry} is {dte} DTE, outside the how-to window of {low} to {high} DTE."
+    )
+    if nearest is None:
+        return base + " No listed expiry falls in that window."
+    nearest_dte = _dte_from_expiry(nearest, today=today)
+    return base + f" Nearest compliant expiry is {nearest} ({nearest_dte} DTE)."
+
+
+def _sentiment_fit_note(
+    *,
+    strategy_name: str,
+    direction: str,
+    tech_score: float,
+    sentiment_layer: dict[str, Any],
+) -> tuple[str | None, bool]:
+    score = sentiment_layer.get("score_0_100")
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        return None, False
+    struct_dir = _structure_direction(strategy_name, direction)
+    sent_dir = _sentiment_direction(score, sentiment_layer.get("bias"))
+    tech_dir = direction if direction in {"bullish", "bearish"} else None
+    margin = direction_margin(tech_score=float(tech_score), sentiment_score=float(score)) if tech_dir else None
+    low = margin is not None and margin < direction_margin_min()
+    if struct_dir not in {"bullish", "bearish"} or sent_dir not in {"bullish", "bearish"} or struct_dir == sent_dir:
+        return None, low
+    tech_w = float(APEX_COMPOSITE_WEIGHTS["technicals"])
+    sent_w = float(APEX_COMPOSITE_WEIGHTS["sentiment"])
+    tech_mag = abs(float(tech_score)) * tech_w
+    sent_mag = abs((float(score) - 50.0) * 2.0) * sent_w
+    threshold = direction_margin_min()
+    if tech_mag >= sent_mag:
+        lead = (
+            f"The technical weighted vote {tech_mag:.1f} leads the sentiment weighted vote {sent_mag:.1f}, "
+            f"so the {struct_dir} direction prevailed."
+        )
+    else:
+        lead = (
+            f"The sentiment weighted vote {sent_mag:.1f} leads the technical weighted vote {tech_mag:.1f}. "
+            f"The structure follows the technical direction {direction}."
+        )
+    margin_text = "unavailable" if margin is None else f"{margin:.1f}"
+    conviction = (
+        f"Direction margin {margin_text} is below {threshold:g}, so the outlook is low conviction."
+        if low
+        else f"Direction margin {margin_text} is at or above {threshold:g}."
+    )
+    note = (
+        f"Sentiment conflict: score {float(score):g} ({sent_dir}) weight {sent_w * 100:.0f}% "
+        f"opposes the {struct_dir} structure. Technical bias {direction} score {float(tech_score):g} "
+        f"weight {tech_w * 100:.0f}%. {lead} {conviction}"
+    )
+    return note, low
+
 
 def build_strategy_layer(
     *,
@@ -2749,15 +3131,28 @@ def build_strategy_layer(
     if strategy_name == "APEX Benchmark Greeks Strategy":
         side = "put" if direction == "bearish" else "call"
         recommended = {**(recommended or {}), "side": side, "benchmark_side": side}
-    contracts = chain_analysis.get("contracts") or []
+    contracts = list(chain_analysis.get("contracts") or [])
     sym = ticker or chain_analysis.get("symbol") or ""
+    front_expiry = chain_analysis.get("expiry")
+    dte_switch_note: str | None = None
+    retargeted = _retarget_dte_window(
+        strategy_name,
+        contracts=contracts,
+        front_expiry=str(front_expiry) if front_expiry else None,
+        back_month_contracts=back_month_contracts,
+        back_expiry=back_expiry,
+    )
+    if retargeted is not None:
+        contracts, front_expiry, back_month_contracts, back_expiry, dte_switch_note = retargeted
+        if isinstance(recommended, dict):
+            recommended = {**recommended, "expiry": front_expiry}
     metrics = compute_strategy_metrics(
         strategy_name,
         spot=chain_analysis.get("spot"),
         contracts=contracts,
         recommended=recommended,
         back_month_contracts=back_month_contracts,
-        front_expiry=chain_analysis.get("expiry"),
+        front_expiry=front_expiry,
         back_expiry=back_expiry,
         iv=vol_layer.get("iv") if isinstance(vol_layer.get("iv"), (int, float)) else None,
         ticker=sym,
@@ -2999,7 +3394,19 @@ def build_strategy_layer(
     regime_iv = vol_layer.get("atm_iv")
     if regime_iv is None:
         regime_iv = vol_layer.get("iv")
-    regime = vol_regime_phrase(regime_iv, vol_layer.get("hv"), vol_signal, iv_rank=vol_layer.get("iv_rank"))
+    back_pool = back_month_contracts if isinstance(back_month_contracts, list) else []
+    iv_pools = [chain_rows, back_pool]
+    front_iv, back_iv = _front_back_iv(option_legs, iv_pools, vol_layer)
+    regime_view = assess_vol_regime(
+        iv=regime_iv,
+        hv=vol_layer.get("hv"),
+        iv_rank=vol_layer.get("iv_rank"),
+        vol_signal=vol_signal,
+        front_iv=front_iv,
+        back_iv=back_iv,
+        inversion_flagged=bool(vol_layer.get("term_structure_inverted")),
+    )
+    regime = regime_view.display
     if auto_exec_blocked:
         failed = "; ".join(block_notes) if block_notes else "a pre-trade check failed"
         lead = f"NOT EXECUTABLE. Failed checks: {failed}."
@@ -3025,10 +3432,16 @@ def build_strategy_layer(
     else:
         lead = f"Composite {float(composite):.1f}/100 meets your auto-execution threshold ({auto_exec_threshold:.0f})."
     why_parts_direction = f"Technical bias {direction} (score {tech_score})."
+    rank_reason = vol_layer.get("iv_rank_gap") if isinstance(vol_layer.get("iv_rank_gap"), str) else None
+    if rank_reason is None and isinstance(vol_layer.get("iv_rank_invalid"), str):
+        rank_reason = vol_layer.get("iv_rank_invalid")
+    iv_rank_text = format_iv_rank_with_reason(vol_layer.get("iv_rank"), rank_reason)
     why_parts = [
         lead,
         why_parts_direction,
-        f"Volatility regime: {regime} (IV rank {format_iv_rank(vol_layer.get('iv_rank'))}).",
+        f"Volatility regime: {regime} (IV rank {iv_rank_text}).",
+        regime_view.verdict,
+        regime_view.rule,
     ]
     if earnings_sentence:
         why_parts.append(earnings_sentence)
@@ -3038,14 +3451,50 @@ def build_strategy_layer(
         contract_iv = recommended.get("iv")
     if contract_iv is None and option_legs:
         contract_iv = _contract_for_leg(option_legs[0], chain_rows).get("iv")
-    if atm_for_label is not None and vol_layer.get("hv") is not None:
+    if "30-day ATM IV" not in regime_view.verdict and atm_for_label is not None and vol_layer.get("hv") is not None:
         why_parts.append(
             f"30-day ATM IV {format_vol_percent(atm_for_label)} versus HV {format_vol_percent(vol_layer.get('hv'))}."
         )
     if contract_iv is not None and format_vol_percent(contract_iv) != format_vol_percent(atm_for_label):
         why_parts.append(f"Selected contract IV {format_vol_percent(contract_iv)}.")
     if sentiment_layer.get("bias"):
-        why_parts.append(f"Sentiment {sentiment_layer.get('bias')} on 0–100 scale {sentiment_layer.get('score_0_100', '—')}.")
+        shown_score = sentiment_layer.get("score_0_100")
+        score_text = "unavailable: sentiment score was not supplied" if shown_score is None else shown_score
+        why_parts.append(f"Sentiment {sentiment_layer.get('bias')} on 0–100 scale {score_text}.")
+    conflict_note, low_conviction = _sentiment_fit_note(
+        strategy_name=strategy_name,
+        direction=direction,
+        tech_score=tech_score,
+        sentiment_layer=sentiment_layer,
+    )
+    if conflict_note:
+        why_parts.append(conflict_note)
+    vega_note = _selected_vega_note(strategy_name, regime_view)
+    if vega_note:
+        notes.append(vega_note)
+        why_parts.append(vega_note)
+    event_note = _earnings_span_note(
+        option_legs,
+        fundamentals_layer=fundamentals_layer,
+        sentiment_layer=sentiment_layer,
+        hv=vol_layer.get("hv"),
+        pools=iv_pools,
+    )
+    if event_note:
+        notes.append(event_note)
+        why_parts.append(event_note)
+    dte_note = dte_switch_note or _dte_window_note(
+        strategy_name,
+        chain_analysis=chain_analysis,
+        vol_layer=vol_layer,
+        option_legs=option_legs,
+    )
+    if dte_note:
+        why_parts.append(dte_note)
+        execution = f"{execution} {dte_note}".strip()
+    for note in notes:
+        if "ranked first" in note and note not in why_parts:
+            why_parts.append(note)
     if fundamentals_layer.get("score") is not None:
         why_parts.append(f"Fundamentals score {fundamentals_layer.get('score')}.")
 
@@ -3125,6 +3574,64 @@ def build_strategy_layer(
     for leg in option_legs:
         source = _contract_for_leg(leg, chain_rows)
         quote_as_of = source.get("quote_as_of") or leg.get("quote_as_of") or quote_as_of
+    from app.contracts import VolRegime
+
+    scan_key = str(ticker or chain_analysis.get("symbol") or "scan")
+    record_ledger(
+        scan_id=scan_key,
+        kind="value",
+        key="vol_regime",
+        value=VolRegime(
+            ivMinusHvPts=regime_view.iv_minus_hv_pts,
+            ivToHv=regime_view.iv_to_hv,
+            ivRank=regime_view.iv_rank,
+            verdict=regime_view.verdict,
+            rule=regime_view.rule,
+        ),
+        inputs={
+            "iv": regime_iv,
+            "hv": vol_layer.get("hv"),
+            "iv_rank": vol_layer.get("iv_rank"),
+            "display": regime,
+        },
+        fn="build_strategy_layer",
+    )
+    if vega_note:
+        record_ledger(
+            scan_id=scan_key,
+            kind="score",
+            key="vega_regime",
+            value=vega_note,
+            inputs={"strategy": strategy_name, "regime": regime_view.short},
+            fn="build_strategy_layer",
+        )
+    if event_note:
+        record_ledger(
+            scan_id=scan_key,
+            kind="score",
+            key="event_vega",
+            value=event_note,
+            inputs={"strategy": strategy_name},
+            fn="build_strategy_layer",
+        )
+    if dte_note:
+        record_ledger(
+            scan_id=scan_key,
+            kind="gate",
+            key="dte_window",
+            value=dte_note,
+            inputs={"strategy": strategy_name},
+            fn="build_strategy_layer",
+        )
+    if conflict_note:
+        record_ledger(
+            scan_id=scan_key,
+            kind="score",
+            key="sentiment_conflict",
+            value=conflict_note,
+            inputs={"direction": direction, "low_conviction": low_conviction},
+            fn="build_strategy_layer",
+        )
     fit = " ".join(why_parts)
     return {
         "title": "Strategy playbook",
@@ -3148,7 +3655,11 @@ def build_strategy_layer(
         "what_is_this": summary,
         "why_recommended": fit,
         "why_it_fits": fit,
-        "outlook": _outlook_for(strategy_name, direction),
+        "outlook": (
+            f"{_outlook_for(strategy_name, direction)}, low conviction"
+            if low_conviction
+            else _outlook_for(strategy_name, direction)
+        ),
         "strategies_evaluated": strategies_evaluated,
         "selection_rationale": selection_rationale,
         "how_to_execute": execution,

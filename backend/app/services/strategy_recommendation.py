@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Literal
 
-from app.analysis.gate_config import PLAIN_LONG_PREMIUM, classify_vol_regime
+from app.analysis.gate_config import (
+    LONG_VEGA_RICH_PENALTY,
+    PLAIN_LONG_PREMIUM,
+    assess_vol_regime,
+    term_structure_inversion,
+)
 from app.analysis.layers import (
     APEX_STRATEGY_NAME,
     EXECUTION_SCORE_BLOCKED_MAX,
@@ -235,16 +241,48 @@ def format_iv_rank(value: Any) -> str:
     return f"{rounded:.1f}"
 
 
+def format_iv_rank_with_reason(value: Any, reason: str | None = None) -> str:
+    """IV rank text for a card. A missing rank carries a reason, never a bare dash."""
+    shown = format_iv_rank(value)
+    if shown != "—":
+        return shown
+    detail = str(reason or "").strip().lstrip("—").strip()
+    if not detail:
+        detail = "IV rank is unavailable because published IV history is missing."
+    return f"unavailable: {detail}"
+
+
 def vol_regime_phrase(iv: Any, hv: Any, vol_signal: str, iv_rank: Any = None) -> str:
-    """Plain-word regime. Sell premium requires IV rank above 50."""
-    if iv_rank is not None:
-        return classify_vol_regime(iv_rank=iv_rank, iv=iv, hv=hv)
-    pair = aligned_iv_hv(iv, hv)
-    if pair is not None and pair[0] < pair[1]:
-        return "buy premium"
-    if vol_signal == "buy_premium":
-        return "buy premium"
-    return "fair"
+    """Card label for the one IV-versus-HV regime rule."""
+    return assess_vol_regime(iv=iv, hv=hv, iv_rank=iv_rank, vol_signal=vol_signal).display
+
+
+def record_ledger(
+    *,
+    scan_id: str,
+    kind: Literal["value", "gate", "candidate", "score"],
+    key: str,
+    value: Any,
+    inputs: dict[str, Any],
+    fn: str,
+    source: str = "strategy_engine",
+) -> None:
+    """Call the frozen ledger stub. Persistence belongs to the ledger owner."""
+    from app.contracts import LedgerEntry, ledger
+
+    ledger.record(
+        LedgerEntry(
+            scanId=scan_id or "scan",
+            kind=kind,
+            key=key,
+            value=value,
+            inputs=inputs,
+            source=source,
+            feed=None,
+            timestamp=datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            fn=fn,
+        )
+    )
 
 
 def earnings_position_note(
@@ -356,7 +394,9 @@ def order_candidates_for_risk_profile(
         late = [
             c
             for c in ordered[first_income:]
-            if c.defined_risk and c.name in AGGRESSIVE_DIRECTIONAL
+            if c.defined_risk
+            and c.name in AGGRESSIVE_DIRECTIONAL
+            and not _carries_long_vega_penalty(c)
         ]
         if not late:
             return ordered
@@ -389,6 +429,92 @@ def allows_auto_execution(
     return composite >= auto_exec_threshold
 
 
+_LONG_VEGA_NAMES = frozenset(
+    {
+        "Long Call",
+        "Long Put",
+        "Married Put",
+        "Long Straddle",
+        "Long Strangle",
+        "APEX Benchmark Greeks Strategy",
+        APEX_STRATEGY_NAME,
+        GAMMA_TRAMPOLINE_NAME,
+    }
+)
+_SHORT_VEGA_NAMES = frozenset(
+    {
+        "Short Iron Condor",
+        "Bull Put Spread (credit)",
+        "Bear Call Spread (credit)",
+        "Collar",
+        "Protective Collar",
+    }
+)
+_LONG_PUT_HEDGES = frozenset({"Married Put", "Long Put"})
+_VEGA_CACHE: dict[str, str] = {}
+
+
+def _time_spread(name: str) -> bool:
+    return "Diagonal" in name or "Calendar" in name or name in {APEX_STRATEGY_NAME, GAMMA_TRAMPOLINE_NAME}
+
+
+def strategy_vega_sign(name: str) -> str:
+    """Long, short, or neutral. Knowledge-base text wins when it names the sign."""
+    cached = _VEGA_CACHE.get(name)
+    if cached is not None:
+        return cached
+    sign = "neutral"
+    if name in _SHORT_VEGA_NAMES:
+        sign = "short"
+    elif name in _LONG_VEGA_NAMES or _time_spread(name):
+        sign = "long"
+    try:
+        from app.strategies.knowledge_base import entry_for
+
+        entry = entry_for(name)
+    except Exception:
+        entry = None
+    if entry is not None:
+        explicit = getattr(entry, "vega_sign", None)
+        if explicit in {"long", "short", "neutral"}:
+            sign = str(explicit)
+        else:
+            text = str(getattr(entry, "greeks_profile", "") or "").lower()
+            if "long vega" in text or "net long vega" in text:
+                sign = "long"
+            elif "short vega" in text:
+                sign = "short"
+    _VEGA_CACHE[name] = sign
+    return sign
+
+
+def _carries_long_vega_penalty(candidate: StrategyCandidate) -> bool:
+    return any(str(note).startswith("Long-vega penalty:") for note in candidate.gate_notes)
+
+
+def _apply_long_vega_penalty(candidates: list[StrategyCandidate], *, rich: bool, inverted: bool) -> None:
+    if not rich:
+        return
+    for candidate in candidates:
+        if strategy_vega_sign(candidate.name) != "long":
+            continue
+        if inverted and _time_spread(candidate.name):
+            note = (
+                "Term-structure inversion justifies the long vega: front IV is at least 1.25 times back IV."
+            )
+            if note not in candidate.gate_notes:
+                candidate.gate_notes.append(note)
+            continue
+        candidate.score = round(float(candidate.score) - LONG_VEGA_RICH_PENALTY, 1)
+        note = (
+            f"Long-vega penalty: {candidate.name} is long vega in a rich IV regime "
+            f"({LONG_VEGA_RICH_PENALTY:g} points). A long-vega structure in a sell-premium regime "
+            "is penalized unless term-structure inversion justifies a diagonal or calendar."
+        )
+        if note not in candidate.gate_notes:
+            candidate.gate_notes.append(note)
+
+
 def _rank_candidates(
     *,
     composite: float,
@@ -404,6 +530,9 @@ def _rank_candidates(
     delta_theta_ratio: float | None,
     apex_eligible: bool,
     back_month_available: bool = False,
+    front_iv: Any = None,
+    back_iv: Any = None,
+    inversion_flagged: bool = False,
 ) -> list[StrategyCandidate]:
     """Rule-based candidate scoring — deterministic, not LLM."""
     candidates: list[StrategyCandidate] = []
@@ -423,10 +552,25 @@ def _rank_candidates(
             )
         )
 
-    iv_cheap = iv is not None and hv is not None and (hv - iv) > 0.10
-    iv_rich = vol_signal == "sell_premium" or (iv is not None and hv is not None and (iv - hv) > 0.10)
-    if ivr is not None and float(ivr) > 50:
-        iv_rich = True
+    regime = assess_vol_regime(
+        iv=iv,
+        hv=hv,
+        iv_rank=ivr,
+        vol_signal=vol_signal,
+        front_iv=front_iv,
+        back_iv=back_iv,
+        inversion_flagged=inversion_flagged,
+    )
+    # The short label is the one rule. A caller vol_signal can still open the other
+    # family only when the primary band is the ±5 tie, so a decisive IV-versus-HV
+    # gap is not overridden.
+    iv_cheap = regime.short == "buy premium" or (
+        vol_signal == "buy_premium" and regime.short != "sell premium"
+    )
+    iv_rich = regime.short == "sell premium" or (
+        vol_signal == "sell_premium" and regime.short != "buy premium"
+    )
+    rule_rich = regime.short == "sell premium"
 
     if apex_eligible and catalyst_active:
         add(GAMMA_TRAMPOLINE_NAME, 14.0, ["Gamma Trampoline earnings gates passed", "Catalyst window active"])
@@ -445,6 +589,12 @@ def _rank_candidates(
         add("Bear Call Spread (credit)", 4.0, ["Mild bearish bias", "IV rich"])
     if direction == "bullish":
         add("Married Put", 2.0, ["Protective hedge expression"])
+    if rule_rich and direction == "bullish" and any(row.name in _LONG_PUT_HEDGES for row in candidates):
+        add(
+            "Collar",
+            3.0,
+            ["Rich-IV hedge alternative: a short call finances the long put"],
+        )
     if back_month_available:
         if direction == "bullish":
             add("Diagonal Spread (bullish)", 2.0, ["Directional time spread"])
@@ -452,6 +602,7 @@ def _rank_candidates(
             add("Diagonal Spread (bearish)", 2.0, ["Directional time spread"])
         add("Calendar Spread", 1.0, ["Neutral time-spread when back-month chain available"])
 
+    _apply_long_vega_penalty(candidates, rich=rule_rich, inverted=regime.inverted)
     candidates.sort(key=lambda c: c.score, reverse=True)
     return candidates
 
@@ -651,6 +802,8 @@ def _merge_change11_evaluations(
     rule_context: dict[str, Any] | None,
     apex_input: ApexStrategyInput | None,
     apex_result: ApexStrategyEligibility | None,
+    rich: bool = False,
+    inverted: bool = False,
 ) -> None:
     """Score Rule 1, Rule 2, and Gamma Trampoline on every scan. A failed gate stays ineligible."""
     from app.services.benchmark_greeks import RULE2_NAMES, evaluate_rule1, evaluate_rule2
@@ -672,17 +825,18 @@ def _merge_change11_evaluations(
         spread_pct=ctx.get("spread_pct"),
     )
     rule1_score = round(min(98.0, float(composite) + 11.0), 1)
-    _place_candidate(
-        candidates,
-        StrategyCandidate(
-            name="APEX Benchmark Greeks Strategy",
-            score=rule1_score if rule1.eligible else 0.0,
-            tier=tier,
-            defined_risk=True,
-            gate_notes=list(rule1.passed if rule1.eligible else rule1.reasons),
-            eligible=rule1.eligible,
-        ),
+    rule1_notes = list(rule1.passed if rule1.eligible else rule1.reasons)
+    rule1_row = StrategyCandidate(
+        name="APEX Benchmark Greeks Strategy",
+        score=rule1_score if rule1.eligible else 0.0,
+        tier=tier,
+        defined_risk=True,
+        gate_notes=rule1_notes,
+        eligible=rule1.eligible,
     )
+    if rule1.eligible:
+        _apply_long_vega_penalty([rule1_row], rich=rich, inverted=inverted)
+    _place_candidate(candidates, rule1_row)
     rule2 = evaluate_rule2(
         technical_direction=ctx.get("technical_direction", direction),
         sentiment_score=ctx.get("sentiment_score", sentiment_score),
@@ -726,18 +880,137 @@ def _merge_change11_evaluations(
     gamma_reasons = list(apex_result.rejection_reasons) if apex_result is not None else ["Earnings date is missing."]
     gamma_ok = bool(apex_result and apex_result.eligible)
     if not any(c.name == GAMMA_TRAMPOLINE_NAME for c in candidates):
-        _place_candidate(
-            candidates,
-            StrategyCandidate(
-                name=GAMMA_TRAMPOLINE_NAME,
-                score=round(min(98.0, float(composite) + 14.0), 1) if gamma_ok else 0.0,
-                tier=tier,
-                defined_risk=True,
-                gate_notes=["Gamma Trampoline earnings gates passed"] if gamma_ok else gamma_reasons,
-                eligible=gamma_ok,
-            ),
+        gamma_row = StrategyCandidate(
+            name=GAMMA_TRAMPOLINE_NAME,
+            score=round(min(98.0, float(composite) + 14.0), 1) if gamma_ok else 0.0,
+            tier=tier,
+            defined_risk=True,
+            gate_notes=["Gamma Trampoline earnings gates passed"] if gamma_ok else gamma_reasons,
+            eligible=gamma_ok,
         )
+        if gamma_ok:
+            _apply_long_vega_penalty([gamma_row], rich=rich, inverted=inverted)
+        _place_candidate(candidates, gamma_row)
     _ = apex_input
+
+
+def _evaluate_rich_iv_collar(
+    candidates: list[StrategyCandidate],
+    *,
+    best: StrategyCandidate,
+    tier: str,
+    rich: bool,
+    earnings_context: bool,
+) -> tuple[StrategyCandidate, str] | None:
+    """Score a collar against a long-put hedge when IV is rich and an event is in play."""
+    if not rich or not earnings_context:
+        return None
+    hedges = [row for row in candidates if row.eligible and row.name in _LONG_PUT_HEDGES]
+    if not hedges:
+        return None
+    hedge = max(hedges, key=lambda row: row.score)
+    collar_score = round(float(hedge.score) + LONG_VEGA_RICH_PENALTY, 1)
+    collar = StrategyCandidate(
+        name="Collar",
+        score=collar_score,
+        tier=tier,
+        defined_risk=_is_defined_risk("Collar"),
+        gate_notes=[
+            "Short call finances the long put in a rich IV regime.",
+            f"{hedge.name} scored {hedge.score:g} after the long-vega penalty.",
+        ],
+        eligible=True,
+    )
+    winner = best
+    if winner.name in _LONG_PUT_HEDGES and collar_score > float(winner.score):
+        winner = collar
+    if not any(row.name == "Collar" for row in candidates):
+        if winner.name == "Collar":
+            candidates.insert(0, collar)
+        else:
+            candidates.append(collar)
+    if winner.name == "Collar":
+        reason = (
+            f"Collar ranked first at {collar_score:g} because the short call finances the long put "
+            f"in a rich IV regime. {hedge.name} scored {hedge.score:g} after the long-vega penalty."
+        )
+    else:
+        reason = (
+            f"{winner.name} ranked first at {winner.score:g}. Collar scored {collar_score:g} "
+            f"because a short call would finance the long put. {hedge.name} scored {hedge.score:g} "
+            f"after the long-vega penalty. {winner.name} leads the collar on score."
+        )
+    return winner, reason
+
+
+def _record_recommendation(
+    *,
+    scan_id: str,
+    gates: dict[str, bool],
+    candidates: list[StrategyCandidate],
+    best: StrategyCandidate,
+    regime: Any,
+    composite: float,
+) -> None:
+    from app.contracts import VolRegime
+
+    record_ledger(
+        scan_id=scan_id,
+        kind="value",
+        key="vol_regime",
+        value=VolRegime(
+            ivMinusHvPts=regime.iv_minus_hv_pts,
+            ivToHv=regime.iv_to_hv,
+            ivRank=regime.iv_rank,
+            verdict=regime.verdict,
+            rule=regime.rule,
+        ),
+        inputs={
+            "iv_minus_hv_pts": regime.iv_minus_hv_pts,
+            "iv_to_hv": regime.iv_to_hv,
+            "iv_rank": regime.iv_rank,
+        },
+        fn="assess_vol_regime",
+        source="strategy_recommendation",
+    )
+    for key, passed in gates.items():
+        record_ledger(
+            scan_id=scan_id,
+            kind="gate",
+            key=str(key),
+            value=bool(passed),
+            inputs={},
+            fn="recommend_strategy",
+            source="strategy_recommendation",
+        )
+    for index, candidate in enumerate(candidates):
+        record_ledger(
+            scan_id=scan_id,
+            kind="candidate",
+            key=candidate.name,
+            value={"score": candidate.score, "eligible": candidate.eligible, "order": index},
+            inputs={"gate_notes": list(candidate.gate_notes)},
+            fn="recommend_strategy",
+            source="strategy_recommendation",
+        )
+        record_ledger(
+            scan_id=scan_id,
+            kind="score",
+            key=f"{candidate.name}:score",
+            value=candidate.score,
+            inputs={"eligible": candidate.eligible},
+            fn="recommend_strategy",
+            source="strategy_recommendation",
+        )
+    record_ledger(
+        scan_id=scan_id,
+        kind="score",
+        key="rank",
+        value=best.name,
+        inputs={"score": best.score, "composite": composite},
+        fn="recommend_strategy",
+        source="strategy_recommendation",
+    )
 
 
 def recommend_strategy(
@@ -803,6 +1076,15 @@ def recommend_strategy(
 
     direction = market.direction
     rsi_v = rsi if rsi is not None else 50.0
+    regime = assess_vol_regime(
+        iv=rank_iv,
+        hv=rank_hv,
+        iv_rank=ivr,
+        vol_signal=vol_signal,
+        front_iv=apex_input.front_iv,
+        back_iv=apex_input.back_iv,
+        inversion_flagged=bool(apex_input.term_structure_inverted),
+    )
     matrix_matches = _rank_candidates(
         composite=composite,
         direction=direction,
@@ -817,16 +1099,17 @@ def recommend_strategy(
         delta_theta_ratio=delta_theta_ratio,
         apex_eligible=apex_eligible,
         back_month_available=back_month_available,
+        front_iv=apex_input.front_iv,
+        back_iv=apex_input.back_iv,
+        inversion_flagged=bool(apex_input.term_structure_inverted),
     )
     ranked = order_candidates_for_risk_profile(
         matrix_matches,
         risk_profile,
         structure_limits=structure_limits,
     )
-    iv_cheap = rank_iv is not None and rank_hv is not None and (rank_hv - rank_iv) > 0.10
-    iv_rich = vol_signal == "sell_premium" or (
-        rank_iv is not None and rank_hv is not None and (rank_iv - rank_hv) > 0.10
-    )
+    iv_cheap = regime.short == "buy premium"
+    iv_rich = regime.short == "sell premium"
     candidates, registry_misses, strategies_evaluated = _attach_registry_evaluation(
         ranked,
         matrix_matches,
@@ -854,10 +1137,16 @@ def recommend_strategy(
         rule_context=rule_context,
         apex_input=apex_input,
         apex_result=apex_result,
+        rich=iv_rich,
+        inverted=regime.inverted,
     )
     viable = [c for c in candidates if c.defined_risk and c.eligible]
     if ivr is not None and float(ivr) > 70:
         viable = [c for c in viable if c.name not in PLAIN_LONG_PREMIUM]
+    if normalize_risk_profile(risk_profile) == "custom" and structure_limits:
+        limited = [c for c in viable if c.name in structure_limits]
+        if limited:
+            viable = limited
     risk_notes: list[str] = []
 
     # The saved auto-execution minimum decides acknowledgement. It is not a selection gate.
@@ -896,6 +1185,17 @@ def recommend_strategy(
         )
         candidates = [best, *candidates]
 
+    rank_note = _evaluate_rich_iv_collar(
+        candidates,
+        best=best,
+        tier=tier,
+        rich=iv_rich,
+        earnings_context=catalyst_active or catalyst_days is not None,
+    )
+    if rank_note is not None:
+        best = rank_note[0]
+        risk_notes.append(rank_note[1])
+
     earnings_block = earnings_within_day and best.name not in {APEX_STRATEGY_NAME, GAMMA_TRAMPOLINE_NAME}
     auto_exec = allows_auto_execution(
         best.name,
@@ -903,6 +1203,15 @@ def recommend_strategy(
         composite=composite,
         auto_exec_threshold=auto_exec_threshold,
     ) and not earnings_block
+
+    _record_recommendation(
+        scan_id=market.symbol,
+        gates=gates,
+        candidates=candidates,
+        best=best,
+        regime=regime,
+        composite=composite,
+    )
 
     return StrategyRecommendation(
         best_match=best.name,
