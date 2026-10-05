@@ -85,6 +85,29 @@ def _is_option_contract(symbol: str) -> bool:
     return bool(_OPTION_CONTRACT.match(symbol.strip().upper().replace(" ", "")))
 
 
+def _match_tier(symbol: str, name: str, query: str) -> int | None:
+    """Rank a hit: 0 exact symbol, 1 symbol prefix, 2 name match.
+
+    An empty query is tier 0 for every row so the backlog stays alphabetical
+    by name, then ticker. A ticker that also appears in the name stays in the
+    symbol tier; name match is only the fallback.
+    """
+    q = query.strip().casefold()
+    if not q:
+        return 0
+    sym = symbol.casefold()
+    if sym == q:
+        return 0
+    if sym.startswith(q):
+        return 1
+    nm = name.casefold()
+    if nm == q or nm.startswith(q):
+        return 2
+    if any(word.startswith(q) for word in _WORD.findall(nm)):
+        return 2
+    return None
+
+
 def matches_query(symbol: str, name: str, query: str) -> bool:
     """Case-insensitive pinpoint match on ticker or full name.
 
@@ -92,22 +115,21 @@ def matches_query(symbol: str, name: str, query: str) -> bool:
     A name matches when it equals the query, starts with it, or any word in
     the name starts with it. ``AAPL`` and ``Apple`` both match Apple Inc.
     """
-    q = query.strip().casefold()
-    if not q:
-        return True
-    sym = symbol.casefold()
-    if sym == q or sym.startswith(q):
-        return True
-    nm = name.casefold()
-    if nm == q or nm.startswith(q):
-        return True
-    return any(word.startswith(q) for word in _WORD.findall(nm))
+    return _match_tier(symbol, name, query) is not None
+
+
+def _hit_sort_key(hit: SearchHit, query: str) -> tuple[int, str, str]:
+    tier = _match_tier(hit.symbol, hit.name, query)
+    # Hits passed here already matched. An unexpected miss sorts last.
+    return (3 if tier is None else tier, hit.name.casefold(), hit.symbol.casefold())
 
 
 def filter_symbol_hits(query: str, rows: Sequence[Instrument]) -> list[SearchHit]:
-    """Drop disallowed types, collapse duplicate symbols, then sort A–Z.
+    """Drop disallowed types, collapse duplicate symbols, then rank.
 
-    Sort key is the full name, then the ticker. ``stock`` and
+    Order is exact symbol, then symbol prefix, then name match. Inside a
+    tier the key is the full name, then the ticker. An empty query has one
+    tier, so it stays alphabetical by name, then ticker. ``stock`` and
     ``individual_equity`` share one equity class, so a symbol listed under
     both is a single row (the first allowed name wins).
     """
@@ -126,7 +148,7 @@ def filter_symbol_hits(query: str, rows: Sequence[Instrument]) -> list[SearchHit
         name = row.name.strip() or symbol
         chosen[symbol] = SearchHit(symbol=symbol, name=name, asset_class=asset)
     hits = [hit for hit in chosen.values() if matches_query(hit.symbol, hit.name, query)]
-    hits.sort(key=lambda hit: (hit.name.casefold(), hit.symbol.casefold()))
+    hits.sort(key=lambda hit: _hit_sort_key(hit, query))
     return hits
 
 
@@ -157,6 +179,7 @@ CATALOG: tuple[Instrument, ...] = (
     Instrument("WFC", "Wells Fargo & Company", EQUITY),
     Instrument("C", "Citigroup Inc.", EQUITY),
     Instrument("GS", "The Goldman Sachs Group, Inc.", EQUITY),
+    Instrument("MS", "Morgan Stanley", EQUITY),
     Instrument("V", "Visa Inc.", EQUITY),
     Instrument("MA", "Mastercard Incorporated", EQUITY),
     Instrument("WMT", "Walmart Inc.", EQUITY),
@@ -261,5 +284,5 @@ def search_instruments(query: str, extras: Sequence[Instrument] | None = None) -
         added += 1
         if added >= _EXTRA_MATCH_LIMIT:
             break
-    merged.sort(key=lambda hit: (hit.name.casefold(), hit.symbol.casefold()))
+    merged.sort(key=lambda hit: _hit_sort_key(hit, query))
     return merged

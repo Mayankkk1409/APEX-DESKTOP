@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { scoreTier } from "../lib/chartHighlight";
+import { formatCompositeDecimal } from "../lib/scoreFormat";
 import type { ApexScoreLayer } from "../types";
 
 function fmt(v: unknown, digits = 1): string {
@@ -63,6 +64,7 @@ export function ApexScoreScan({ initial }: { initial?: ApexScoreLayer | null }) 
   }
 
   const composite = data.composite_score;
+  const compositeText = formatCompositeDecimal(composite);
   const tier = scoreTier(composite);
   const clears = data.clears_threshold;
 
@@ -80,7 +82,7 @@ export function ApexScoreScan({ initial }: { initial?: ApexScoreLayer | null }) 
       </header>
 
       <div className="as-hero">
-        <div className="sf-gauge as-composite-gauge" data-testid="apex-composite-gauge" aria-label={`Composite score ${composite}`}>
+        <div className="sf-gauge as-composite-gauge" data-testid="apex-composite-gauge" aria-label={`Composite score ${compositeText}`}>
           <svg viewBox="0 0 120 70" className="sf-gauge-svg">
             <path d="M10 60 A50 50 0 0 1 110 60" className="sf-gauge-track" />
             <path
@@ -91,7 +93,7 @@ export function ApexScoreScan({ initial }: { initial?: ApexScoreLayer | null }) 
             />
           </svg>
           <p className={`as-composite-value is-${tier}`} data-testid="apex-composite-value">
-            {fmt(composite, 1)}
+            {compositeText}
           </p>
           <p className="as-composite-label">/ 100</p>
         </div>

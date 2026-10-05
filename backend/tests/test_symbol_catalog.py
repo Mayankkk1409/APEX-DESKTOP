@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from app.adapters.alpaca import AlpacaAdapter
@@ -153,3 +155,65 @@ async def test_alpaca_search_uses_shared_filter(monkeypatch: pytest.MonkeyPatch)
     blocked |= {hit.symbol for hit in await adapter.search("VTSAX")}
     blocked |= {hit.symbol for hit in await adapter.search("AAPL260116C00150000")}
     assert blocked.isdisjoint({"BTC/USD", "VTSAX", "AAPL260116C00150000"})
+
+
+# Exact ticker must lead even when a prefix or an earlier name also matches.
+_EXACT_TICKER_FIRST = (
+    ("MS", "MS", "Morgan Stanley"),
+    ("JPM", "JPM", "JPMorgan Chase & Co."),
+    ("V", "V", "Visa Inc."),
+    ("C", "C", "Citigroup Inc."),
+    ("T", "T", "AT&T Inc."),
+    ("KO", "KO", "The Coca-Cola Company"),
+    ("GE", "GE", "GE Aerospace"),
+    ("META", "META", "Meta Platforms, Inc."),
+    ("PG", "PG", "The Procter & Gamble Company"),
+    ("BA", "BA", "The Boeing Company"),
+    ("DIS", "DIS", "The Walt Disney Company"),
+)
+
+
+@pytest.mark.parametrize(("query", "symbol", "name"), _EXACT_TICKER_FIRST)
+def test_exact_ticker_ranks_before_prefix_and_name(query: str, symbol: str, name: str) -> None:
+    hits = search_instruments(query)
+    assert hits, query
+    assert hits[0].symbol == symbol
+    assert hits[0].name == name
+    assert search_instruments(query.casefold())[0].symbol == symbol
+
+
+def test_ms_exact_symbol_then_prefix_then_name() -> None:
+    """MS is Morgan Stanley. MSFT is only a prefix. A name that sorts first stays last."""
+    hits = search_instruments("MS")
+    assert [hit.symbol for hit in hits[:2]] == ["MS", "MSFT"]
+    assert hits[0].name == "Morgan Stanley"
+
+    ranked = filter_symbol_hits(
+        "MS",
+        [
+            Instrument("MSFT", "Microsoft Corporation", "us_equity"),
+            Instrument("AAA", "Aardvark MS Holdings", "us_equity"),
+            Instrument("MS", "Morgan Stanley", "us_equity"),
+        ],
+    )
+    assert [hit.symbol for hit in ranked] == ["MS", "MSFT", "AAA"]
+
+
+def test_extra_exact_symbol_outranks_prefix_and_name() -> None:
+    hits = search_instruments(
+        "ZZ",
+        extras=[
+            Instrument("ZZTOP", "ZZ Top Holdings", "us_equity"),
+            Instrument("QQQZ", "A ZZ Word Fund", "us_etf"),
+            Instrument("ZZ", "Exact ZZ", "us_equity"),
+        ],
+    )
+    assert [hit.symbol for hit in hits] == ["ZZ", "ZZTOP", "QQQZ"]
+
+
+def test_required_ticker_queries_finish_within_300ms() -> None:
+    start = time.perf_counter()
+    for query, _symbol, _name in _EXACT_TICKER_FIRST:
+        assert search_instruments(query)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 0.3

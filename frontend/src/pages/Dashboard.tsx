@@ -16,6 +16,7 @@ import { useBrokerage } from "../hooks/useBrokerage";
 import { useMarketSocket } from "../hooks/useMarketSocket";
 import { defaultAccountLabel, usePositionCertificate } from "../hooks/usePositionCertificate";
 import { resolvePositionDayPl } from "../lib/positionDayPl";
+import { SEARCH_DEBOUNCE_MS, createDebouncedSymbolSearch } from "../lib/symbolSearch";
 import { useSession } from "../store";
 import type { Fundamentals, PositionRow, Quote, SentimentRow, WatchItem } from "../types";
 
@@ -37,6 +38,10 @@ export function Dashboard() {
   const [hitsFor, setHitsFor] = useState("");
   const searchSeq = useRef(0);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const symbolSearchRef = useRef<ReturnType<typeof createDebouncedSymbolSearch> | null>(null);
+  if (!symbolSearchRef.current) {
+    symbolSearchRef.current = createDebouncedSymbolSearch((value) => api.search(value), SEARCH_DEBOUNCE_MS);
+  }
 
   useEffect(() => {
     if (chartReady) setQuery(activeSymbol);
@@ -52,6 +57,7 @@ export function Dashboard() {
 
   function closeSuggestions() {
     searchSeq.current += 1;
+    symbolSearchRef.current?.cancel();
     setHits([]);
     setHitsFor("");
     setHighlightIdx(-1);
@@ -70,11 +76,11 @@ export function Dashboard() {
 
   async function runSearch(value: string) {
     const seq = ++searchSeq.current;
-    const r = await api.search(value);
-    if (seq !== searchSeq.current) return;
-    setHits(r.hits);
+    const next = await symbolSearchRef.current?.run(value);
+    if (next == null || seq !== searchSeq.current) return;
+    setHits(next);
     setHitsFor(value);
-    setSuggestionsOpen(r.hits.length > 0);
+    setSuggestionsOpen(next.length > 0);
   }
 
   /** Enter resolves to an exact match, then a suggestion for this exact query, then the raw text. */
