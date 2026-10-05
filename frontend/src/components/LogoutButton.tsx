@@ -1,6 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { api, setAccessToken } from "../api";
-import { useSession } from "../store";
+import { clearScanSession, useSession } from "../store";
 
 export function LogoutButton() {
   const nav = useNavigate();
@@ -13,6 +13,7 @@ export function LogoutButton() {
       /* clear local session even if cookie revoke fails */
     }
     setAccessToken(null);
+    clearScanSession();
     setUser(null);
     nav("/login");
   }

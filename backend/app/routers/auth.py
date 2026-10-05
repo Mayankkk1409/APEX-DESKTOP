@@ -46,10 +46,40 @@ def _set_refresh(response: Response, token: str, settings: Settings) -> None:
         REFRESH_COOKIE,
         token,
         httponly=True,
-        samesite="lax",
-        secure=settings.app_env == "production",
+        samesite=settings.cookie_samesite,
+        secure=settings.cookie_secure,
         max_age=settings.refresh_token_ttl_seconds,
         path="/",
+    )
+
+
+def _clear_refresh(response: Response, settings: Settings) -> None:
+    response.delete_cookie(
+        REFRESH_COOKIE,
+        path="/",
+        secure=settings.cookie_secure,
+        httponly=True,
+        samesite=settings.cookie_samesite,
+    )
+
+
+def _aware(moment: datetime) -> datetime:
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=timezone.utc)
+    return moment
+
+
+def _token_response(user: User, access: str, settings: Settings, *, show_connect_modal: bool) -> TokenResponse:
+    ttl = int(settings.access_token_ttl_seconds)
+    skew = max(0, int(settings.access_token_refresh_skew_seconds))
+    return TokenResponse(
+        access_token=access,
+        expires_in=ttl,
+        refresh_in=max(0, ttl - skew),
+        brokerage_connected=user.brokerage_connected,
+        first_login=not user.first_login_completed,
+        account_mode=user.account_mode,  # type: ignore[arg-type]
+        show_connect_modal=show_connect_modal,
     )
 
 
@@ -69,7 +99,6 @@ async def _issue_session(
     db: AsyncSession,
     settings: Settings,
 ) -> TokenResponse:
-    first = not user.first_login_completed
     jti = secrets.token_hex(16)
     expires = datetime.now(timezone.utc) + timedelta(seconds=settings.refresh_token_ttl_seconds)
     db.add(RefreshToken(user_id=user.id, jti=jti, expires_at=expires))
@@ -77,13 +106,7 @@ async def _issue_session(
     access = create_access_token(settings, UUID(user.id), {"mode": user.account_mode})
     refresh = create_refresh_token(settings, UUID(user.id), jti)
     _set_refresh(response, refresh, settings)
-    return TokenResponse(
-        access_token=access,
-        brokerage_connected=user.brokerage_connected,
-        first_login=first,
-        account_mode=user.account_mode,  # type: ignore[arg-type]
-        show_connect_modal=True,
-    )
+    return _token_response(user, access, settings, show_connect_modal=True)
 
 
 def _otp_request_payload(settings: Settings, code: str | None = None) -> dict:
@@ -229,23 +252,27 @@ async def refresh(
     if not raw:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing refresh cookie")
     try:
-        payload = decode_token(settings, raw)
+        payload = decode_token(settings, raw, expected_type="refresh")
     except Exception as exc:  # noqa: BLE001
+        _clear_refresh(response, settings)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid refresh") from exc
-    row = await db.scalar(select(RefreshToken).where(RefreshToken.jti == payload.get("jti"), RefreshToken.revoked.is_(False)))
-    if not row:
+    jti = payload.get("jti")
+    if not isinstance(jti, str) or not jti or not payload.get("sub"):
+        _clear_refresh(response, settings)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid refresh")
+    row = await db.scalar(select(RefreshToken).where(RefreshToken.jti == jti))
+    if not row or row.revoked or row.user_id != payload["sub"] or _aware(row.expires_at) <= datetime.now(timezone.utc):
+        _clear_refresh(response, settings)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Refresh revoked")
     user = await db.get(User, payload["sub"])
     if not user:
+        _clear_refresh(response, settings)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User not found")
+    # Keep this refresh cookie until logout or its own exp. Rotating it on every
+    # silent refresh lets a second in-flight call present the old cookie, get
+    # 401, and clear the cookie the first call just set — a forced logout.
     access = create_access_token(settings, UUID(user.id), {"mode": user.account_mode})
-    return TokenResponse(
-        access_token=access,
-        brokerage_connected=user.brokerage_connected,
-        first_login=not user.first_login_completed,
-        account_mode=user.account_mode,  # type: ignore[arg-type]
-        show_connect_modal=not user.first_login_completed,
-    )
+    return _token_response(user, access, settings, show_connect_modal=not user.first_login_completed)
 
 
 @router.post("/logout")
@@ -260,7 +287,7 @@ async def logout(request: Request, response: Response, db: AsyncSession = Depend
                 await db.commit()
         except Exception:
             pass
-    response.delete_cookie(REFRESH_COOKIE, path="/")
+    _clear_refresh(response, settings)
     return {"ok": True}
 
 

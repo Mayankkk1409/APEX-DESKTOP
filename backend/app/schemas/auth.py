@@ -69,6 +69,10 @@ class ForgotPasswordVerifyRequest(BaseModel):
 
 class TokenResponse(BaseModel):
     access_token: str
+    #: Seconds until this access token expires. The refresh token is only the cookie.
+    expires_in: int
+    #: Seconds until the client should silently refresh (ttl minus skew, never below 0).
+    refresh_in: int
     token_type: str = "bearer"
     brokerage_connected: bool
     first_login: bool

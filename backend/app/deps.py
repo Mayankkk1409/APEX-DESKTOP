@@ -23,11 +23,9 @@ async def current_user(
     if not token:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing access token")
     try:
-        payload = decode_token(settings, token)
+        payload = decode_token(settings, token, expected_type="access")
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid access token") from exc
-    if payload.get("typ") != "access":
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Wrong token type")
     user = await db.get(User, payload["sub"])
     if not user:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User not found")

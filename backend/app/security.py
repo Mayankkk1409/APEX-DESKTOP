@@ -64,8 +64,18 @@ def create_refresh_token(settings: Settings, user_id: UUID, jti: str) -> str:
     return jwt.encode(payload, settings.app_secret_key, algorithm="HS256")
 
 
-def decode_token(settings: Settings, token: str) -> dict[str, Any]:
-    return jwt.decode(token, settings.app_secret_key, algorithms=["HS256"])
+def decode_token(settings: Settings, token: str, *, expected_type: str | None = None) -> dict[str, Any]:
+    # PyJWT verifies exp against UTC by default and raises ExpiredSignatureError.
+    # https://pyjwt.readthedocs.io/en/stable/usage.html#expiration-time-claim-exp
+    payload = jwt.decode(
+        token,
+        settings.app_secret_key,
+        algorithms=["HS256"],
+        options={"require": ["exp", "sub"]},
+    )
+    if expected_type is not None and payload.get("typ") != expected_type:
+        raise jwt.InvalidTokenError("wrong token type")
+    return payload
 
 
 def password_strength(password: str) -> dict[str, Any]:
