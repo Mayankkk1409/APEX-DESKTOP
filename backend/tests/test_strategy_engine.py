@@ -374,11 +374,12 @@ _BOTH_ELIGIBLE = dict(
 
 
 def test_risk_profile_changes_best_match_when_both_structures_eligible() -> None:
+    """IV 15 points below HV is buy premium. A sell-premium flag does not open credits."""
     conservative = select_strategy(**_BOTH_ELIGIBLE, risk_profile="conservative")
     aggressive = select_strategy(**_BOTH_ELIGIBLE, risk_profile="aggressive")
     moderate = select_strategy(**_BOTH_ELIGIBLE, risk_profile="moderate")
     custom = select_strategy(**_BOTH_ELIGIBLE, risk_profile="custom")
-    assert conservative == "Short Iron Condor"
+    assert conservative == "Married Put"
     assert aggressive == "Bull Call Spread"
     assert conservative != aggressive
     assert moderate == aggressive
@@ -398,8 +399,9 @@ def test_aggressive_promotes_debit_ahead_of_higher_scored_neutral_income() -> No
 
 
 def test_custom_honors_structure_limits_when_stored() -> None:
+    rich = {**_BOTH_ELIGIBLE, "iv": 0.40, "hv": 0.22, "vol_signal": "sell_premium"}
     limited = select_strategy(
-        **_BOTH_ELIGIBLE,
+        **rich,
         risk_profile="custom",
         structure_limits=frozenset({"Short Iron Condor"}),
     )

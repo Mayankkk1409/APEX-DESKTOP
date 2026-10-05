@@ -62,8 +62,9 @@ PROFILES = ("conservative", "moderate", "aggressive")
 # long straddle +4 when IV is cheap and neutral; married put +2 on any bullish tape;
 # diagonal +2 and calendar +1 only when a back month exists.
 # Conservative moves its preferred defined-risk names in front. Aggressive pulls a
-# later directional name in front of the first neutral-income name. An empty
-# candidate list falls back to Bear Put / Long Straddle / Bull Call by direction.
+# later directional name in front of the first neutral-income name, except a
+# long-vega name already penalized in a rich regime. An empty candidate list
+# falls back to Bear Put / Long Straddle / Bull Call by direction.
 EXPECTED: dict[tuple[str, str, bool, str], str] = {
     ("mild_bear", "cheap", False, "aggressive"): "Bear Put Spread",
     ("mild_bear", "cheap", False, "conservative"): "Bear Put Spread",
@@ -80,7 +81,7 @@ EXPECTED: dict[tuple[str, str, bool, str], str] = {
     ("mild_bear", "rich", False, "aggressive"): "Short Iron Condor",
     ("mild_bear", "rich", False, "conservative"): "Short Iron Condor",
     ("mild_bear", "rich", False, "moderate"): "Short Iron Condor",
-    ("mild_bear", "rich", True, "aggressive"): "Diagonal Spread (bearish)",
+    ("mild_bear", "rich", True, "aggressive"): "Short Iron Condor",
     ("mild_bear", "rich", True, "conservative"): "Short Iron Condor",
     ("mild_bear", "rich", True, "moderate"): "Short Iron Condor",
     ("mild_bull", "cheap", False, "aggressive"): "Married Put",
@@ -98,7 +99,7 @@ EXPECTED: dict[tuple[str, str, bool, str], str] = {
     ("mild_bull", "rich", False, "aggressive"): "Short Iron Condor",
     ("mild_bull", "rich", False, "conservative"): "Short Iron Condor",
     ("mild_bull", "rich", False, "moderate"): "Short Iron Condor",
-    ("mild_bull", "rich", True, "aggressive"): "Diagonal Spread (bullish)",
+    ("mild_bull", "rich", True, "aggressive"): "Short Iron Condor",
     ("mild_bull", "rich", True, "conservative"): "Short Iron Condor",
     ("mild_bull", "rich", True, "moderate"): "Short Iron Condor",
     ("neutral", "cheap", False, "aggressive"): "Long Straddle",

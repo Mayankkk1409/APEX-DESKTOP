@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -14,6 +15,14 @@ logger = logging.getLogger(__name__)
 # Feature.txt compares market data on a 5-minute cycle. A quote older than that is stale.
 QUOTE_FRESHNESS_SECONDS = 5 * 60
 IV_MISMATCH_VOL_POINTS = 5.0
+# Existing IV-rank bands. Rank above 50 reads rich. Rank below 30 reads cheap.
+IV_RANK_RICH_ABOVE = 50.0
+IV_RANK_CHEAP_BELOW = 30.0
+# Outlook is low conviction when the weighted direction margin is below this.
+DIRECTION_CONVICTION_MARGIN = 8.0
+# Long vega in a sell-premium regime. Not a spread, OI, or staleness cap.
+VEGA_LONG_IN_RICH_PENALTY = 6.0
+LONG_VEGA_RICH_PENALTY = VEGA_LONG_IN_RICH_PENALTY
 PLAIN_LONG_PREMIUM = frozenset(
     {
         "Long Call",
@@ -210,19 +219,243 @@ def inversion_vol_points(front_iv: Any, back_iv: Any) -> float | None:
     return (front - back) * 100.0
 
 
-def classify_vol_regime(*, iv_rank: Any, iv: Any, hv: Any) -> str:
-    """Plain-word regime. Sell premium only when IV rank is above 50 and IV is not below HV."""
+def direction_conviction_margin() -> float:
+    """Weighted technical-minus-sentiment gap below which the outlook is low conviction."""
+    return float(DIRECTION_CONVICTION_MARGIN)
+
+
+def direction_margin_min() -> float:
+    """Same threshold as ``direction_conviction_margin``. Kept as the name the engine calls."""
+    return direction_conviction_margin()
+
+
+def direction_margin(
+    *,
+    technical_direction: str = "neutral",
+    technical_score: float | None = None,
+    tech_score: float | None = None,
+    sentiment_score: float | None = None,
+) -> float | None:
+    """Technical pillar contribution minus sentiment pillar contribution. Weights are not changed."""
+    _ = technical_direction
+    score = technical_score if technical_score is not None else tech_score
+    if isinstance(sentiment_score, bool) or not isinstance(sentiment_score, (int, float)):
+        return None
+    if score is None or isinstance(score, bool) or not isinstance(score, (int, float)):
+        return None
+    if not math.isfinite(float(sentiment_score)) or not math.isfinite(float(score)):
+        return None
+    from app.analysis.layers import APEX_COMPOSITE_WEIGHTS
+
+    return float(score) * float(APEX_COMPOSITE_WEIGHTS["technicals"]) - float(sentiment_score) * float(
+        APEX_COMPOSITE_WEIGHTS["sentiment"]
+    )
+
+
+def term_structure_inversion(front_iv: Any, back_iv: Any) -> bool | None:
+    """True when front IV is at least 1.25 times back IV. None when either leg is missing."""
+    front = _as_fraction(front_iv)
+    back = _as_fraction(back_iv)
+    if front is None or back is None or back <= 0:
+        return None
+    return front / back >= gamma_front_back_iv_ratio_min()
+
+
+def _finite_rank(iv_rank: Any) -> float | None:
+    if isinstance(iv_rank, bool) or not isinstance(iv_rank, (int, float)):
+        return None
+    number = float(iv_rank)
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _rank_view(rank: float | None) -> str | None:
+    if rank is None:
+        return None
+    if rank > IV_RANK_RICH_ABOVE:
+        return "sell"
+    if rank < IV_RANK_CHEAP_BELOW:
+        return "buy"
+    return "neutral"
+
+
+def _primary_view(points: float | None) -> str | None:
+    if points is None:
+        return None
+    band = float(IV_MISMATCH_VOL_POINTS)
+    if points < -band:
+        return "buy"
+    if points > band:
+        return "sell"
+    return "near"
+
+
+def vol_regime_rule_text() -> str:
+    """The one regime rule. Inversion is separate from the IV-versus-HV band."""
+    band = float(IV_MISMATCH_VOL_POINTS)
+    ratio = gamma_front_back_iv_ratio_min()
+    return (
+        f"IV versus HV is primary: more than {band:.0f} vol points below is IV much below HV; "
+        f"within ±{band:.0f} is IV near HV; more than {band:.0f} above is IV much above HV. "
+        f"Front IV at least {ratio:.2f} times back IV is inversion, its own condition. "
+        "IV rank is the tie-break when IV versus HV and IV rank disagree."
+    )
+
+
+@dataclass(frozen=True)
+class VolRegimeAssessment:
+    """Short label plus the frozen verdict. ``label`` stays buy premium, sell premium, or fair."""
+
+    label: str
+    iv_minus_hv_pts: float | None
+    iv_to_hv: float | None
+    iv_rank: float | None
+    verdict: str
+    rule: str
+    inverted: bool
+    tie_break: bool
+
+    @property
+    def short(self) -> str:
+        return self.label
+
+    @property
+    def display(self) -> str:
+        """Card label. The near band stays the word fair. Extremes name the IV-versus-HV verdict."""
+        if self.label == "fair" or self.tie_break:
+            return self.label
+        if self.label == "sell premium":
+            return "IV much above HV"
+        if self.label == "buy premium":
+            return "IV much below HV"
+        return self.label
+
+
+def _pct_text(fraction: float | None) -> str:
+    if fraction is None:
+        return "unavailable"
+    return f"{fraction * 100:.2f}%"
+
+
+def _rank_text(rank: float | None) -> str:
+    if rank is None:
+        return "unavailable"
+    rounded = round(rank, 1)
+    if abs(rounded - round(rounded)) < 1e-9:
+        return str(int(round(rounded)))
+    return f"{rounded:.1f}"
+
+
+def assess_vol_regime(
+    *,
+    iv: Any,
+    hv: Any,
+    iv_rank: Any,
+    front_iv: Any = None,
+    back_iv: Any = None,
+    vol_signal: str | None = None,
+    inversion_flagged: bool = False,
+) -> VolRegimeAssessment:
+    """One regime rule. IV versus HV is primary. IV rank breaks a disagreement."""
     pair_iv = _as_fraction(iv)
     pair_hv = _as_fraction(hv)
-    iv_below_hv = pair_iv is not None and pair_hv is not None and pair_iv < pair_hv
-    rank: float | None = None
-    if isinstance(iv_rank, (int, float)) and not isinstance(iv_rank, bool) and math.isfinite(float(iv_rank)):
-        rank = float(iv_rank)
-    if rank is not None and rank > 50.0 and not iv_below_hv:
-        return "sell premium"
-    if (rank is not None and rank < 30.0) or iv_below_hv:
-        return "buy premium"
-    return "fair"
+    points = None if pair_iv is None or pair_hv is None else (pair_iv - pair_hv) * 100.0
+    ratio = None if pair_iv is None or pair_hv is None or pair_hv <= 0 else pair_iv / pair_hv
+    rank = _finite_rank(iv_rank)
+    primary = _primary_view(points)
+    rank_band = _rank_view(rank)
+    _ = vol_signal
+    front = _as_fraction(front_iv)
+    back = _as_fraction(back_iv)
+    computed_inversion = term_structure_inversion(front_iv, back_iv)
+    if computed_inversion is None:
+        inverted = bool(inversion_flagged)
+        inversion_known = bool(inversion_flagged)
+    else:
+        inverted = computed_inversion
+        inversion_known = True
+
+    chosen = primary
+    tie_break = False
+    if primary is None:
+        iv_below = pair_iv is not None and pair_hv is not None and pair_iv < pair_hv
+        if rank is not None and rank > IV_RANK_RICH_ABOVE and not iv_below:
+            chosen = "sell"
+        elif (rank is not None and rank < IV_RANK_CHEAP_BELOW) or iv_below:
+            chosen = "buy"
+        else:
+            chosen = "near"
+    elif primary == "near" and rank_band in {"sell", "buy"}:
+        chosen = rank_band
+        tie_break = True
+    elif primary in {"sell", "buy"} and rank_band in {"sell", "buy"} and rank_band != primary:
+        chosen = rank_band
+        tie_break = True
+
+    label = {"sell": "sell premium", "buy": "buy premium", "near": "fair"}[chosen or "near"]
+    headline = {
+        "sell": "rich, IV much above HV",
+        "buy": "IV much below HV",
+        "near": "IV near HV",
+    }[chosen or "near"]
+    rule = vol_regime_rule_text()
+    if points is None:
+        primary_sentence = "IV versus HV cannot be computed because IV or HV is missing."
+    else:
+        primary_sentence = (
+            f"30-day ATM IV {_pct_text(pair_iv)} versus HV {_pct_text(pair_hv)} "
+            f"({points:.2f} vol points, {ratio:.2f}x)."
+        )
+    if rank is None:
+        rank_sentence = "IV rank is unavailable, so it cannot break a tie."
+    elif tie_break:
+        rank_sentence = (
+            f"IV versus HV and IV rank {_rank_text(rank)} disagree, so IV rank breaks the tie."
+        )
+    elif rank_band == "neutral" and primary in {"sell", "buy"}:
+        rank_sentence = (
+            f"IV rank {_rank_text(rank)} is between {IV_RANK_CHEAP_BELOW:.0f} and {IV_RANK_RICH_ABOVE:.0f}, "
+            "so it does not disagree with the primary test."
+        )
+    else:
+        rank_sentence = f"IV rank {_rank_text(rank)} agrees with the primary test."
+    if not inversion_known:
+        inversion_sentence = "Term-structure inversion was not tested because front IV or back IV is missing."
+    elif front is None or back is None or back <= 0:
+        inversion_sentence = (
+            "Term-structure inversion was supplied without both front IV and back IV."
+            if inverted
+            else "Term structure is not inverted."
+        )
+    elif inverted:
+        inversion_sentence = (
+            f"Term structure is inverted: front IV {_pct_text(front)} is "
+            f"{front / back:.2f}x back IV {_pct_text(back)} "
+            f"(threshold {gamma_front_back_iv_ratio_min():.2f}x)."
+        )
+    else:
+        inversion_sentence = (
+            f"Term structure is not inverted: front IV {_pct_text(front)} is "
+            f"{front / back:.2f}x back IV {_pct_text(back)} "
+            f"(threshold {gamma_front_back_iv_ratio_min():.2f}x)."
+        )
+    verdict = f"{headline}. {primary_sentence} {rank_sentence} {inversion_sentence} Rule: {rule}"
+    return VolRegimeAssessment(
+        label=label,
+        iv_minus_hv_pts=None if points is None else round(points, 2),
+        iv_to_hv=None if ratio is None else round(ratio, 2),
+        iv_rank=None if rank is None else round(rank, 1),
+        verdict=verdict,
+        rule=rule,
+        inverted=inverted,
+        tie_break=tie_break,
+    )
+
+
+def classify_vol_regime(*, iv_rank: Any, iv: Any, hv: Any) -> str:
+    """Short regime label from the one IV-versus-HV rule."""
+    return assess_vol_regime(iv=iv, hv=hv, iv_rank=iv_rank).label
 
 
 def hysteresis_action(
