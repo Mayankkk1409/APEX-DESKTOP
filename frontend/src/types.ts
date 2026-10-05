@@ -364,6 +364,12 @@ export interface StrategyLayer {
   validation_errors?: Array<{ check?: string; expected?: string; actual?: string }>;
   auto_exec_line?: string | null;
   auto_exec_blocked?: boolean;
+  auto_execute_eligible?: boolean;
+  structure_label?: string | null;
+  placeable?: boolean;
+  quote_not_current?: boolean;
+  quote_as_of?: string | null;
+  block_reason?: string | null;
   checks_passed?: boolean;
   execution_banner?: string | null;
   how_to_execute: string;

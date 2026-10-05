@@ -9,6 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.trading import Order, Position
 from app.models.user import User
+from app.services.executability import (
+    DEFAULT_SPREAD_MAX,
+    load_submission_quote,
+    marketable_limit,
+    slippage_dollars,
+    spread_confirmation_text,
+    spread_vs_mid,
+)
 from app.services.occ_symbol import parse_occ
 from app.services.orders import account_impact, estimate_order_cost
 from app.strategies.registry import get_strategy_spec, resolve_strategy_id
@@ -165,7 +173,34 @@ async def execute_market_fill(
     strict: bool = False,
     mark_price: float | None = None,
     routing: dict[str, Any] | None = None,
+    spread_confirmed: bool = False,
+    spread_max: float = DEFAULT_SPREAD_MAX,
+    submission_path: str = "market_fill",
+    skip_quote_check: bool = False,
 ) -> Order:
+    if not skip_quote_check:
+        from app.services.executability import enforce_submission_quotes, marketable_limit
+
+        await enforce_submission_quotes(
+            adapter,
+            [symbol],
+            path=submission_path,
+            spread_confirmed=spread_confirmed,
+            contracts=qty,
+            multiplier=position_multiplier(asset_class),
+            spread_max=spread_max,
+        )
+        if asset_class == "us_option":
+            quote = await adapter.quote(symbol)
+            live = marketable_limit(side, quote)
+            live_limit = live[0] if live is not None else None
+            if live_limit is not None:
+                order_type = "limit"
+                limit_price = live_limit
+            elif order_type != "limit":
+                order_type = "limit"
+                if limit_price is None:
+                    limit_price = _positive_mark(getattr(quote, "price", None))
     mark = _positive_mark(mark_price)
     if asset_class == "us_option" and mark is not None:
         px = mark
@@ -283,12 +318,30 @@ async def execute_strategy_legs(
     equity_satisfied: bool = False,
     checks_passed: bool | None = None,
     auto_execute: bool = False,
+    spread_confirmed: bool = False,
+    spread_max: float = DEFAULT_SPREAD_MAX,
+    submission_path: str = "strategy_legs",
+    wide_spread_only: bool = False,
 ) -> list[Order]:
     """Fill stock first, then options. A short call is sent only after covering shares are in place."""
     from app.analysis.gate_config import refuse_if_checks_failed
+    from app.services.executability import enforce_submission_quotes, order_symbols
     from app.services.stock_leg import SHORT_STOCK_INFEASIBLE, is_short_call, partition_option_legs
 
-    refuse_if_checks_failed(checks_passed=checks_passed, auto_execute=auto_execute)
+    if checks_passed is False and not (wide_spread_only and spread_confirmed):
+        try:
+            refuse_if_checks_failed(checks_passed=checks_passed, auto_execute=auto_execute)
+        except ValueError as exc:
+            logger.warning("order blocked reason={}", exc)
+            raise
+    await enforce_submission_quotes(
+        adapter,
+        order_symbols(legs, *[str((row or {}).get("symbol") or "") for row in (equity_legs or [])]),
+        path=submission_path,
+        spread_confirmed=spread_confirmed,
+        contracts=contracts_per_leg,
+        spread_max=spread_max,
+    )
     if not legs and not equity_legs:
         raise ValueError("Strategy legs are required for execution")
     if strategy_name and certificate:
@@ -369,6 +422,8 @@ async def execute_strategy_legs(
             strict=strict and not use_paper,
             mark_price=marks.get(symbol) if asset_class == "us_option" else None,
             routing=routing,
+            spread_confirmed=spread_confirmed,
+            spread_max=spread_max,
         )
 
     def _holdback(exc: Exception, *, short_leg: bool) -> ValueError:
@@ -424,6 +479,8 @@ async def execute_strategy_legs(
                     strategy_name=strategy_name,
                     certificate=certificate,
                     marks=marks,
+                    spread_confirmed=spread_confirmed,
+                    spread_max=spread_max,
                 )
             )
             return orders
@@ -591,6 +648,8 @@ async def _execute_combo(
     strategy_name: str | None,
     certificate: dict[str, Any] | None,
     marks: dict[str, float],
+    spread_confirmed: bool = False,
+    spread_max: float = DEFAULT_SPREAD_MAX,
 ) -> Order:
     """One limit combo at the net mid. A rejection is not split into market orders."""
     net = combo_net_mid(legs, marks)

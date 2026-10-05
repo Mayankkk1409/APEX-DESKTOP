@@ -8,6 +8,7 @@ export function RiskReviewLegs({ rows }: { rows: OptionReviewRow[] }) {
         <li key={`${leg.side}-${leg.symbol}`} className="rounded border border-line/60 px-3 py-2 font-mono text-xs" data-testid="strategy-leg">
           <span data-testid="strategy-leg-side">{leg.sideLabel}</span>{" "}
           <span data-testid="strategy-leg-contracts">{leg.contracts}</span>
+          {leg.optionSide ? " contract" : ""}
           {" × "}
           <span data-testid="strategy-leg-occ">{leg.symbol}</span>
           {leg.optionSide && leg.strike != null

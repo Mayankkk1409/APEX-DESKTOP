@@ -207,11 +207,21 @@ def plan_stock(
             source = "partial holdings; live ask was not on the quote"
 
     if order_qty == 0:
-        basis_txt = f" at cost basis {_fmt(basis)}" if basis is not None else ". Cost basis is not on the position"
-        note = f"Using {used} shares already held{basis_txt}. No additional shares are bought."
+        basis_txt = (
+            f" Cost basis {_fmt(basis)}."
+            if basis is not None
+            else " Cost basis is not on the position."
+        )
+        note = (
+            f"Uses {used} of your {holdings.shares_long} shares. "
+            f"Using {used} shares already held.{basis_txt} No additional shares are bought."
+        )
     elif used:
         basis_txt = f" at cost basis {_fmt(basis)}" if basis is not None else ""
-        note = f"Using {used} shares already held{basis_txt}. Buying {order_qty} shares to cover the shortfall."
+        note = (
+            f"Uses {used} of your {holdings.shares_long} shares. "
+            f"Buying {order_qty} shares to cover the shortfall{basis_txt}."
+        )
     else:
         ask_txt = f" at the live ask {_fmt(ask_dec)}" if ask_dec is not None else ""
         if ask_dec is None:
@@ -326,6 +336,7 @@ def apply_equity_holdings(
         leg["quantity"] = plan.shares_required
         leg["order_qty"] = plan.order_qty
         leg["shares_used"] = plan.shares_used
+        leg["shares_held"] = holdings.shares_long
         leg["already_held"] = plan.order_qty == 0 and plan.shares_used > 0
         leg["position_intent"] = plan.position_intent
         leg["action"] = "sell" if side == "sell" and plan.order_qty else leg.get("action") or ("sell" if side == "sell" else "buy")
@@ -392,6 +403,17 @@ def submission_equity(
         plan.note,
         False,
     )
+
+
+def leg_completeness_error(strategy_name: str | None, legs: list[Any]) -> str | None:
+    """Fail when the built legs do not match the registry template count."""
+    spec = get_strategy_spec(strategy_name or "")
+    if spec is None or spec.leg_count <= 0 or not spec.tradeable:
+        return None
+    count = sum(1 for leg in legs if isinstance(leg, dict) and leg.get("side"))
+    if count == spec.leg_count:
+        return None
+    return f"Leg count {count} does not match the {spec.display_name} template ({spec.leg_count})."
 
 
 def is_short_call(leg: dict[str, Any]) -> bool:
@@ -486,9 +508,11 @@ def build_order_ticket(
                 "expiry": leg.get("expiry"),
                 "asset_class": "us_option",
                 "order_type": order_type,
-                "price": limit_price if order_type == "limit" and limit_price is not None else leg.get("mid"),
+                "price": leg.get("mid") if leg.get("mid") is not None else limit_price,
                 "limit_price": limit_price if order_type == "limit" else None,
                 "limit_basis": leg.get("limit_basis") if order_type == "limit" else None,
+                "quote_as_of": leg.get("quote_as_of"),
+                "quoted_side": leg.get("quoted_side"),
             }
         )
     return strategy_legs, equity_legs

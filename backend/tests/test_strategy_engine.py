@@ -693,7 +693,9 @@ def test_aapl_bull_put_legs_keep_structure_name_and_payoff() -> None:
     assert "23.34%" in layer["why_it_fits"]
     assert "22.46%" in layer["why_it_fits"]
     # These quotes are 16.7% and 26.3% of mid. Rule 2 rejects a credit spread wider than 10%.
-    assert layer["auto_exec_line"] is None
+    assert layer["auto_exec_line"]
+    assert "Auto-execute eligible" not in layer["auto_exec_line"]
+    assert "spread" in layer["auto_exec_line"].lower()
     assert layer["execution_banner"] == "NOT EXECUTABLE"
     assert layer["tradeable"] is False
     assert layer["auto_exec_blocked"] is True
@@ -768,7 +770,10 @@ def test_score_below_threshold_still_returns_the_structure() -> None:
     )
     assert layer["selected_strategy"] == "Bull Call Spread"
     assert layer["metrics"]["legs"]
-    assert layer["auto_exec_line"] is None
+    assert layer["auto_exec_line"]
+    assert "Auto-execute eligible" not in layer["auto_exec_line"]
+    assert "62" in layer["auto_exec_line"]
+    assert "70" in layer["auto_exec_line"]
     assert "manual review required" in layer["why_recommended"]
 
 

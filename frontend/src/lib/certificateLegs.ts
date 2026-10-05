@@ -28,7 +28,7 @@ export function legFromOrderFill(leg: OrderLegFill): CertificateLegDisplay {
     optionSide: parsed?.side,
     longShort: formatLegSide(leg.qty, leg.side),
     premium: leg.fill_price,
-    orderType: leg.order_type ?? "market",
+    orderType: leg.order_type ?? "limit",
   };
 }
 
@@ -72,7 +72,7 @@ export function strategyLegToDisplay(leg: StrategyLeg, index: number): Certifica
     optionSide: (leg.side as "call" | "put" | undefined) ?? parsed?.side,
     longShort,
     premium: leg.mid,
-    orderType: leg.order_type ?? "market",
+    orderType: leg.order_type ?? "limit",
   };
 }
 

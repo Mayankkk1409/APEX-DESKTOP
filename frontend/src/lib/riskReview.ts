@@ -1,28 +1,30 @@
 /**
  * Acknowledge vs Place Trade.
- * The saved minimum is the score gate. A browser-only auto-exec toggle is not.
- * `serverAutoExecEnabled === false` is honored only when that switch is stored on the server.
+ * Eligibility is the server decision: composite >= the saved minimum, executable,
+ * and pre-trade validation passed. A score by itself does not arm Acknowledge.
  */
 export function autoSubmitArms(input: {
   /** Ignored. Kept so callers can show the browser toggle is not a second gate. */
   toggleOn?: boolean;
-  /** Scan `auto_submit_on_ack`. */
+  /** Scan `auto_execute_eligible` / `auto_submit_on_ack` from the shared function. */
   serverAutoSubmit?: boolean;
   /** `false` only when Settings persisted auto-execution off on the server. */
   serverAutoExecEnabled?: boolean | null;
   composite: number | null | undefined;
   threshold: number;
   definedRisk: boolean;
+  /** False when the strategy slide would say the structure cannot be placed. */
+  executable?: boolean;
+  /** False when pre-trade validation failed. */
+  validationPassed?: boolean;
 }): boolean {
   if (input.serverAutoExecEnabled === false) return false;
+  if (input.executable === false || input.validationPassed === false) return false;
+  if (input.serverAutoSubmit !== true) return false;
+  if (!input.definedRisk) return false;
   const composite = input.composite;
-  if (composite != null && Number.isFinite(composite) && Number.isFinite(input.threshold)) {
-    if (composite < input.threshold) return false;
-    if (input.serverAutoSubmit === true) return true;
-    if (!input.definedRisk) return false;
-    return composite >= input.threshold;
-  }
-  return input.serverAutoSubmit === true;
+  if (composite == null || !Number.isFinite(composite) || !Number.isFinite(input.threshold)) return false;
+  return composite >= input.threshold;
 }
 
 function formatGateScore(value: number): string {
@@ -37,20 +39,27 @@ export function manualConfirmationNote(score: number, minimum: number): string {
 
 export const AUTO_EXECUTION_OFF_NOTE = "Auto-execution is off.";
 
-/** Shown when the displayed composite is at or above the saved minimum. */
+/** Shown when the shared decision says the trade may auto-execute. */
 export function autoExecEligibilityLine(score: number, minimum: number): string {
-  return `Composite score ${formatGateScore(score)} · Your auto-execute minimum ${formatGateScore(minimum)} · Auto-execute eligible`;
+  return `Composite ${formatGateScore(score)}. Your minimum ${formatGateScore(minimum)}. Auto-execute eligible.`;
+}
+
+/** Same sentence the server uses when the trade must not auto-execute. */
+export function blockedEligibilityLine(score: number, minimum: number, reason: string): string {
+  const detail = reason.replace(/\.$/, "");
+  return `Composite ${formatGateScore(score)}. Your minimum ${formatGateScore(minimum)}. Not auto-executable: ${detail}.`;
 }
 
 export type OrderPlacement = {
   autoSubmitOnAck: boolean;
   placeTradeEnabled: boolean;
+  acknowledgeEnabled: boolean;
   note: string | null;
 };
 
 /**
- * The saved minimum chooses acknowledgement auto-submit versus an enabled Place Trade.
- * It does not decide whether a recommendation exists.
+ * The shared server decision chooses acknowledgement.
+ * A score at or above the minimum does not, when the structure is not executable.
  */
 export function orderPlacement(input: {
   toggleOn?: boolean;
@@ -60,28 +69,48 @@ export function orderPlacement(input: {
   threshold: number;
   definedRisk: boolean;
   hasLegs: boolean;
+  executable?: boolean;
+  validationPassed?: boolean;
+  placeable?: boolean;
+  spreadConfirmationRequired?: boolean;
+  spreadConfirmed?: boolean;
+  blockReason?: string | null;
 }): OrderPlacement {
+  const blockedNote = input.blockReason?.trim() || null;
   if (!input.hasLegs) {
-    return { autoSubmitOnAck: false, placeTradeEnabled: false, note: null };
+    return { autoSubmitOnAck: false, placeTradeEnabled: false, acknowledgeEnabled: false, note: blockedNote };
+  }
+  if (input.placeable === false) {
+    return { autoSubmitOnAck: false, placeTradeEnabled: false, acknowledgeEnabled: false, note: blockedNote };
+  }
+  if (input.executable === false && !input.spreadConfirmationRequired) {
+    return { autoSubmitOnAck: false, placeTradeEnabled: false, acknowledgeEnabled: false, note: blockedNote };
+  }
+  if (input.validationPassed === false && !input.spreadConfirmationRequired) {
+    return { autoSubmitOnAck: false, placeTradeEnabled: false, acknowledgeEnabled: false, note: blockedNote };
+  }
+  if (input.spreadConfirmationRequired && !input.spreadConfirmed) {
+    return { autoSubmitOnAck: false, placeTradeEnabled: false, acknowledgeEnabled: false, note: blockedNote };
   }
   const autoSubmitOnAck = autoSubmitArms(input);
   if (autoSubmitOnAck) {
-    return { autoSubmitOnAck: true, placeTradeEnabled: false, note: null };
+    return { autoSubmitOnAck: true, placeTradeEnabled: false, acknowledgeEnabled: true, note: null };
   }
   const below =
     input.composite != null &&
     Number.isFinite(input.composite) &&
     Number.isFinite(input.threshold) &&
     input.composite < input.threshold;
-  let note: string | null = null;
-  if (below && input.composite != null) {
-    note = manualConfirmationNote(input.composite, input.threshold);
-  } else if (input.serverAutoExecEnabled === false) {
+  let note: string | null = blockedNote;
+  if (input.serverAutoExecEnabled === false) {
     note = AUTO_EXECUTION_OFF_NOTE;
+  } else if (!note && below && input.composite != null) {
+    note = manualConfirmationNote(input.composite, input.threshold);
   }
   return {
     autoSubmitOnAck: false,
     placeTradeEnabled: true,
+    acknowledgeEnabled: false,
     note,
   };
 }

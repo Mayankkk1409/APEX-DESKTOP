@@ -27,12 +27,18 @@ from app.analysis.gate_config import (
     rule1_theta_failures,
 )
 from app.analysis.options_rules import daily_theta_per_share
+from app.services.executability import (
+    can_auto_execute,
+    eligibility_sentence,
+    order_candidates_by_executability,
+    quote_age_phrase,
+    split_block_notes,
+)
 from app.services.strategy_recommendation import (
     DEFINED_RISK_PLAYBOOK,
     MarketSnapshot,
     StrategyRecommendation,
     TechnicalAnalysisResultRef,
-    auto_exec_status_line,
     earnings_position_note,
     format_iv_rank,
     format_vol_percent,
@@ -745,6 +751,7 @@ def strategy_decision(
     structure_limits: frozenset[str] | None = None,
     rule_context: dict[str, Any] | None = None,
     sentiment_bias: str | None = None,
+    executable_by_name: dict[str, bool] | None = None,
 ) -> StrategyRecommendation:
     """One Best Match. Risk notes stay beside the structure and do not replace it."""
     from app.services.apex_strategy import ApexStrategyInput
@@ -783,6 +790,33 @@ def strategy_decision(
         rule_context=rule_context,
         sentiment_bias=sentiment_bias,
     )
+    return _prefer_executable_match(rec, executable_by_name)
+
+
+def _prefer_executable_match(
+    rec: StrategyRecommendation,
+    executable_by_name: dict[str, bool] | None,
+) -> StrategyRecommendation:
+    """A failing candidate does not stay ahead of an executable one with a close score.
+
+    With no per-name flags the recommendation is unchanged. When every name fails,
+    the best-ranked real strategy stays in place.
+    """
+    if not executable_by_name:
+        return rec
+    ordered = order_candidates_by_executability(rec.candidates, executable_by_name)
+    rec.candidates = ordered
+    viable = [c for c in ordered if c.defined_risk and c.eligible and executable_by_name.get(c.name, False)]
+    if not viable:
+        return rec
+    winner = viable[0]
+    if winner.name == rec.best_match:
+        return rec
+    current = next((c for c in ordered if c.name == rec.best_match), None)
+    if current is not None and executable_by_name.get(current.name, False):
+        return rec
+    rec.best_match = winner.name
+    rec.leg_structure = winner.name
     return rec
 
 
@@ -1686,6 +1720,17 @@ def _strike(leg: dict[str, Any]) -> float | None:
     return float(raw)
 
 
+def _structure_label(strategy_name: str, metrics: dict[str, Any]) -> str:
+    """Shares already held make a long put a protective put. The registry name stays Married Put."""
+    if strategy_name != "Married Put":
+        return strategy_name
+    covered = bool(metrics.get("equity_covered_by_holdings"))
+    for leg in metrics.get("legs") or []:
+        if isinstance(leg, dict) and leg.get("side") == "stock" and (leg.get("already_held") or covered):
+            return "Protective Put"
+    return strategy_name
+
+
 def structure_name_from_legs(legs: list[dict[str, Any]] | None) -> str | None:
     """Map built option legs to an existing registry display name."""
     rows = [leg for leg in (legs or []) if isinstance(leg, dict)]
@@ -2440,29 +2485,124 @@ def spread_rule_failures(legs: list[dict[str, Any]], contracts: list[dict[str, A
 
 
 def _apply_mid_limits(metrics: dict[str, Any], contracts: list[dict[str, Any]]) -> list[str]:
-    """Limit option legs at the live bid/ask mid when the card cites the spread rule."""
+    """Marketable limit from the live ask (buy) or bid (sell). Never a market order."""
+    from app.services.executability import marketable_limit
+
     missing: list[str] = []
     for leg in metrics.get("legs") or []:
         if not isinstance(leg, dict) or leg.get("side") not in {"call", "put"}:
             continue
         source = _contract_for_leg(leg, contracts)
         bid, ask = source.get("bid"), source.get("ask")
-        if not (
+        action = str(leg.get("action") or "").lower()
+        priced = marketable_limit(action, {"bid": bid, "ask": ask})
+        limit, basis = priced if priced is not None else (None, None)
+        quoted = source.get("quote_as_of") or source.get("as_of") or leg.get("quote_as_of")
+        if limit is None or basis is None:
+            if leg.get("order_type") != "limit":
+                mid = leg.get("mid")
+                if isinstance(mid, (int, float)) and not isinstance(mid, bool) and mid > 0:
+                    leg["order_type"] = "limit"
+                    leg["limit_price"] = round(float(mid), 2)
+                    leg["limit_basis"] = "mid"
+                    leg["order_note"] = "limit at mid"
+                else:
+                    missing.append(str(leg.get("symbol") or leg.get("side") or "option"))
+            if quoted:
+                leg["quote_as_of"] = quoted
+            continue
+        leg["order_type"] = "limit"
+        leg["limit_price"] = limit
+        leg["limit_basis"] = basis
+        leg["order_note"] = "limit at the ask" if basis == "ask" else "limit at the bid"
+        if quoted:
+            leg["quote_as_of"] = quoted
+    return missing
+
+
+def _apply_marketable_limits(metrics: dict[str, Any], contracts: list[dict[str, Any]]) -> None:
+    """Option legs are limits at the live ask (buy) or bid (sell). Never a market order."""
+    for leg in metrics.get("legs") or []:
+        if not isinstance(leg, dict) or leg.get("side") not in {"call", "put"}:
+            continue
+        source = _contract_for_leg(leg, contracts)
+        action = str(leg.get("action") or "").lower()
+        quoted = source.get("quote_as_of") or leg.get("quote_as_of")
+        if quoted:
+            leg["quote_as_of"] = quoted
+        bid, ask = source.get("bid"), source.get("ask")
+        if (
             isinstance(bid, (int, float))
             and not isinstance(bid, bool)
             and isinstance(ask, (int, float))
             and not isinstance(ask, bool)
-            and bid > 0
-            and ask > 0
+            and float(bid) > 0
+            and float(ask) > 0
+            and float(ask) >= float(bid)
+            and action in {"buy", "sell"}
         ):
-            missing.append(str(leg.get("symbol") or leg.get("side") or "option"))
+            if action == "buy":
+                leg["limit_price"] = round(float(ask), 2)
+                leg["limit_basis"] = "ask"
+                leg["order_note"] = "limit at the ask"
+                leg["quoted_side"] = "ask"
+            else:
+                leg["limit_price"] = round(float(bid), 2)
+                leg["limit_basis"] = "bid"
+                leg["order_note"] = "limit at the bid"
+                leg["quoted_side"] = "bid"
+            leg["order_type"] = "limit"
             continue
-        mid = round((float(bid) + float(ask)) / 2.0, 2)
-        leg["order_type"] = "limit"
-        leg["limit_price"] = mid
-        leg["limit_basis"] = "mid"
-        leg["order_note"] = "limit at mid"
-    return missing
+        mid = leg.get("mid")
+        if isinstance(mid, (int, float)) and not isinstance(mid, bool) and float(mid) > 0:
+            leg["order_type"] = "limit"
+            leg["limit_price"] = round(float(mid), 2)
+            leg["limit_basis"] = leg.get("limit_basis") or "mid"
+            leg["order_note"] = leg.get("order_note") or "limit from the scan mid; live bid/ask was not on the quote"
+
+
+def _stale_quote_phrase(legs: list[dict[str, Any]], contracts: list[dict[str, Any]]) -> str | None:
+    oldest: tuple[float, str] | None = None
+    clock = datetime.now(timezone.utc)
+    for leg in legs:
+        if not isinstance(leg, dict):
+            continue
+        source = _contract_for_leg(leg, contracts)
+        raw = source.get("quote_as_of") or leg.get("quote_as_of")
+        if not quote_is_stale(raw, now=clock):
+            continue
+        phrase = quote_age_phrase(raw, now=clock)
+        if not phrase:
+            continue
+        parsed = str(raw)
+        age = 0.0
+        try:
+            stamp = datetime.fromisoformat(parsed.replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            age = (clock - stamp).total_seconds()
+        except ValueError:
+            age = 0.0
+        if oldest is None or age > oldest[0]:
+            oldest = (age, f"Quote not current. {phrase}. Quoted {parsed}.")
+    return oldest[1] if oldest else None
+
+
+def _protective_put_label(legs: list[dict[str, Any]], *, covered: bool) -> str | None:
+    """Shares already held plus one long put. The label comes from the legs."""
+    if not covered:
+        return None
+    rows = [leg for leg in legs if isinstance(leg, dict)]
+    stock = [leg for leg in rows if leg.get("side") == "stock"]
+    puts = [
+        leg
+        for leg in rows
+        if leg.get("side") == "put" and str(leg.get("action") or "").lower() == "buy"
+    ]
+    calls = [leg for leg in rows if leg.get("side") == "call"]
+    if len(stock) == 1 and len(puts) == 1 and not calls:
+        return "Protective Put"
+    return None
 
 
 def _earnings_inputs(
@@ -2650,9 +2790,9 @@ def build_strategy_layer(
                 + ", ".join(missing_mids)
                 + "."
             )
-        elif "limit at the live mid" not in execution:
+        elif "limit at the live bid or ask" not in execution:
             execution = (
-                f"{execution} Option orders are a limit at the live mid, priced from the bid/ask."
+                f"{execution} Option orders are a limit at the live bid or ask."
             ).strip()
     spread_cap = None
     if strategy_name in CREDIT_STRUCTURES:
@@ -2664,8 +2804,19 @@ def build_strategy_layer(
             source = _contract_for_leg(leg, chain_rows)
             spread_pct = _leg_spread_pct(source)
             if spread_pct is not None and spread_pct >= spread_cap:
+                bid, ask = source.get("bid"), source.get("ask")
+                slip = ""
+                if (
+                    isinstance(bid, (int, float))
+                    and not isinstance(bid, bool)
+                    and isinstance(ask, (int, float))
+                    and not isinstance(ask, bool)
+                    and float(ask) >= float(bid)
+                ):
+                    dollars = round((float(ask) - float(bid)) / 2.0 * 100.0, 2)
+                    slip = f" Estimated slippage is ${dollars:.2f}."
                 block_notes.append(
-                    f"bid/ask spread is {spread_pct * 100:.1f}% of mid, not below {spread_cap * 100:.0f}%"
+                    f"bid/ask spread is {spread_pct * 100:.1f}% of mid, not below {spread_cap * 100:.0f}%.{slip}"
                 )
     # IV < HV belongs to Rule 1 names only. Copy that mentions the old theta line does not apply it.
     if not validation_blocked and strategy_name in PLAIN_LONG_PREMIUM:
@@ -2688,6 +2839,13 @@ def build_strategy_layer(
     spot_px = chain_analysis.get("spot") if isinstance(chain_analysis.get("spot"), (int, float)) else None
     if option_legs:
         block_notes.extend(suspect_quote_failures(option_legs, chain_rows, spot=spot_px))
+    stale_phrase = _stale_quote_phrase(option_legs, chain_rows)
+    if stale_phrase:
+        block_notes = [
+            stale_phrase if ("stale" in note.lower() or "suspect" in note.lower()) else note
+            for note in block_notes
+        ]
+    _apply_marketable_limits(metrics, chain_rows)
     exit_level = printed_exit_level(execution)
     if exit_level is not None and composite < exit_level:
         block_notes.append(
@@ -2740,6 +2898,15 @@ def build_strategy_layer(
         if note not in deduped_notes:
             deduped_notes.append(note)
     notes = deduped_notes
+    from app.services.stock_leg import leg_completeness_error
+
+    completeness = leg_completeness_error(strategy_name, metrics.get("legs") or [])
+    if completeness:
+        block_notes.append(completeness)
+        validation_blocked = True
+        if completeness not in notes:
+            notes.append(completeness)
+    _apply_mid_limits(metrics, chain_rows)
     auto_exec_blocked = bool(block_notes) or validation_blocked
     checks_passed = not auto_exec_blocked
     position_action = hysteresis_action(composite, in_position=in_position)
@@ -2834,7 +3001,44 @@ def build_strategy_layer(
         and not validation_blocked
         and not auto_exec_blocked
     )
-    status_line = auto_exec_status_line(composite, auto_exec_threshold, defined_risk=score_clears)
+    hard_blocks, spread_blocks = split_block_notes(block_notes)
+    if validation_blocked and not hard_blocks:
+        hard_blocks = ["Pre-trade validation did not pass."]
+    placeable = not validation_blocked and not hard_blocks
+    executable_flag = bool(placeable and not spread_blocks and defined and not auto_exec_blocked)
+    validation_flag = not validation_blocked and not hard_blocks
+    exec_reason = None
+    if not executable_flag:
+        if hard_blocks:
+            exec_reason = hard_blocks[0]
+        elif spread_blocks:
+            exec_reason = spread_blocks[0]
+        elif not defined:
+            exec_reason = "The structure is not defined risk."
+        elif block_notes:
+            exec_reason = block_notes[0]
+        else:
+            exec_reason = "Not executable."
+    decision = can_auto_execute(
+        {
+            "composite_score": composite,
+            "executable": executable_flag,
+            "validation_passed": validation_flag,
+            "executability_reason": exec_reason,
+            "validation_reason": hard_blocks[0] if not validation_flag else None,
+        },
+        {"auto_execution_threshold": auto_exec_threshold},
+    )
+    status_line = eligibility_sentence(composite, auto_exec_threshold, decision)
+    structure_label = _protective_put_label(
+        metrics.get("legs") or [],
+        covered=bool(metrics.get("equity_covered_by_holdings")),
+    )
+    quote_not_current = any("quote not current" in note.lower() for note in hard_blocks)
+    quote_as_of = None
+    for leg in option_legs:
+        source = _contract_for_leg(leg, chain_rows)
+        quote_as_of = source.get("quote_as_of") or leg.get("quote_as_of") or quote_as_of
     fit = " ".join(why_parts)
     return {
         "title": "Strategy playbook",
@@ -2843,6 +3047,7 @@ def build_strategy_layer(
         "execution_banner": None if checks_passed else NOT_EXECUTABLE,
         "execution_tier": tier,
         "selected_strategy": strategy_name,
+        "structure_label": structure_label,
         "composite_score": composite,
         "clears_threshold": score_clears,
         "position_action": position_action,
@@ -2863,6 +3068,14 @@ def build_strategy_layer(
         "how_to_execute": execution,
         "risk_notes": notes,
         "auto_exec_line": status_line,
+        "auto_execute_eligible": decision.eligible,
+        "auto_exec_reasons": decision.reasons,
+        "placeable": placeable,
+        "hard_block_reasons": hard_blocks,
+        "spread_block_reasons": spread_blocks,
+        "block_reason": (hard_blocks or spread_blocks or [None])[0],
+        "quote_not_current": quote_not_current,
+        "quote_as_of": quote_as_of,
         "metrics": metrics,
         "validation_errors": validation_errors,
         "narrative": f"Recommended: {strategy_name}. {summary} {execution}",

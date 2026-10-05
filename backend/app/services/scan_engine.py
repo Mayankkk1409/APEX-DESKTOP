@@ -26,11 +26,8 @@ from app.services.strategy_engine import (
     _risk_score,
     _strategy_requires_back_month,
 )
-from app.services.strategy_recommendation import (
-    allows_auto_execution,
-    is_defined_risk_strategy,
-    selection_rationale_for,
-)
+from app.services.executability import CLOSE_SCORE_GAP
+from app.services.strategy_recommendation import is_defined_risk_strategy
 from app.analysis.options_rules import daily_theta_per_share, delta_theta_ratio
 from app.services.volatility_intel import build_volatility_payload
 
@@ -511,6 +508,32 @@ def build_layers(
     )
     if layer_composite != composite:
         _restore_scored_strategy_layer(strategy_layer, composite, auto_execution_threshold)
+    strategy, strategy_layer = _promote_close_executable(
+        strategy,
+        strategy_layer,
+        decision,
+        build=lambda name: _scored_strategy_layer(
+            name,
+            composite=composite,
+            layer_composite=layer_composite,
+            direction=direction,
+            vol_signal=vol_signal,
+            chain_analysis=chain_analysis,
+            vol_layer=vol_layer,
+            sentiment_layer=sentiment_payload,
+            fundamentals_layer=fundamentals_payload,
+            tech_score=tech_score,
+            auto_execution_threshold=auto_execution_threshold,
+            back_month_rows=back_month_rows,
+            back_expiry=back_expiry,
+            ticker=snapshot.symbol,
+            gate_reason=decision.gate_reason,
+            leg_structure=decision.leg_structure,
+            strategies_evaluated=decision.strategies_evaluated,
+            risk_notes=list(decision.risk_notes),
+            candidates=decision.candidates,
+        ),
+    )
     execution_tier = "auto_exec" if composite >= auto_execution_threshold else "caution"
     strategy_legs = []
     equity_legs = []
@@ -543,19 +566,8 @@ def build_layers(
                 + ["Pre-trade check equity_leg_required: expected stock leg for simultaneous equity strategy; actual missing."],
             }
             strategy_legs = []
-    displayed_name = str(strategy_layer.get("selected_strategy") or strategy)
-    defined_risk = is_defined_risk_strategy(displayed_name)
-    auto_submit_on_ack = (
-        bool(strategy_layer.get("tradeable"))
-        and not strategy_layer.get("auto_exec_blocked")
-        and bool(decision.auto_exec_eligible)
-        and allows_auto_execution(
-            displayed_name,
-            execution_tier=execution_tier,
-            composite=composite,
-            auto_exec_threshold=auto_execution_threshold,
-        )
-    )
+    defined_risk = is_defined_risk_strategy(str(strategy_layer.get("selected_strategy") or strategy))
+    auto_submit_on_ack = bool(strategy_layer.get("auto_execute_eligible"))
     layers: dict[str, Any] = {
         DeepScanLayer.TECHNICAL: {
             "title": "Technical — captured chart snapshot",
@@ -754,7 +766,11 @@ def build_layers(
             "equity_legs": equity_legs,
             "equity_required": bool(strat_spec and strat_spec.equity_required),
             "equity_note": strategy_layer.get("equity_note"),
-            "block_reason": None if strategy_legs else _order_block_reason(strategy_layer),
+            "block_reason": (
+                strategy_layer.get("block_reason")
+                if strategy_layer.get("placeable") is False
+                else (None if strategy_legs else _order_block_reason(strategy_layer))
+            ),
             "contracts_per_leg": 1,
             "asset_class": "us_option",
             "position_sizing": "2–5% of declared account capital per trade (configurable)",
@@ -762,14 +778,106 @@ def build_layers(
             "bid_ask_hard_stop": "Reject a leg when its bid/ask spread exceeds 10% of mid",
             "earnings_blackout": f"No new positions within 1 day of earnings (exception: {APEX_STRATEGY_NAME})",
             "narrative": (
-                "Trader must accept the thesis before submit. Order review shows each options leg (OCC symbol), "
-                "side, contracts, type, estimated premium, and account impact. Paper funded submits via Alpaca "
-                "paper (or demo fill) without extra restriction; dashboard updates on fill via WebSocket."
+                "Review each leg, the quantity, the order type, the limit price, the estimated cost or credit, "
+                "and the account impact before submitting. Broker fees are not on this quote."
             ),
+            "auto_execute_eligible": auto_submit_on_ack,
+            "auto_exec_line": strategy_layer.get("auto_exec_line"),
+            "auto_exec_reasons": strategy_layer.get("auto_exec_reasons") or [],
+            "executable": bool(strategy_layer.get("placeable")) and not bool(strategy_layer.get("auto_exec_blocked")),
+            "placeable": bool(strategy_layer.get("placeable")),
+            "spread_confirmation_required": bool(strategy_layer.get("spread_block_reasons"))
+            and bool(strategy_layer.get("placeable")),
+            "spread_block_reasons": strategy_layer.get("spread_block_reasons") or [],
+            "quote_not_current": bool(strategy_layer.get("quote_not_current")),
+            "quote_as_of": strategy_layer.get("quote_as_of"),
+            "structure_label": strategy_layer.get("structure_label"),
+            "stock_legs": _stock_context_rows(strategy_layer.get("metrics") or {}, snapshot.symbol),
         },
     }
     # Guarantee every documented layer key is present and ordered
     return {layer.value: layers[layer] for layer in DEEP_SCAN_LAYERS}
+
+
+def _layer_is_executable(layer: dict[str, Any]) -> bool:
+    return bool(layer.get("placeable")) and not bool(layer.get("auto_exec_blocked")) and bool(layer.get("tradeable"))
+
+
+def _scored_strategy_layer(name: str, **kwargs: Any) -> dict[str, Any]:
+    composite = kwargs.pop("composite")
+    layer_composite = kwargs.pop("layer_composite")
+    threshold = kwargs.pop("auto_execution_threshold")
+    back_month_rows = kwargs.pop("back_month_rows")
+    candidates = kwargs.pop("candidates")
+    benchmark = None
+    if any(
+        "APEX Benchmark Greeks Strategy Rule 2" in note
+        for note in next((row.gate_notes for row in candidates if row.name == name and row.eligible), [])
+    ):
+        benchmark = "rule2"
+    layer = build_strategy_layer(
+        strategy_name=name,
+        composite=layer_composite,
+        auto_exec_threshold=threshold,
+        back_month_contracts=back_month_rows if _strategy_requires_back_month(name) else None,
+        benchmark_rule=benchmark,
+        **kwargs,
+    )
+    if layer_composite != composite:
+        _restore_scored_strategy_layer(layer, composite, threshold)
+    return layer
+
+
+def _promote_close_executable(
+    strategy: str,
+    layer: dict[str, Any],
+    decision: Any,
+    *,
+    build: Any,
+) -> tuple[str, dict[str, Any]]:
+    """Prefer an executable candidate within CLOSE_SCORE_GAP of a blocked winner."""
+    if _layer_is_executable(layer):
+        return strategy, layer
+    primary = next((row for row in decision.candidates if row.name == strategy), None)
+    primary_score = float(primary.score) if primary is not None else float(layer.get("composite_score") or 0)
+    best_name = None
+    best_score: float | None = None
+    best_layer = None
+    for cand in decision.candidates:
+        if cand.name == strategy or not cand.eligible or not cand.defined_risk:
+            continue
+        if primary_score - float(cand.score) > CLOSE_SCORE_GAP:
+            continue
+        alt = build(cand.name)
+        if not _layer_is_executable(alt):
+            continue
+        if best_score is None or float(cand.score) > best_score:
+            best_name = cand.name
+            best_score = float(cand.score)
+            best_layer = alt
+    if best_layer is None or best_name is None:
+        return strategy, layer
+    return best_name, best_layer
+
+
+def _stock_context_rows(metrics: dict[str, Any], ticker: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for leg in metrics.get("legs") or []:
+        if not isinstance(leg, dict) or leg.get("side") != "stock":
+            continue
+        rows.append(
+            {
+                "symbol": leg.get("symbol") or ticker,
+                "side": leg.get("action") or "buy",
+                "qty": leg.get("quantity") or leg.get("shares_used") or 0,
+                "shares_used": leg.get("shares_used"),
+                "already_held": bool(leg.get("already_held") or metrics.get("equity_covered_by_holdings")),
+                "order_type": leg.get("order_type") or "market",
+                "price": leg.get("mid"),
+                "note": metrics.get("equity_note"),
+            }
+        )
+    return rows
 
 
 def _pattern_annotations() -> list[dict]:

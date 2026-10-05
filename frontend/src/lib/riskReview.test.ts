@@ -2,23 +2,51 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { autoExecEligibilityLine, autoSubmitArms, manualConfirmationNote, orderPlacement } from "./riskReview";
+import {
+  autoExecEligibilityLine,
+  autoSubmitArms,
+  blockedEligibilityLine,
+  manualConfirmationNote,
+  orderPlacement,
+} from "./riskReview";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
 describe("autoSubmitArms", () => {
   it("arms at 36 when the saved minimum is 35 and does not arm at 34", () => {
     expect(
-      autoSubmitArms({ toggleOn: true, composite: 36, threshold: 35, definedRisk: true }),
+      autoSubmitArms({
+        toggleOn: true,
+        serverAutoSubmit: true,
+        executable: true,
+        validationPassed: true,
+        composite: 36,
+        threshold: 35,
+        definedRisk: true,
+      }),
     ).toBe(true);
     expect(
-      autoSubmitArms({ toggleOn: true, composite: 34, threshold: 35, definedRisk: true }),
+      autoSubmitArms({
+        serverAutoSubmit: true,
+        executable: true,
+        validationPassed: true,
+        composite: 34,
+        threshold: 35,
+        definedRisk: true,
+      }),
     ).toBe(false);
   });
 
   it("does not arm at 72 when the saved minimum is 85", () => {
     expect(
-      autoSubmitArms({ toggleOn: true, composite: 72, threshold: 85, definedRisk: true }),
+      autoSubmitArms({
+        serverAutoSubmit: true,
+        executable: true,
+        validationPassed: true,
+        composite: 72,
+        threshold: 85,
+        definedRisk: true,
+      }),
     ).toBe(false);
   });
 
@@ -54,12 +82,21 @@ describe("autoSubmitArms", () => {
 });
 
 describe("orderPlacement", () => {
-  const legs = { toggleOn: true, definedRisk: true, hasLegs: true };
+  const legs = {
+    toggleOn: true,
+    definedRisk: true,
+    hasLegs: true,
+    serverAutoSubmit: true,
+    executable: true,
+    validationPassed: true,
+    placeable: true,
+  };
 
   it("auto-submits on acknowledgement above the saved minimum", () => {
     expect(orderPlacement({ ...legs, composite: 71, threshold: 70 })).toEqual({
       autoSubmitOnAck: true,
       placeTradeEnabled: false,
+      acknowledgeEnabled: true,
       note: null,
     });
   });
@@ -68,6 +105,7 @@ describe("orderPlacement", () => {
     expect(orderPlacement({ ...legs, composite: 70, threshold: 70 })).toEqual({
       autoSubmitOnAck: true,
       placeTradeEnabled: false,
+      acknowledgeEnabled: true,
       note: null,
     });
   });
@@ -87,10 +125,11 @@ describe("orderPlacement", () => {
     expect(orderPlacement({ ...legs, composite: 66, threshold: 40 })).toEqual({
       autoSubmitOnAck: true,
       placeTradeEnabled: false,
+      acknowledgeEnabled: true,
       note: null,
     });
     expect(autoExecEligibilityLine(66, 40)).toBe(
-      "Composite score 66 · Your auto-execute minimum 40 · Auto-execute eligible",
+      "Composite 66. Your minimum 40. Auto-execute eligible.",
     );
   });
 
@@ -106,6 +145,7 @@ describe("orderPlacement", () => {
     ).toEqual({
       autoSubmitOnAck: true,
       placeTradeEnabled: false,
+      acknowledgeEnabled: true,
       note: null,
     });
     expect(
@@ -132,6 +172,7 @@ describe("orderPlacement", () => {
     ).toEqual({
       autoSubmitOnAck: false,
       placeTradeEnabled: true,
+      acknowledgeEnabled: false,
       note: "Auto-execution is off.",
     });
   });
@@ -140,6 +181,7 @@ describe("orderPlacement", () => {
     expect(orderPlacement({ ...legs, composite: 72, threshold: 40 })).toEqual({
       autoSubmitOnAck: true,
       placeTradeEnabled: false,
+      acknowledgeEnabled: true,
       note: null,
     });
     expect(
@@ -153,8 +195,30 @@ describe("orderPlacement", () => {
     ).toEqual({
       autoSubmitOnAck: true,
       placeTradeEnabled: false,
+      acknowledgeEnabled: true,
       note: null,
     });
+  });
+
+  it("does not say auto-execute eligible when the structure is not executable", () => {
+    const placement = orderPlacement({
+      ...legs,
+      serverAutoSubmit: true,
+      composite: 62.9,
+      threshold: 50,
+      executable: false,
+      validationPassed: false,
+      placeable: false,
+      blockReason: "Composite 62.9. Your minimum 50. Not auto-executable: quote 17 min old.",
+    });
+    expect(placement.autoSubmitOnAck).toBe(false);
+    expect(placement.acknowledgeEnabled).toBe(false);
+    expect(placement.placeTradeEnabled).toBe(false);
+    expect(placement.note).toContain("quote 17 min old");
+    expect(placement.note).not.toContain("Auto-execute eligible");
+    expect(blockedEligibilityLine(62.9, 50, "quote 17 min old")).toBe(
+      "Composite 62.9. Your minimum 50. Not auto-executable: quote 17 min old.",
+    );
   });
 
   it("does not contain the forbidden blocker string", () => {

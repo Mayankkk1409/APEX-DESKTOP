@@ -166,10 +166,11 @@ async def close_expiring_paper_positions(
                     asset_class=asset_class,
                     force_paper=use_paper,
                     closing=True,
+                    submission_path="expiry_close",
                 )
                 closed += 1
             except Exception as exc:  # noqa: BLE001
-                logger.warning("expiry close skipped symbol={} reason={}", symbol, type(exc).__name__)
+                logger.warning("expiry close skipped symbol={} reason={}", symbol, exc)
     if closed:
         logger.info("expiry close finished closed={}", closed)
     return {"closed": closed}
