@@ -25,7 +25,16 @@ class Settings(BaseSettings):
     sentry_dsn: str = ""
 
     access_token_ttl_seconds: int = 900
+    # Client calls POST /auth/refresh this many seconds before access-token exp.
+    # Does not extend the access token. 900s lifetime refreshes at 840s.
+    access_token_refresh_skew_seconds: int = 60
     refresh_token_ttl_seconds: int = 604800
+    # Refresh cookie. Secure stays on in every environment: browsers reject it on
+    # insecure hosts other than localhost, where MDN allows the Secure attribute.
+    # SameSite=Strict is the OWASP preference for a session cookie. The dev server
+    # proxies API calls same-origin, so Strict cookies are still sent on refresh.
+    cookie_secure: bool = True
+    cookie_samesite: Literal["lax", "strict", "none"] = "strict"
     otp_ttl_seconds: int = 90
     autofill_2fa: bool = False
 
@@ -105,6 +114,24 @@ class Settings(BaseSettings):
         exit_min = float((info.data or {}).get("exit_composite_min", 40.0))
         if float(value) <= exit_min:
             raise ValueError("ENTRY_COMPOSITE_MIN must be greater than EXIT_COMPOSITE_MIN")
+        return value
+
+    @field_validator("access_token_refresh_skew_seconds")
+    @classmethod
+    def refresh_skew_before_expiry(cls, value: int, info):  # type: ignore[no-untyped-def]
+        if value < 0:
+            raise ValueError("access_token_refresh_skew_seconds must be >= 0")
+        ttl = int((info.data or {}).get("access_token_ttl_seconds", 900))
+        if value >= ttl:
+            raise ValueError("access_token_refresh_skew_seconds must be less than access_token_ttl_seconds")
+        return value
+
+    @field_validator("cookie_samesite")
+    @classmethod
+    def samesite_none_requires_secure(cls, value: str, info):  # type: ignore[no-untyped-def]
+        secure = bool((info.data or {}).get("cookie_secure", True))
+        if value == "none" and not secure:
+            raise ValueError("COOKIE_SAMESITE=none requires COOKIE_SECURE")
         return value
 
     @field_validator("autofill_2fa")

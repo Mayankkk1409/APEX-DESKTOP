@@ -1,21 +1,33 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { ApexLogo } from "../components/ApexLogo";
 import { PasswordField } from "../components/PasswordField";
 import { OtpBoxes } from "../components/OtpBoxes";
 import { LegalFooter } from "../components/LegalFooter";
-import { api, AUTH_REDIRECT_KEY, setAccessToken } from "../api";
+import { api, AUTH_REDIRECT_KEY, getAccessToken, restoreSession, setAccessToken } from "../api";
 import { resolveAutofillCode } from "../lib/otpAutofill";
 import { useSession } from "../store";
 
 type Flow = "login" | "recovery";
 type Stage = "identify" | "code";
 
-export function Login() {
+const RESTORED_SCREENS = ["/app", "/scan", "/portfolio", "/settings"];
+
+/** After a reload, Guard sends the user to /login with the screen they were on. */
+export function pathAfterSessionRestore(from: unknown): string {
+  if (typeof from !== "string" || !from.startsWith("/")) return "/app";
+  const path = from.split("?")[0]?.split("#")[0] ?? "";
+  if (RESTORED_SCREENS.some((screen) => path === screen || path.startsWith(`${screen}/`))) return path;
+  return "/app";
+}
+
+export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boolean } = {}) {
   const nav = useNavigate();
+  const loc = useLocation();
   const setUser = useSession((s) => s.setUser);
   const setModal = useSession((s) => s.setConnectModal);
   const setExpiryNoticeOnLogin = useSession((s) => s.setExpiryNoticeOnLogin);
+  const [checkingSession, setCheckingSession] = useState(!skipSessionRestore);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -32,28 +44,53 @@ export function Login() {
   flowRef.current = flow;
 
   useEffect(() => {
-    const redirectMsg = sessionStorage.getItem(AUTH_REDIRECT_KEY);
-    if (redirectMsg) {
-      setErr(redirectMsg);
-      sessionStorage.removeItem(AUTH_REDIRECT_KEY);
-    }
-  }, []);
-
-  useEffect(() => {
-    // Every visit to login is a new attempt — do not reuse a prior in-memory session/code.
-    setAccessToken(null);
-    setUser(null);
-    setModal(false);
-    setFlow("login");
-    flowRef.current = "login";
-    setStage("identify");
-    setPassword("");
-    setNewPassword("");
-    setConfirmPassword("");
-    setCode("");
-    setAutofill(null);
-    setOtpUser("");
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- reset once per /login mount
+    if (skipSessionRestore) return;
+    let cancelled = false;
+    const from = (loc.state as { from?: unknown } | null)?.from;
+    const tokenBefore = getAccessToken();
+    (async () => {
+      const restored = await restoreSession();
+      if (cancelled) return;
+      const tokenNow = getAccessToken();
+      if (!restored && tokenNow && tokenNow !== tokenBefore) {
+        setCheckingSession(false);
+        return;
+      }
+      if (restored) {
+        try {
+          const me = (await api.me()) as import("../types").User;
+          if (cancelled) return;
+          setUser(me);
+          nav(pathAfterSessionRestore(from), { replace: true });
+          return;
+        } catch {
+          /* refresh cookie was not enough to read the profile */
+        }
+      }
+      const redirectMsg = sessionStorage.getItem(AUTH_REDIRECT_KEY);
+      if (redirectMsg) {
+        setErr(redirectMsg);
+        sessionStorage.removeItem(AUTH_REDIRECT_KEY);
+      }
+      // Failed refresh only. Do not clear symbol, expiry, or captured bars.
+      setAccessToken(null);
+      setUser(null);
+      setModal(false);
+      setFlow("login");
+      flowRef.current = "login";
+      setStage("identify");
+      setPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setCode("");
+      setAutofill(null);
+      setOtpUser("");
+      setCheckingSession(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- restore once per /login mount
   }, []);
 
   async function mintCode(forUsername: string, recovery = false) {
@@ -154,7 +191,7 @@ export function Login() {
         flowRef.current === "recovery"
           ? await api.forgotPasswordVerify(name, code)
           : await api.otpVerify(name, code);
-      setAccessToken(res.access_token);
+      setAccessToken(res.access_token, res.expires_in, res.refresh_in);
       const me = (await api.me()) as import("../types").User;
       setUser(me);
       setExpiryNoticeOnLogin(true);
@@ -177,6 +214,14 @@ export function Login() {
       : isRecovery
         ? "Reset password"
         : "Verify code";
+
+  if (checkingSession) {
+    return (
+      <main className="min-h-screen flex items-center justify-center px-4" data-testid="session-restore">
+        <p className="text-subtle">Restoring session…</p>
+      </main>
+    );
+  }
 
   return (
     <main className="min-h-screen flex items-center justify-center px-4">

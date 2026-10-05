@@ -14,18 +14,171 @@ import type {
 } from "./types";
 
 let accessToken: string | null = null;
+let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+let refreshInFlight: Promise<string | null> | null = null;
 
-export function setAccessToken(token: string | null) {
+const tokenListeners = new Set<(token: string | null) => void>();
+
+/** Seconds before access-token exp. Matches backend access_token_refresh_skew_seconds. */
+export const ACCESS_REFRESH_SKEW_SECONDS = 60;
+
+const ANONYMOUS_AUTH = new Set([
+  "/auth/login",
+  "/auth/signup",
+  "/auth/otp/request",
+  "/auth/otp/verify",
+  "/auth/forgot-password",
+  "/auth/forgot-password/verify",
+  "/auth/password-strength",
+  "/auth/refresh",
+]);
+
+export const AUTH_REDIRECT_KEY = "apex_auth_redirect";
+
+export function subscribeAccessToken(listener: (token: string | null) => void): () => void {
+  tokenListeners.add(listener);
+  return () => tokenListeners.delete(listener);
+}
+
+function decodeBase64Url(segment: string): string {
+  const padded = segment.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (segment.length % 4)) % 4);
+  if (typeof atob === "function") return atob(padded);
+  return Buffer.from(padded, "base64").toString("utf8");
+}
+
+/** Read the JWT exp claim. The signature is not checked here; the server still verifies it. */
+export function accessTokenExpiryMs(token: string): number | null {
+  const parts = token.split(".");
+  if (parts.length < 2 || !parts[1]) return null;
+  try {
+    const payload = JSON.parse(decodeBase64Url(parts[1])) as { exp?: unknown };
+    if (typeof payload.exp !== "number" || !Number.isFinite(payload.exp)) return null;
+    return payload.exp * 1000;
+  } catch {
+    return null;
+  }
+}
+
+export function refreshDelayMs(opts: {
+  nowMs?: number;
+  expiresInSec?: number | null;
+  refreshInSec?: number | null;
+  token?: string | null;
+}): number | null {
+  const now = opts.nowMs ?? Date.now();
+  if (typeof opts.refreshInSec === "number" && Number.isFinite(opts.refreshInSec)) {
+    return Math.max(0, opts.refreshInSec * 1000);
+  }
+  let expMs: number | null = null;
+  if (typeof opts.expiresInSec === "number" && Number.isFinite(opts.expiresInSec)) {
+    expMs = now + opts.expiresInSec * 1000;
+  } else if (opts.token) {
+    expMs = accessTokenExpiryMs(opts.token);
+  }
+  if (expMs == null) return null;
+  return Math.max(0, expMs - ACCESS_REFRESH_SKEW_SECONDS * 1000 - now);
+}
+
+function clearRefreshTimer() {
+  if (refreshTimer != null) {
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
+}
+
+function armRefreshTimer(token: string, expiresInSec?: number, refreshInSec?: number) {
+  clearRefreshTimer();
+  const delay = refreshDelayMs({ token, expiresInSec, refreshInSec });
+  if (delay == null) return;
+  refreshTimer = setTimeout(() => {
+    void refreshAccessToken().then((next) => {
+      if (!next) endSession("Session expired — please sign in again.");
+    });
+  }, delay);
+}
+
+export function setAccessToken(token: string | null, expiresInSec?: number, refreshInSec?: number) {
   accessToken = token;
+  for (const listener of tokenListeners) listener(token);
+  if (!token) {
+    clearRefreshTimer();
+    return;
+  }
+  armRefreshTimer(token, expiresInSec, refreshInSec);
 }
 
 export function getAccessToken() {
   return accessToken;
 }
 
-export const AUTH_REDIRECT_KEY = "apex_auth_redirect";
+type SessionGrant = {
+  access_token?: unknown;
+  expires_in?: unknown;
+  refresh_in?: unknown;
+};
 
-async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
+function asSeconds(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+async function refreshAccessToken(): Promise<string | null> {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = (async () => {
+    let res: Response;
+    try {
+      res = await fetch(`${API_BASE}/auth/refresh`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+      });
+    } catch {
+      // A transport blip is not an invalid session. Keep the current access token
+      // and try again shortly so one dropped packet does not log the desk out.
+      const current = getAccessToken();
+      if (current) armRefreshTimer(current, undefined, 5);
+      return current;
+    }
+    if (res.status === 401 || res.status === 403) return null;
+    if (!res.ok) {
+      const current = getAccessToken();
+      if (current) armRefreshTimer(current, undefined, 5);
+      return current;
+    }
+    let body: SessionGrant;
+    try {
+      body = (await res.json()) as SessionGrant;
+    } catch {
+      return null;
+    }
+    if (typeof body.access_token !== "string" || !body.access_token) return null;
+    setAccessToken(body.access_token, asSeconds(body.expires_in), asSeconds(body.refresh_in));
+    return body.access_token;
+  })().finally(() => {
+    refreshInFlight = null;
+  });
+  return refreshInFlight;
+}
+
+/** Reload path: the access token is gone with the page, the refresh cookie is not. */
+export async function restoreSession(): Promise<boolean> {
+  const token = await refreshAccessToken();
+  return Boolean(token);
+}
+
+function endSession(detail: unknown) {
+  setAccessToken(null);
+  if (typeof window === "undefined") return;
+  if (window.location.pathname.startsWith("/login")) return;
+  const msg = typeof detail === "string" ? detail : "Session expired — please sign in again.";
+  try {
+    sessionStorage.setItem(AUTH_REDIRECT_KEY, msg);
+  } catch {
+    /* private mode */
+  }
+  window.location.assign("/login");
+}
+
+async function req<T>(path: string, init: RequestInit = {}, retried = false): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Content-Type", "application/json");
   if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
@@ -46,13 +199,12 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
     if (res.status >= 500 && (detail === "Internal Server Error" || detail === res.statusText)) {
       detail = "Brokerage service error. Try Refresh — if it persists, restart the backend.";
     }
-    if (res.status === 401) {
-      setAccessToken(null);
-      const msg = typeof detail === "string" ? detail : "Session expired — please sign in again.";
-      sessionStorage.setItem(AUTH_REDIRECT_KEY, msg);
-      if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
-        window.location.assign("/login");
-      }
+    if (res.status === 401 && !retried && !ANONYMOUS_AUTH.has(path)) {
+      const next = await refreshAccessToken();
+      if (next) return req<T>(path, init, true);
+      endSession(detail);
+    } else if (res.status === 401) {
+      endSession(detail);
     }
     throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
   }
@@ -72,6 +224,8 @@ export const api = {
   otpVerify: (username: string, code: string) =>
     req<{
       access_token: string;
+      expires_in: number;
+      refresh_in: number;
       brokerage_connected: boolean;
       first_login: boolean;
       account_mode: string;
@@ -85,6 +239,8 @@ export const api = {
   forgotPasswordVerify: (username: string, code: string) =>
     req<{
       access_token: string;
+      expires_in: number;
+      refresh_in: number;
       brokerage_connected: boolean;
       first_login: boolean;
       account_mode: string;

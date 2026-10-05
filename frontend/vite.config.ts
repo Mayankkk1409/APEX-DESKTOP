@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { apiProxyOptions } from "./src/lib/devProxy";
 import { attachQuietWsProxy, type QuietProxy } from "./src/lib/wsProxy";
 
 const API = "http://127.0.0.1:8000";
@@ -12,15 +13,20 @@ const wsProxy = {
   },
 };
 
+/**
+ * Browser calls stay on the Vite origin. The proxy forwards Cookie and rewrites
+ * Set-Cookie so the httpOnly refresh cookie is stored for this host.
+ * https://vite.dev/config/server-options.html#server-proxy
+ */
 const proxy = {
-  "/api": API,
-  "/auth": API,
-  "/health": API,
-  "/market": API,
-  "/volatility": API,
-  "/scan": API,
-  "/watchlist": API,
-  "/sentiment": API,
+  "/api": apiProxyOptions(API),
+  "/auth": apiProxyOptions(API),
+  "/health": apiProxyOptions(API),
+  "/market": apiProxyOptions(API),
+  "/volatility": apiProxyOptions(API),
+  "/scan": apiProxyOptions(API),
+  "/watchlist": apiProxyOptions(API),
+  "/sentiment": apiProxyOptions(API),
   "/ws": wsProxy,
 };
 

@@ -3,6 +3,70 @@ import type { OhlcBar } from "./lib/ta";
 import { readPortfolioViewMode, writePortfolioViewMode } from "./lib/portfolioViewMode";
 import type { AccountMode, ChartSnapshot, PortfolioViewMode, RecommendedContract, User } from "./types";
 
+/** Scan progress only. Never put access or refresh tokens here. */
+export const SCAN_SESSION_KEY = "apex_scan_session";
+
+type PersistedScan = {
+  symbol: string;
+  timeframe: string;
+  expiry: string;
+  recommendedContract: RecommendedContract | null;
+  snapshot: ChartSnapshot | null;
+  capturedBars: OhlcBar[];
+  capturedContext: OhlcBar[];
+  capturedDaily: OhlcBar[];
+};
+
+function browserSessionStorage(): Storage | null {
+  try {
+    if (typeof sessionStorage === "undefined") return null;
+    return sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+function readPersistedScan(): Partial<PersistedScan> {
+  const store = browserSessionStorage();
+  if (!store) return {};
+  try {
+    const raw = store.getItem(SCAN_SESSION_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Partial<PersistedScan>;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return parsed;
+  } catch {
+    return {};
+  }
+}
+
+function writePersistedScan(state: {
+  symbol: string;
+  timeframe: string;
+  expiry: string;
+  recommendedContract: RecommendedContract | null;
+  snapshot: ChartSnapshot | null;
+  capturedBars: OhlcBar[];
+  capturedContext: OhlcBar[];
+  capturedDaily: OhlcBar[];
+}) {
+  const store = browserSessionStorage();
+  if (!store) return;
+  const payload: PersistedScan = {
+    symbol: state.symbol,
+    timeframe: state.timeframe,
+    expiry: state.expiry,
+    recommendedContract: state.recommendedContract,
+    snapshot: state.snapshot,
+    capturedBars: state.capturedBars,
+    capturedContext: state.capturedContext,
+    capturedDaily: state.capturedDaily,
+  };
+  store.setItem(SCAN_SESSION_KEY, JSON.stringify(payload));
+}
+
+const persistedScan = readPersistedScan();
+
 /**
  * Scan session fields sibling Deep Scan layers read:
  *   symbol, timeframe, expiry, snapshot, capturedBars (alias visibleBars),
@@ -65,18 +129,20 @@ export const useSession = create<SessionState>((set) => ({
   portfolioViewMode: readPortfolioViewMode(),
   showConnectModal: false,
   expiryNoticeOnLogin: false,
-  symbol: "SPX",
-  timeframe: "1D",
-  expiry: "",
-  recommendedContract: null,
-  snapshot: null,
+  symbol: persistedScan.symbol ?? "SPX",
+  timeframe: persistedScan.timeframe ?? "1D",
+  expiry: persistedScan.expiry ?? "",
+  recommendedContract: persistedScan.recommendedContract ?? null,
+  snapshot: persistedScan.snapshot ?? null,
   chartImage: null,
   chartImageFrozen: false,
-  capturedBars: [],
-  visibleBars: [],
-  capturedContext: [],
-  capturedDaily: [],
+  capturedBars: persistedScan.capturedBars ?? [],
+  visibleBars: persistedScan.capturedBars ?? [],
+  capturedContext: persistedScan.capturedContext ?? [],
+  capturedDaily: persistedScan.capturedDaily ?? [],
   markSplashSeen: () => set({ splashSeen: true }),
+  // Auth refresh updates `user` only. symbol, expiry, capturedBars, and
+  // recommendedContract stay so an in-progress scan survives re-authentication.
   setUser: (user) => set({ user, accountMode: user?.account_mode ?? null }),
   setSelectedBrokerageAccountId: (selectedBrokerageAccountId) => set({ selectedBrokerageAccountId }),
   setPortfolioViewMode: (portfolioViewMode) => {
@@ -100,3 +166,41 @@ export const useSession = create<SessionState>((set) => ({
       capturedDaily,
     }),
 }));
+
+useSession.subscribe((state) => {
+  writePersistedScan(state);
+});
+
+export function clearScanSession() {
+  browserSessionStorage()?.removeItem(SCAN_SESSION_KEY);
+  useSession.setState({
+    symbol: "SPX",
+    timeframe: "1D",
+    expiry: "",
+    recommendedContract: null,
+    snapshot: null,
+    chartImage: null,
+    chartImageFrozen: false,
+    capturedBars: [],
+    visibleBars: [],
+    capturedContext: [],
+    capturedDaily: [],
+  });
+  browserSessionStorage()?.removeItem(SCAN_SESSION_KEY);
+}
+
+export function rehydrateScanSession() {
+  const saved = readPersistedScan();
+  const bars = saved.capturedBars ?? [];
+  useSession.setState({
+    symbol: saved.symbol ?? "SPX",
+    timeframe: saved.timeframe ?? "1D",
+    expiry: saved.expiry ?? "",
+    recommendedContract: saved.recommendedContract ?? null,
+    snapshot: saved.snapshot ?? null,
+    capturedBars: bars,
+    visibleBars: bars,
+    capturedContext: saved.capturedContext ?? [],
+    capturedDaily: saved.capturedDaily ?? [],
+  });
+}
