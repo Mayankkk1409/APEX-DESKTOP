@@ -328,11 +328,10 @@ def resolve_recommended_contract(
     direction = str(tech.get("direction") or "neutral")
     vol_signal = "fair"
     if atm_i is not None and hv is not None:
-        gap = atm_i - hv
-        if gap > DEFAULT_THRESHOLDS.iv_hv_rich_pts:
-            vol_signal = "sell_premium"
-        elif gap < -DEFAULT_THRESHOLDS.iv_hv_rich_pts:
-            vol_signal = "buy_premium"
+        from app.analysis.gate_config import assess_vol_regime
+
+        view = assess_vol_regime(iv=atm_i, hv=hv, iv_rank=None)
+        vol_signal = {"sell premium": "sell_premium", "buy premium": "buy_premium", "fair": "fair"}[view.label]
     strategy = infer_strategy_label(
         direction,
         vol_signal,

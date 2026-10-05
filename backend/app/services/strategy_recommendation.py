@@ -132,6 +132,7 @@ class StrategyCandidate:
     defined_risk: bool
     gate_notes: list[str] = field(default_factory=list)
     eligible: bool = True
+    score_breakdown: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -162,6 +163,7 @@ class StrategyRecommendation:
                     "defined_risk": c.defined_risk,
                     "gate_notes": c.gate_notes,
                     "eligible": c.eligible,
+                    "score_breakdown": list(c.score_breakdown),
                 }
                 for c in self.candidates
             ],
@@ -647,8 +649,17 @@ def _apply_event_vega_penalty(candidates: list[StrategyCandidate], span: dict[st
         points, note = _event_vega_for_candidate(candidate.name, span)
         if note is None:
             continue
+        row: dict[str, Any] = {
+            "label": "Event-vega penalty",
+            "value": None if points is None else float(points),
+            "note": note,
+        }
         if points is not None and points > 0:
-            candidate.score = round(float(candidate.score) - float(points), 1)
+            before = float(candidate.score)
+            candidate.score = round(before - float(points), 1)
+            row["score_before"] = before
+            row["score_after"] = float(candidate.score)
+        candidate.score_breakdown.append(row)
         candidate.gate_notes.append(note)
 
 
@@ -829,6 +840,7 @@ def _attach_registry_evaluation(
                     tier=held.tier,
                     defined_risk=held.defined_risk,
                     gate_notes=list(held.gate_notes),
+                    score_breakdown=list(held.score_breakdown),
                     eligible=False,
                 )
             )
@@ -908,6 +920,7 @@ def _place_candidate(candidates: list[StrategyCandidate], candidate: StrategyCan
             existing.eligible = True
             existing.defined_risk = candidate.defined_risk
             existing.gate_notes = list(candidate.gate_notes)
+            existing.score_breakdown = list(candidate.score_breakdown)
             existing.tier = candidate.tier
             row = candidates.pop(index)
             for insert_at, other in enumerate(candidates):
@@ -1138,7 +1151,7 @@ def _record_recommendation(
             kind="candidate",
             key=candidate.name,
             value={"score": candidate.score, "eligible": candidate.eligible, "order": index},
-            inputs={"gate_notes": list(candidate.gate_notes)},
+            inputs={"gate_notes": list(candidate.gate_notes), "breakdown": list(candidate.score_breakdown)},
             fn="recommend_strategy",
             source="strategy_recommendation",
         )
@@ -1151,17 +1164,38 @@ def _record_recommendation(
             kind="score",
             key=f"{candidate.name}:score",
             value=candidate.score,
-            inputs={"eligible": candidate.eligible, "event_vega_note": penalty_note},
+            inputs={
+                "eligible": candidate.eligible,
+                "event_vega_note": penalty_note,
+                "breakdown": list(candidate.score_breakdown),
+            },
             fn="recommend_strategy",
             source="strategy_recommendation",
         )
         if penalty_note is not None:
+            measured = next(
+                (
+                    row.get("value")
+                    for row in candidate.score_breakdown
+                    if row.get("label") == "Event-vega penalty"
+                ),
+                None,
+            )
             record_ledger(
                 scan_id=scan_id,
                 kind="score",
                 key=f"{candidate.name}:event_vega_penalty",
                 value=penalty_note,
-                inputs={"score": candidate.score, "strategy": candidate.name},
+                inputs={
+                    "score": candidate.score,
+                    "strategy": candidate.name,
+                    "points": measured,
+                    "breakdown": [
+                        row
+                        for row in candidate.score_breakdown
+                        if row.get("label") == "Event-vega penalty"
+                    ],
+                },
                 fn="recommend_strategy",
                 source="strategy_recommendation",
             )
