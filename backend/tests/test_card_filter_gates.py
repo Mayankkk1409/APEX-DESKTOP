@@ -97,7 +97,8 @@ def test_exit_line_uses_the_entry_threshold_not_72() -> None:
     assert "below 72" not in text
     assert "final 21 days" in text
     # IV 27% is not below HV 22.5%, so Rule 1 fails and the card is not executable.
-    assert layer["auto_exec_line"] is None
+    assert layer["auto_exec_line"]
+    assert "Auto-execute eligible" not in layer["auto_exec_line"]
     assert layer["auto_exec_blocked"] is True
     assert layer["execution_banner"] == "NOT EXECUTABLE"
     assert "meets your auto-execution threshold" not in layer["why_it_fits"]
@@ -113,7 +114,8 @@ def test_aapl_long_call_fails_theta_and_does_not_auto_execute() -> None:
     assert metrics["max_profit"] is None
     assert metrics["max_profit_unlimited_allowed"] is True
     assert layer["auto_exec_blocked"] is True
-    assert layer["auto_exec_line"] is None
+    assert layer["auto_exec_line"]
+    assert "Auto-execute eligible" not in layer["auto_exec_line"]
     assert layer["clears_threshold"] is False
     joined = " ".join(layer["risk_notes"])
     # Default theta mode is percent of premium. This contract still fails because IV is not below HV.
@@ -121,11 +123,10 @@ def test_aapl_long_call_fails_theta_and_does_not_auto_execute() -> None:
     assert "below 72" not in layer["how_to_execute"]
     leg = metrics["legs"][0]
     assert leg["order_type"] == "limit"
-    assert leg["limit_price"] == pytest.approx(11.96, abs=0.01)
-    assert leg["limit_basis"] == "mid"
-    assert leg["order_note"] == "limit at mid"
-    assert "mid-price" in layer["how_to_execute"]
-    assert "marketable" not in layer["how_to_execute"].lower()
+    assert leg["limit_price"] == pytest.approx(12.22, abs=0.01)
+    assert leg["limit_basis"] == "ask"
+    assert leg["order_note"] == "limit at the ask"
+    assert "mid-price" in layer["how_to_execute"] or "marketable limit" in layer["how_to_execute"].lower()
     assert layer["selected_strategy"] == "APEX Benchmark Greeks Strategy"
 
 

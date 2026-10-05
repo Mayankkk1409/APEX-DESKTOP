@@ -103,6 +103,7 @@ def test_covered_call_with_enough_unencumbered_shares_does_not_buy() -> None:
     stock = _stock(metrics)
     assert stock["order_qty"] == 0
     assert stock["already_held"] is True
+    assert "Uses 100 of your 100 shares" in metrics["equity_note"]
     assert "Using 100 shares already held" in metrics["equity_note"]
     assert "$42.50" in metrics["equity_note"]
     assert "No additional shares are bought" in metrics["equity_note"]

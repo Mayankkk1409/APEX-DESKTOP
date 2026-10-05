@@ -12,7 +12,10 @@ export type TicketOptionLeg = {
   expiry?: string;
   order_type?: string;
   price?: number | null;
+  limit_price?: number | null;
   limit_basis?: string | null;
+  quote_as_of?: string | null;
+  quoted_side?: string | null;
 };
 
 export type MetricOptionLeg = {
@@ -25,6 +28,8 @@ export type MetricOptionLeg = {
   quantity?: number;
   order_type?: string;
   limit_basis?: string | null;
+  quote_as_of?: string | null;
+  quoted_side?: string | null;
   short_unconfirmed?: boolean;
 };
 
@@ -41,6 +46,7 @@ export type OptionReviewRow = {
   price: number | null;
   premiumLabel: string | null;
   impactLabel: string | null;
+  quoteAsOf?: string | null;
 };
 
 type Draft = {
@@ -53,6 +59,8 @@ type Draft = {
   orderType?: string;
   limitBasis?: string | null;
   price?: number | null;
+  quoteAsOf?: string | null;
+  quotedSide?: string | null;
 };
 
 function money(value: number): string {
@@ -60,16 +68,20 @@ function money(value: number): string {
 }
 
 function orderTypeLabel(orderType: string, limitBasis?: string | null): string {
-  if (orderType === "limit" && limitBasis === "mid") return "limit at mid";
-  return orderType || "market";
+  if (orderType === "limit" && limitBasis === "ask") return "limit at the ask";
+  if (orderType === "limit" && limitBasis === "bid") return "limit at the bid";
+  if (orderType === "limit") return "limit at mid";
+  return orderType || "limit";
 }
 
 function toRow(draft: Draft, multiplier: number, contractsPerLeg: number): OptionReviewRow {
   const contracts = draft.qty && draft.qty > 0 ? draft.qty : contractsPerLeg;
-  const orderType = (draft.orderType || "market").toLowerCase();
+  const orderType = (draft.orderType || "limit").toLowerCase();
   const price = draft.price == null || Number.isNaN(Number(draft.price)) ? null : Number(draft.price);
   const impact = price == null ? null : price * contracts * multiplier;
   const side = draft.side.toLowerCase();
+  const quoted = draft.quotedSide ? `the ${draft.quotedSide}` : "the quote";
+  const when = draft.quoteAsOf ? `, quoted ${draft.quoteAsOf}` : "";
   return {
     symbol: draft.symbol,
     side,
@@ -81,7 +93,9 @@ function toRow(draft: Draft, multiplier: number, contractsPerLeg: number): Optio
     orderType,
     orderTypeLabel: orderTypeLabel(orderType, draft.limitBasis),
     price,
-    premiumLabel: price == null ? null : `est. premium ${money(price)}`,
+    quoteAsOf: draft.quoteAsOf ?? null,
+    premiumLabel:
+      price == null ? null : `est. premium ${money(price)} from ${quoted}${when}`,
     impactLabel:
       impact == null ? null : `account impact ${side === "sell" ? "credit" : "debit"} ${money(impact)}`,
   };
@@ -104,6 +118,8 @@ function metricOptions(legs: MetricOptionLeg[] | null | undefined): Draft[] {
       orderType: leg.order_type,
       limitBasis: leg.limit_basis,
       price: leg.mid,
+      quoteAsOf: leg.quote_as_of,
+      quotedSide: leg.quoted_side,
     });
   }
   return rows;
@@ -140,7 +156,9 @@ export function optionReviewRows(input: {
           expiry: leg.expiry,
           orderType: leg.order_type,
           limitBasis: leg.limit_basis,
-          price: leg.price,
+          price: leg.limit_price ?? leg.price,
+          quoteAsOf: leg.quote_as_of,
+          quotedSide: leg.quoted_side,
         },
         multiplier,
         input.contractsPerLeg,

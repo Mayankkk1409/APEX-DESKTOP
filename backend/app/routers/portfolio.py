@@ -40,6 +40,7 @@ class OrderIn(BaseModel):
     asset_class: str = "us_option"
     legs: list[StrategyLegIn] | None = None
     contracts_per_leg: float = Field(default=1, gt=0)
+    spread_confirmed: bool = False
 
 
 def _position_row(pos: Position) -> dict:
@@ -291,6 +292,7 @@ async def place_order(
 
     if body.legs:
         strategy_name: str | None = None
+        strategy_layer: dict = {}
         certificate: dict | None = None
         equity_legs: list[dict] | None = None
         equity_satisfied = False
@@ -314,17 +316,31 @@ async def place_order(
                     "net_debit_credit": metrics.get("net_debit_credit"),
                     "net_type": metrics.get("net_type"),
                 }
-                if strategy_name and not strategy_layer.get("tradeable", True):
-                    raise HTTPException(400, "Strategy layer is not tradeable — validation blocked this structure")
+                from app.services.executability import submission_block_reason
+
+                if strategy_name:
+                    blocked = submission_block_reason(
+                        strategy_layer,
+                        spread_confirmed=body.spread_confirmed,
+                    )
+                    if blocked:
+                        raise HTTPException(400, blocked)
                 from app.analysis.gate_config import refuse_if_checks_failed
 
-                try:
-                    refuse_if_checks_failed(
-                        checks_passed=strategy_layer.get("checks_passed"),
-                        auto_execute=bool(strategy_layer.get("clears_threshold")),
-                    )
-                except ValueError as exc:
-                    raise HTTPException(400, str(exc)) from exc
+                spread_override = bool(strategy_layer.get("placeable")) and bool(
+                    strategy_layer.get("spread_block_reasons")
+                ) and body.spread_confirmed
+                if not spread_override:
+                    try:
+                        refuse_if_checks_failed(
+                            checks_passed=strategy_layer.get("checks_passed"),
+                            auto_execute=bool(strategy_layer.get("clears_threshold")),
+                        )
+                    except ValueError as exc:
+                        from loguru import logger
+
+                        logger.warning("order blocked reason={}", exc)
+                        raise HTTPException(400, str(exc)) from exc
                 if strategy_name:
                     validation = validate_strategy_output(
                         strategy_name,
@@ -367,6 +383,11 @@ async def place_order(
                 certificate=certificate,
                 equity_legs=equity_legs if body.scan_id else None,
                 equity_satisfied=equity_satisfied if body.scan_id else False,
+                checks_passed=strategy_layer.get("checks_passed") if strategy_name else None,
+                spread_confirmed=body.spread_confirmed,
+                wide_spread_only=bool(strategy_layer.get("placeable"))
+                and bool(strategy_layer.get("spread_block_reasons")),
+                submission_path="place_order",
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -422,6 +443,8 @@ async def place_order(
             order_type=body.order_type,
             limit_price=body.limit_price,
             scan_id=body.scan_id,
+            spread_confirmed=body.spread_confirmed,
+            submission_path="place_order",
         )
     except ValueError as exc:
         raise HTTPException(503, str(exc)) from exc

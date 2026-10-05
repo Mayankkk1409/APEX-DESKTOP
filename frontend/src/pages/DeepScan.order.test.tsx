@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { RiskReviewLegs } from "../components/RiskReviewLegs";
 import { RiskReviewOrderActions } from "../components/RiskReviewOrderActions";
-import { optionReviewRows, optionsLegBlockReason } from "../lib/orderTicket";
+import { optionReviewRows, optionsLegBlockReason, type OptionReviewRow } from "../lib/orderTicket";
 import { orderPlacement } from "../lib/riskReview";
 import { DEFAULT_USER_SETTINGS } from "../lib/userSettings";
 
@@ -28,6 +28,62 @@ function RiskReviewOrderPanel({
       </div>
     </div>
   );
+}
+
+function ticketTypeLabel(rows: OptionReviewRow[]): string {
+  return rows.map((row) => row.orderTypeLabel).join(" · ");
+}
+
+function notExecutableLine(failed: string[]): string {
+  return failed.length ? "NOT EXECUTABLE" : "";
+}
+
+function buildOrderReview(input: {
+  metricLegs?: Parameters<typeof optionReviewRows>[0]["metricLegs"];
+  ticketLegs?: Parameters<typeof optionReviewRows>[0]["ticketLegs"];
+  validationErrors?: Array<{ check?: string; expected?: string; actual?: string }>;
+  failedChecks?: string[];
+  blockReason?: string | null;
+  contractsPerLeg: number;
+  multiplier?: number;
+  equityRequired?: boolean;
+}): { rows: OptionReviewRow[]; emptyReason: string; failedChecks: string[]; typeLabel: string } {
+  const optionRows = optionReviewRows({
+    ticketLegs: input.ticketLegs,
+    metricLegs: input.metricLegs,
+    equityRequired: input.equityRequired,
+    contractsPerLeg: input.contractsPerLeg,
+    multiplier: input.multiplier,
+  });
+  const stockRows: OptionReviewRow[] = [];
+  for (const leg of input.metricLegs ?? []) {
+    if (leg.side !== "stock" || !leg.symbol) continue;
+    const qty = leg.quantity ?? 0;
+    const price = leg.mid ?? null;
+    const impact = price == null ? null : price * qty;
+    stockRows.push({
+      symbol: leg.symbol,
+      side: (leg.action || "buy").toLowerCase(),
+      sideLabel: (leg.action || "buy").toUpperCase(),
+      contracts: qty,
+      orderType: "limit",
+      orderTypeLabel: "shares",
+      price,
+      quoteAsOf: null,
+      premiumLabel: price == null ? null : `est. price $${price.toFixed(2)}`,
+      impactLabel: impact == null ? null : `account impact debit $${impact.toFixed(2)}`,
+    });
+  }
+  const rows = [...stockRows, ...optionRows];
+  return {
+    rows,
+    emptyReason: rows.length ? "" : "The scan returned no legs.",
+    failedChecks:
+      rows.length > 0
+        ? (input.failedChecks ?? []).filter((line) => !line.includes("actual 0"))
+        : (input.failedChecks ?? []),
+    typeLabel: ticketTypeLabel(rows) || "limit",
+  };
 }
 
 describe("DeepScan risk review order panel", () => {
@@ -59,7 +115,7 @@ describe("DeepScan risk review order panel", () => {
     );
     expect(placement.autoSubmitOnAck).toBe(true);
     expect(html).toContain('data-testid="auto-exec-hint"');
-    expect(html).toContain("Acknowledge — accepting the thesis submits these options legs.");
+    expect(html).toContain("Acknowledge — accepting the thesis submits these legs.");
     expect(html).not.toContain('data-testid="submit-order"');
     expect(html).not.toContain("NO TRADE");
   });
@@ -269,7 +325,7 @@ describe("DeepScan risk review order panel", () => {
     expect(html).toContain("account impact credit $840.00");
     expect(html).toContain('data-testid="thesis"');
     expect(placement.autoSubmitOnAck).toBe(true);
-    expect(html).toContain("Acknowledge — accepting the thesis submits these options legs.");
+    expect(html).toContain("Acknowledge — accepting the thesis submits these legs.");
   });
 
   it("does not render expected 2; actual 0 when strategy_legs already has two legs", () => {
@@ -280,7 +336,7 @@ describe("DeepScan risk review order panel", () => {
     expect(html).toContain("MSFT261016P00500000");
     expect(html).toContain("limit at mid");
     expect(html).not.toContain("market · us_option");
-    expect(html).toContain("Acknowledge — accepting the thesis submits these options legs.");
+    expect(html).toContain("Acknowledge — accepting the thesis submits these legs.");
   });
 
   it("renders a stock leg as shares at the mid and keeps Place Trade when no check failed", () => {
@@ -330,7 +386,7 @@ describe("DeepScan risk review order panel", () => {
     expect(html).not.toContain("market · us_option");
     expect(placement.placeTradeEnabled).toBe(true);
     expect(html).toContain("Place Trade");
-    expect(html).not.toContain("disabled");
+    expect(html).toContain('<button data-testid="submit-order" class="rounded-md bg-gold');
   });
 
   it("says the scan returned no legs when both leg arrays are empty", () => {

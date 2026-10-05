@@ -63,7 +63,7 @@ export function StrategyScan({
   }
 
   const score = data.composite_score ?? null;
-  const strategyLabel = normalizeStrategyName(data.selected_strategy);
+  const strategyLabel = normalizeStrategyName(data.structure_label || data.selected_strategy);
   const legCount = data.metrics?.legs?.length ?? 0;
   const blocked = legCount === 0 && data.tradeable === false;
 
@@ -152,6 +152,11 @@ export function StrategyScan({
         {data.auto_exec_line ? (
           <p className="st-leg-hint" data-testid="auto-exec-eligibility">
             {data.auto_exec_line}
+          </p>
+        ) : null}
+        {data.quote_not_current ? (
+          <p className="st-leg-hint" data-testid="quote-not-current">
+            Quote not current{data.quote_as_of ? `. Quoted ${data.quote_as_of}` : ""}.
           </p>
         ) : null}
         {bannerNotes?.length ? (

@@ -16,10 +16,10 @@ import { VolatilityScan } from "../components/volatility/VolatilityScan";
 import { CAROUSEL_LAYERS, SCAN_SLIDE_LAYERS, SNAPSHOT_STUDIES } from "../constants";
 import { scoreTier } from "../lib/chartHighlight";
 import { optionReviewRows, optionsLegBlockReason } from "../lib/orderTicket";
-import { autoExecEligibilityLine, orderPlacement } from "../lib/riskReview";
+import { orderPlacement } from "../lib/riskReview";
 import { normalizeStrategyName } from "../lib/strategyDisplay";
 import { readUserSettings } from "../lib/userSettings";
-import { formatOrderAccountLabel, formatOrderType, buildOrderConfirmationDetails } from "../lib/orderFormat";
+import { buildOrderConfirmationDetails } from "../lib/orderFormat";
 import type { OhlcBar } from "../lib/ta";
 import { useSession } from "../store";
 import type {
@@ -57,6 +57,7 @@ export function DeepScan() {
   const [intro, setIntro] = useState(true);
   const [idx, setIdx] = useState(0);
   const [thesis, setThesis] = useState(false);
+  const [spreadConfirmed, setSpreadConfirmed] = useState(false);
   const [contractsPerLeg, setContractsPerLeg] = useState(1);
   const [msg, setMsg] = useState("");
   const [orderConfirmation, setOrderConfirmation] = useState<OrderConfirmationDetails | null>(null);
@@ -145,6 +146,23 @@ export function DeepScan() {
         equity_note?: string | null;
         equity_required?: boolean;
         block_reason?: string | null;
+        auto_execute_eligible?: boolean;
+        auto_exec_line?: string | null;
+        executable?: boolean;
+        placeable?: boolean;
+        spread_confirmation_required?: boolean;
+        spread_block_reasons?: string[];
+        quote_not_current?: boolean;
+        quote_as_of?: string | null;
+        structure_label?: string | null;
+        stock_legs?: Array<{
+          symbol: string;
+          side: string;
+          qty?: number;
+          already_held?: boolean;
+          note?: string | null;
+          price?: number | null;
+        }>;
       }
     | undefined;
   const scanAutoThreshold = riskReview?.auto_execution_threshold ?? autoExecMinScore;
@@ -154,7 +172,7 @@ export function DeepScan() {
   const equityNote = riskReview?.equity_note ?? null;
   const definedRisk = riskReview?.defined_risk ?? Boolean(riskReview?.auto_submit_on_ack);
   const strategyLayerData = scan.data?.layer_data?.strategy as StrategyLayer | undefined;
-  const strategyName = strategyLayerData?.selected_strategy ?? "";
+  const strategyName = strategyLayerData?.structure_label || riskReview?.structure_label || strategyLayerData?.selected_strategy || "";
   const reviewRows = useMemo(
     () =>
       optionReviewRows({
@@ -178,16 +196,30 @@ export function DeepScan() {
     riskNotes: strategyLayerData?.risk_notes,
   });
   // The browser auto-exec toggle defaults off and is not stored on the server, so it is not a gate.
+  const eligibilityLine = riskReview?.auto_exec_line || strategyLayerData?.auto_exec_line || null;
+  const structureExecutable = riskReview?.executable === true;
+  const structurePlaceable = riskReview?.placeable !== false;
   const placement = orderPlacement({
-    serverAutoSubmit: riskReview?.auto_submit_on_ack === true,
+    serverAutoSubmit: riskReview?.auto_execute_eligible === true,
     composite: compositeScore,
     threshold: scanAutoThreshold,
     definedRisk,
-    hasLegs: reviewRows.length > 0,
+    hasLegs: reviewRows.length > 0 || (riskReview?.stock_legs?.length ?? 0) > 0,
+    executable: structureExecutable,
+    validationPassed: structurePlaceable,
+    placeable: riskReview?.placeable,
+    spreadConfirmationRequired: riskReview?.spread_confirmation_required === true,
+    spreadConfirmed,
+    blockReason: eligibilityLine || riskReview?.block_reason || null,
   });
-  const autoSubmitOnAck = placement.autoSubmitOnAck;
-  const orderAssetClass = (riskReview as { asset_class?: string } | undefined)?.asset_class ?? "us_option";
-  const orderTypeLabel = formatOrderType("market", orderAssetClass);
+  const autoSubmitOnAck = placement.acknowledgeEnabled;
+  const orderTypeLabel = reviewRows.length
+    ? reviewRows
+        .map((leg) =>
+          leg.price != null ? `${leg.orderTypeLabel} ${leg.price.toFixed(2)}` : leg.orderTypeLabel,
+        )
+        .join(" · ")
+    : "limit";
   const chainStrategyHighlight = useMemo(() => {
     if (!scan.data) return undefined;
     const metricLegs = (strategyLayerData?.metrics?.legs ?? []).filter(
@@ -216,7 +248,7 @@ export function DeepScan() {
       ticker: locked.symbol,
       user,
       accountMode,
-      orderAssetClass,
+      orderAssetClass: "us_option",
     });
   }
 
@@ -284,6 +316,7 @@ export function DeepScan() {
           limit_price: leg.orderType === "limit" ? leg.price : null,
         })),
         contracts_per_leg: contractsPerLeg,
+        spread_confirmed: spreadConfirmed,
       });
     },
     onSuccess: (r) => {
@@ -437,10 +470,36 @@ export function DeepScan() {
                       </ul>
                     ) : null}
                     <RiskReviewLegs rows={reviewRows} />
-                    {placement.autoSubmitOnAck && compositeScore != null ? (
+                    {riskReview?.stock_legs?.length ? (
+                      <ul className="space-y-2 text-sm" data-testid="stock-leg-context">
+                        {riskReview.stock_legs.map((leg) => (
+                          <li key={`held-${leg.symbol}`} className="rounded border border-line/60 px-3 py-2 font-mono text-xs">
+                            {leg.qty} {leg.symbol} shares
+                            {leg.note ? ` · ${leg.note}` : ""}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    {eligibilityLine ? (
                       <p className="text-sm text-champagne/80" data-testid="auto-exec-eligibility">
-                        {autoExecEligibilityLine(compositeScore, scanAutoThreshold)}
+                        {eligibilityLine}
                       </p>
+                    ) : null}
+                    {riskReview?.quote_not_current ? (
+                      <p className="text-sm text-champagne/80" data-testid="quote-not-current">
+                        Quote not current{riskReview.quote_as_of ? `. Quoted ${riskReview.quote_as_of}` : ""}.
+                      </p>
+                    ) : null}
+                    {riskReview?.spread_confirmation_required ? (
+                      <label className="flex cursor-pointer items-center gap-2 text-sm leading-snug">
+                        <input
+                          type="checkbox"
+                          data-testid="spread-confirm"
+                          checked={spreadConfirmed}
+                          onChange={(e) => setSpreadConfirmed(e.target.checked)}
+                        />
+                        <span>{(riskReview.spread_block_reasons ?? []).join(" ") || eligibilityLine}</span>
+                      </label>
                     ) : null}
                     <label className="flex cursor-pointer items-center gap-2 text-sm leading-snug">
                       <input

@@ -24,7 +24,7 @@ const sampleDetails: OrderConfirmationDetails = {
   accountLabel: "Paper · @trader1 · usr-pape",
   accountMode: "paper_funded",
   ticker: "AAPL",
-  orderType: "market",
+  orderType: "limit",
   assetClass: "us_option",
   status: "filled",
 };
@@ -43,7 +43,8 @@ describe("OrderConfirmationCertificate", () => {
     expect(html).toContain('data-testid="cert-leg-expiration"');
     expect(html).toMatch(/Jan 15, 2027/);
     expect(html).toContain('data-testid="order-cert-order-type"');
-    expect(html).toContain("market · us_option");
+    expect(html).toContain("limit");
+    expect(html).not.toContain("us_option");
     expect(html).toContain('data-testid="order-cert-account"');
     expect(html).toContain("Paper · @trader1 · usr-pape");
     expect(html).toContain('data-testid="order-cert-order-ids"');
