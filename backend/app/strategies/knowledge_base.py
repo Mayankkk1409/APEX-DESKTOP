@@ -7,11 +7,11 @@ earnings gates are a standard double calendar.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from app.strategies.registry import STRATEGY_REGISTRY
+from app.strategies.registry import STRATEGY_REGISTRY, format_legs_template
 
-KB_VERSION = "11.2"
+KB_VERSION = "12.0"
 CHANGELOG: tuple[dict[str, str], ...] = (
     {
         "version": "11.0",
@@ -26,6 +26,16 @@ CHANGELOG: tuple[dict[str, str], ...] = (
             "Removes the premium-offset gate and the 0.15–0.25 delta band from the earnings structure. "
             "Drops conflicting APEX Strategy scenario prose. "
             "Corrects the reverse calendar so the near leg is long and the later leg is short on the grid."
+        ),
+    },
+    {
+        "version": "12.0",
+        "note": (
+            "Change 12. Each catalog row stores a legs template, outlook, vega/theta/gamma sign, "
+            "ideal IV regime, DTE window, payoff formulas, assignment note, entry and exit rules, "
+            "brokerage approval class, a named reference, and this version. "
+            "Windows that the product does not state stay unstated. "
+            "Gamma Trampoline™ wording from Change 11 v2 is unchanged."
         ),
     },
 )
@@ -153,10 +163,28 @@ class KnowledgeEntry:
     breakevens: str
     capital_or_margin: str
     reference: str
+    legs_template: str
+    vega_sign: str
+    theta_sign: str
+    gamma_sign: str
+    ideal_iv_regime: str
+    dte_window: str
+    dte_min: int | None
+    dte_max: int | None
+    dte_source: str
+    approval_level: str
+    approval_note: str
+    version: str
+    entry_rules: str
+    management_rules: str
+    exit_rules: str
     verbatim: bool = False
 
 
 def _entry(**kwargs: object) -> KnowledgeEntry:
+    entry_id = str(kwargs.get("entry_id") or "")
+    for key, value in _structured_fields(entry_id).items():
+        kwargs.setdefault(key, value)
     return KnowledgeEntry(**kwargs)  # type: ignore[arg-type]
 
 
@@ -428,6 +456,343 @@ _OUTLOOK = {
     "married_put": "bullish",
 }
 
+# Signs and regimes below are taken from the greek and volatility sentences already
+# stored on each payoff family. A sign the sentence does not name stays "not_stated".
+# vega, theta, gamma, ideal IV regime.
+_SIGNS_BY_REF: dict[str, tuple[str, str, str, str]] = {
+    "payoff_long_option": ("long", "negative", "long", "cheap"),
+    "payoff_short_option": ("short", "positive", "short", "not_stated"),
+    "payoff_vertical_debit": ("long", "negative", "long", "not_stated"),
+    "payoff_vertical_credit": ("short", "positive", "not_stated", "rich"),
+    "payoff_iron_condor": ("short", "positive", "short", "rich"),
+    "payoff_long_iron_condor": ("not_stated", "not_stated", "long", "not_stated"),
+    "payoff_long_straddle": ("long", "negative", "long", "not_stated"),
+    "payoff_long_strangle": ("long", "negative", "long", "not_stated"),
+    "payoff_short_straddle": ("short", "positive", "short", "not_stated"),
+    "payoff_short_strangle": ("short", "positive", "short", "not_stated"),
+    "payoff_apex_strategy": ("long", "positive", "short", "not_stated"),
+}
+
+_NO_WINDOW = "No product DTE window is stated."
+_NO_WINDOW_SOURCE = (
+    "No DTE window is stated in the strategy playbook, the Change 11 settings, or LEAPS_MIN_DTE."
+)
+_APPROVAL_NOTE = (
+    "Brokerages set the options approval class. OCC, Characteristics and Risks of Standardized Options, "
+    "describes the payoff and the risks of long options, spreads, covered positions, and uncovered shorts. "
+    "It does not assign a numeric approval level."
+)
+
+_VEGA_SIGNS = frozenset({"long", "short", "mixed", "flat", "none", "not_stated"})
+_THETA_SIGNS = frozenset({"positive", "negative", "mixed", "flat", "none", "not_stated"})
+_GAMMA_SIGNS = frozenset({"long", "short", "mixed", "flat", "none", "not_stated"})
+_IV_REGIMES = frozenset({"cheap", "rich", "fair", "inversion", "neutral_range", "not_stated", "not_a_trade"})
+_APPROVAL_LEVELS = frozenset(
+    {"long_premium", "defined_risk_spread", "stock_combo", "uncovered", "cash_secured", "advisory"}
+)
+_REFERENCE_NAMES = ("OCC", "Options Industry Council", "Cboe")
+
+REQUIRED_KB_FIELDS: tuple[str, ...] = (
+    "legs_template",
+    "outlook",
+    "vega_sign",
+    "theta_sign",
+    "gamma_sign",
+    "ideal_iv_regime",
+    "dte_window",
+    "dte_source",
+    "max_profit",
+    "max_loss",
+    "breakevens",
+    "assignment_dividend_pin",
+    "entry_management_exit",
+    "approval_level",
+    "approval_note",
+    "reference",
+    "version",
+    "summary",
+    "why_it_fits",
+    "how_to_use",
+    "key_risks",
+    "greeks_profile",
+    "ideal_conditions",
+    "when_not_to_use",
+    "capital_or_margin",
+    "entry_rules",
+    "management_rules",
+    "exit_rules",
+)
+
+
+def _approval_level(spec_id: str) -> str:
+    spec = STRATEGY_REGISTRY[spec_id]
+    if spec.risk_type == "advisory" or spec.leg_count == 0:
+        return "advisory"
+    if spec.strategy_id == "wheel_strategy":
+        return "cash_secured"
+    if spec.equity_required:
+        return "stock_combo"
+    if spec.risk_type == "undefined" or spec.max_loss_type == "unlimited":
+        return "uncovered"
+    if spec.leg_count == 1 and spec.leg_specs and spec.leg_specs[0].side == "sell":
+        return "uncovered"
+    if spec.leg_count == 1:
+        return "long_premium"
+    return "defined_risk_spread"
+
+
+_CONDOR_30_45 = {
+    "short_iron_condor",
+    "iron_condor_wide",
+    "iv_crush_short_iron_condor",
+    "theta_harvest_iron_condor",
+    "iron_condor_monthly",
+}
+_CREDIT_30_45 = {
+    "bull_put_spread_credit",
+    "bear_call_spread_credit",
+    "put_credit_spread",
+    "call_credit_spread",
+}
+_PROTECTIVE_30_45 = {"married_put", "stock_long_put", "synthetic_call"}
+_MATRIX_REGIME = {
+    "bull_call_spread": "cheap",
+    "call_debit_spread": "cheap",
+    "wide_bull_call_spread": "cheap",
+    "bear_put_spread": "cheap",
+    "put_debit_spread": "cheap",
+    "wide_bear_put_spread": "cheap",
+    "long_straddle": "cheap",
+    "long_strangle": "cheap",
+    "long_straddle_leaps": "cheap",
+    "long_straddle_pre_earnings": "cheap",
+    "earnings_straddle": "cheap",
+    "gamma_scalping": "cheap",
+    "calendar_spread": "fair",
+    "calendar_call_spread": "fair",
+    "calendar_put_spread": "fair",
+    "diagonal_spread_bullish": "fair",
+    "diagonal_spread_bearish": "fair",
+    "diagonal_call_spread": "fair",
+}
+
+
+def _dte_fields(spec_id: str) -> dict[str, object]:
+    if spec_id in {"long_call_leaps", "long_put_leaps", "long_straddle_leaps"}:
+        return {
+            "dte_window": "more than 365 calendar days",
+            "dte_min": 366,
+            "dte_max": None,
+            "dte_source": (
+                "metrics_builder.LEAPS_MIN_DTE is 365. The builder keeps an expiration only when "
+                "days to expiration are greater than 365."
+            ),
+        }
+    if spec_id in _PROTECTIVE_30_45:
+        return {
+            "dte_window": "30 to 45",
+            "dte_min": 30,
+            "dte_max": 45,
+            "dte_source": (
+                "Strategy playbook for Married Put: buy a put slightly OTM at 30–45 DTE. "
+                "The same window is stored for long stock plus a long put."
+            ),
+        }
+    if spec_id in _CONDOR_30_45:
+        return {
+            "dte_window": "30 to 45",
+            "dte_min": 30,
+            "dte_max": 45,
+            "dte_source": "Strategy playbook for Short Iron Condor: Target 30–45 DTE. Same short-condor legs.",
+        }
+    if spec_id in _CREDIT_30_45:
+        return {
+            "dte_window": "30 to 45",
+            "dte_min": 30,
+            "dte_max": 45,
+            "dte_source": "Change 11 v2 Rule 2 setting: DTE 30 to 45. Rule 2 uses this credit spread.",
+        }
+    return {
+        "dte_window": _NO_WINDOW,
+        "dte_min": None,
+        "dte_max": None,
+        "dte_source": _NO_WINDOW_SOURCE,
+    }
+
+
+def _activity_rules(entry_id: str) -> dict[str, str]:
+    """Entry, management, and exit sentences already used by the playbook or the formula text."""
+    if entry_id == "apex_benchmark_greeks_buy":
+        return {
+            "entry_rules": (
+                "Buy the option with a limit order near the mid-price. "
+                "Size the position so that the full premium is an amount you can afford to lose."
+            ),
+            "management_rules": (
+                "Consider taking profits at a predefined target, and exit or re-evaluate if the trend "
+                "or sentiment alignment breaks."
+            ),
+            "exit_rules": "Close or roll before the final 21 days, when time decay accelerates.",
+        }
+    if entry_id == "apex_benchmark_greeks_sell":
+        return {
+            "entry_rules": "Enter with a limit order near the mid-price for the net credit.",
+            "management_rules": (
+                "A common management approach is to close the position once about 50% of the maximum profit has been captured."
+            ),
+            "exit_rules": (
+                "Close it if the loss reaches about 2 times the credit received or the position reaches 21 days "
+                "to expiration, whichever comes first. Watch for early-assignment risk on short calls ahead of ex-dividend dates."
+            ),
+        }
+    if entry_id == "gamma_trampoline":
+        return {
+            "entry_rules": (
+                "Enter all four legs together as one order, about 5 to 10 days before earnings, "
+                "with a limit price near the mid of the net debit."
+            ),
+            "management_rules": (
+                "Do not hold the short legs into their expiration close, where assignment and pin risk rise. "
+                "If you want to keep exposure to a continued move, you may close the front-week shorts and keep the back-week options."
+            ),
+            "exit_rules": (
+                "Close all four legs together after the announcement, ideally on the first trading session after earnings, "
+                "and no later than the front-week expiration."
+            ),
+        }
+    if entry_id in _PROTECTIVE_30_45:
+        return {
+            "entry_rules": "Own or plan to own shares. Buy a put slightly OTM at 30–45 DTE.",
+            "management_rules": "Strike near pivot support.",
+            "exit_rules": "Roll before expiry if the thesis is intact.",
+        }
+    if entry_id in _CONDOR_30_45:
+        return {
+            "entry_rules": "Sell one OTM put spread and one OTM call spread.",
+            "management_rules": "Target 30–45 DTE.",
+            "exit_rules": "Manage at 50% of max profit or if price breaches a short strike.",
+        }
+    spec = STRATEGY_REGISTRY.get(entry_id)
+    if spec is None or spec.risk_type == "advisory" or spec.leg_count == 0:
+        return {
+            "entry_rules": "No entry.",
+            "management_rules": "No position to manage.",
+            "exit_rules": "No exit. No order is sent for this label.",
+        }
+    formulas = _FORMULAS.get(spec.payoff_function_ref or "", _DEFAULT_FORMULA)
+    manage = formulas["manage"]
+    pieces = [part.strip().rstrip(".") for part in manage.split(". ") if part.strip()]
+    if len(pieces) >= 2:
+        management = pieces[0] + "."
+        exit_rule = ". ".join(pieces[1:]) + "."
+    else:
+        management = manage
+        exit_rule = "Close or roll before expiration."
+    return {
+        "entry_rules": formulas["how"],
+        "management_rules": management,
+        "exit_rules": exit_rule,
+    }
+
+
+def _catalog_fields(entry_id: str) -> dict[str, object]:
+    """Machine-readable fields 2A can read. Missing product windows stay unstated."""
+    if entry_id == "apex_benchmark_greeks_buy":
+        return {
+            "legs_template": "buy 1 call or buy 1 put",
+            "vega_sign": "long",
+            "theta_sign": "negative",
+            "gamma_sign": "long",
+            "ideal_iv_regime": "cheap",
+            "dte_window": "30 to 90",
+            "dte_min": 30,
+            "dte_max": 90,
+            "dte_source": "Change 11 v2 Rule 1 setting: DTE 30 to 90.",
+            "approval_level": "long_premium",
+            "approval_note": _APPROVAL_NOTE,
+            "version": KB_VERSION,
+        }
+    if entry_id == "apex_benchmark_greeks_sell":
+        return {
+            "legs_template": (
+                "neutral: short iron condor (sell put, buy lower put, sell call, buy higher call); "
+                "mild bullish: sell put, buy lower put; mild bearish: sell call, buy higher call"
+            ),
+            "vega_sign": "short",
+            "theta_sign": "positive",
+            "gamma_sign": "short",
+            "ideal_iv_regime": "rich",
+            "dte_window": "30 to 45",
+            "dte_min": 30,
+            "dte_max": 45,
+            "dte_source": "Change 11 v2 Rule 2 setting: DTE 30 to 45.",
+            "approval_level": "defined_risk_spread",
+            "approval_note": _APPROVAL_NOTE,
+            "version": KB_VERSION,
+        }
+    if entry_id == "gamma_trampoline":
+        return {
+            "legs_template": (
+                "sell 1 front-week call; buy 1 later call at the same strike; "
+                "sell 1 front-week put; buy 1 later put at the same strike"
+            ),
+            "vega_sign": "long",
+            "theta_sign": "positive",
+            "gamma_sign": "short",
+            "ideal_iv_regime": "inversion",
+            "dte_window": "5 to 10 calendar days before earnings",
+            "dte_min": 5,
+            "dte_max": 10,
+            "dte_source": (
+                "Change 11 v2 earnings window: 5 to 10 calendar days. "
+                "Gamma Trampoline™ uses this window only when its earnings gates pass. "
+                "The same legs otherwise stay a double calendar, which has no separate product DTE window."
+            ),
+            "approval_level": "defined_risk_spread",
+            "approval_note": _APPROVAL_NOTE,
+            "version": KB_VERSION,
+        }
+    spec = STRATEGY_REGISTRY.get(entry_id)
+    if spec is None:
+        return {
+            "legs_template": "no legs",
+            "vega_sign": "none",
+            "theta_sign": "none",
+            "gamma_sign": "none",
+            "ideal_iv_regime": "not_a_trade",
+            "dte_window": "not applicable",
+            "dte_min": None,
+            "dte_max": None,
+            "dte_source": "Advisory label. There is no expiration.",
+            "approval_level": "advisory",
+            "approval_note": _APPROVAL_NOTE,
+            "version": KB_VERSION,
+        }
+    ref = spec.payoff_function_ref or ""
+    vega, theta, gamma, regime = _SIGNS_BY_REF.get(ref, ("not_stated", "not_stated", "not_stated", "not_stated"))
+    if spec.risk_type == "advisory" or spec.leg_count == 0:
+        vega, theta, gamma, regime = "none", "none", "none", "not_a_trade"
+    fields: dict[str, object] = {
+        "legs_template": format_legs_template(spec),
+        "vega_sign": vega,
+        "theta_sign": theta,
+        "gamma_sign": gamma,
+        "ideal_iv_regime": regime,
+        "approval_level": _approval_level(entry_id),
+        "approval_note": _APPROVAL_NOTE,
+        "version": KB_VERSION,
+    }
+    fields.update(_dte_fields(entry_id))
+    return fields
+
+
+def _structured_fields(entry_id: str) -> dict[str, object]:
+    fields = _catalog_fields(entry_id)
+    fields.update(_activity_rules(entry_id))
+    if entry_id in _MATRIX_REGIME:
+        fields["ideal_iv_regime"] = _MATRIX_REGIME[entry_id]
+    return fields
+
 
 def _specials() -> dict[str, KnowledgeEntry]:
     buy = _entry(
@@ -513,8 +878,17 @@ def _specials() -> dict[str, KnowledgeEntry]:
 def knowledge_entries() -> dict[str, KnowledgeEntry]:
     entries = {spec_id: _template(spec_id) for spec_id in STRATEGY_REGISTRY}
     entries.update(_specials())
-    # The earnings structure's catalog row keeps the registry id and points at the trademark entry.
-    entries["apex_strategy"] = _specials()["gamma_trampoline"]
+    # The registry id stays APEX Strategy. Gamma Trampoline™ is a separate label.
+    apex = entries["apex_strategy"]
+    entries["apex_strategy"] = replace(
+        apex,
+        summary=(
+            "APEX Strategy. The four legs are a double calendar: sell the front-week call and put "
+            "and buy the same strikes in the later expiration. " + GAMMA_CLASSIFIER
+        ),
+        when_not_to_use=GAMMA_CLASSIFIER,
+        key_risks=f"{apex.key_risks} {GAMMA_CLASSIFIER}",
+    )
     entries["apex_benchmark_greeks_strategy"] = _specials()["apex_benchmark_greeks_buy"]
     entries["reverse_calendar"] = _entry(
         entry_id="reverse_calendar",
@@ -554,41 +928,40 @@ def entry_for(strategy_name_or_id: str) -> KnowledgeEntry | None:
     return None
 
 
-def validate_knowledge_base() -> list[str]:
-    """Return errors. An empty list means the base is valid for startup and CI."""
+def validate_entries(entries: dict[str, KnowledgeEntry]) -> list[str]:
+    """Return errors for a catalog snapshot. Startup and CI call this with the live catalog."""
     errors: list[str] = []
-    entries = knowledge_entries()
-    if KB_VERSION != "11.2":
-        errors.append(f"knowledge base version {KB_VERSION} is not 11.2")
+    if KB_VERSION != "12.0":
+        errors.append(f"knowledge base version {KB_VERSION} is not 12.0")
     if not any(row["version"] == "11.2" for row in CHANGELOG):
         errors.append("changelog is missing version 11.2")
+    if not any(row["version"] == "12.0" for row in CHANGELOG):
+        errors.append("changelog is missing version 12.0")
     covered: set[str] = set()
-    required = (
-        "summary",
-        "why_it_fits",
-        "how_to_use",
-        "key_risks",
-        "outlook",
-        "vol_view",
-        "greeks_profile",
-        "ideal_conditions",
-        "when_not_to_use",
-        "assignment_dividend_pin",
-        "entry_management_exit",
-        "max_profit",
-        "max_loss",
-        "breakevens",
-        "capital_or_margin",
-        "reference",
-    )
     for entry in entries.values():
         covered.update(entry.registry_ids)
-        for field in required:
+        for field in REQUIRED_KB_FIELDS:
             if not str(getattr(entry, field) or "").strip():
                 errors.append(f"{entry.entry_id} missing {field}")
+        if entry.vega_sign not in _VEGA_SIGNS:
+            errors.append(f"{entry.entry_id} vega_sign {entry.vega_sign} is not an allowed sign")
+        if entry.theta_sign not in _THETA_SIGNS:
+            errors.append(f"{entry.entry_id} theta_sign {entry.theta_sign} is not an allowed sign")
+        if entry.gamma_sign not in _GAMMA_SIGNS:
+            errors.append(f"{entry.entry_id} gamma_sign {entry.gamma_sign} is not an allowed sign")
+        if entry.ideal_iv_regime not in _IV_REGIMES:
+            errors.append(f"{entry.entry_id} ideal_iv_regime {entry.ideal_iv_regime} is not an allowed regime")
+        if entry.approval_level not in _APPROVAL_LEVELS:
+            errors.append(f"{entry.entry_id} approval_level {entry.approval_level} is not an allowed class")
+        if entry.version != KB_VERSION:
+            errors.append(f"{entry.entry_id} version {entry.version} is not {KB_VERSION}")
+        if entry.dte_min is not None and entry.dte_max is not None and entry.dte_min > entry.dte_max:
+            errors.append(f"{entry.entry_id} dte_min {entry.dte_min} is above dte_max {entry.dte_max}")
+        if not any(name in entry.reference for name in _REFERENCE_NAMES):
+            errors.append(f"{entry.entry_id} reference does not name OCC, Options Industry Council, or Cboe")
         if entry.verbatim:
             continue
-        blob = " ".join(str(getattr(entry, field)) for field in required).lower()
+        blob = " ".join(str(getattr(entry, field)) for field in REQUIRED_KB_FIELDS).lower()
         for phrase in _BANNED:
             if phrase in blob:
                 errors.append(f"{entry.entry_id} contains unsupported phrase {phrase}")
@@ -597,4 +970,41 @@ def validate_knowledge_base() -> list[str]:
     missing = [sid for sid in STRATEGY_REGISTRY if sid not in covered]
     if missing:
         errors.append("uncovered strategies: " + ", ".join(missing))
+    gamma = entries.get("gamma_trampoline")
+    if gamma is None:
+        errors.append("gamma_trampoline entry is missing")
+    else:
+        if gamma.title != "Gamma Trampoline™":
+            errors.append("gamma_trampoline title was renamed")
+        for paragraph in (GAMMA_SUMMARY, GAMMA_PROBLEM, GAMMA_GREEKS, GAMMA_SCENARIOS, GAMMA_HOW, GAMMA_CLASSIFIER):
+            blob = " ".join(
+                (
+                    gamma.summary,
+                    gamma.why_it_fits,
+                    gamma.how_to_use,
+                    gamma.key_risks,
+                    gamma.greeks_profile,
+                    gamma.when_not_to_use,
+                    gamma.entry_management_exit,
+                    gamma.reference,
+                )
+            )
+            if paragraph not in blob:
+                errors.append("gamma_trampoline is missing a Change 11 v2 paragraph")
+                break
+    calendar = entries.get("double_calendar")
+    if calendar is None or calendar.title != "Double Calendar":
+        errors.append("double_calendar title must stay Double Calendar")
+    elif "Gamma Trampoline" in calendar.title:
+        errors.append("double_calendar title must not use the earnings label")
+    apex = entries.get("apex_strategy")
+    if apex is None or apex.title != "APEX Strategy":
+        errors.append("apex_strategy title must stay APEX Strategy")
+    elif GAMMA_CLASSIFIER not in f"{apex.summary} {apex.when_not_to_use}":
+        errors.append("apex_strategy is missing the Change 11 classifier sentence")
     return errors
+
+
+def validate_knowledge_base() -> list[str]:
+    """Return errors. An empty list means the base is valid for startup and CI."""
+    return validate_entries(knowledge_entries())

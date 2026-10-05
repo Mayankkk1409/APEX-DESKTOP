@@ -479,3 +479,43 @@ def get_strategy_spec(strategy_name_or_id: str) -> StrategySpec | None:
 
 def implemented_strategy_names() -> list[str]:
     return [s.display_name for s in _ALL_FAMILIES if s.payoff_function_ref is not None and s.tradeable]
+
+
+# Option quantity by registry-leg index when the encyclopedia ratio is not 1.
+# The order validator and the knowledge-base legs template both read this map.
+LEG_QUANTITY_BY_INDEX: dict[str, dict[int, int]] = {
+    "strip": {1: 2},
+    "strap": {0: 2},
+    "synthetic_straddle": {1: 2},
+    "long_call_butterfly": {1: 2},
+    "long_put_butterfly": {1: 2},
+    "broken_wing_butterfly": {1: 2},
+    "skip_strike_butterfly": {1: 2},
+    "short_call_butterfly": {1: 2},
+    "short_put_butterfly": {1: 2},
+    "ratio_spread": {1: 2},
+    "call_ratio_spread": {1: 2},
+    "put_ratio_spread": {1: 2},
+    "one_by_two_ratio_spread": {1: 2},
+    "two_by_one_ratio_spread": {0: 2},
+    "back_ratio_spread": {1: 2},
+    "call_backspread": {1: 2},
+    "put_backspread": {1: 2},
+}
+
+
+def format_legs_template(spec: StrategySpec) -> str:
+    """Buy/sell template the knowledge base stores and the order validator checks."""
+    if not spec.leg_specs:
+        return "no legs"
+    quantities = LEG_QUANTITY_BY_INDEX.get(spec.strategy_id, {})
+    parts: list[str] = []
+    for index, leg in enumerate(spec.leg_specs):
+        count = quantities.get(index, 1)
+        if leg.option_type == "stock":
+            shares = spec.equity_leg_spec.shares_per_contract if spec.equity_leg_spec else 100
+            parts.append(f"{leg.side} {shares * count} shares")
+            continue
+        noun = leg.option_type if count == 1 else f"{leg.option_type}s"
+        parts.append(f"{leg.side} {count} {noun}" if count != 1 else f"{leg.side} {noun}")
+    return "; ".join(parts)
