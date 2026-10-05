@@ -343,8 +343,17 @@ def build_layers(
         earnings_next = earnings_calendar.get("next_date")
     if not earnings_next:
         earnings_next = earnings_alert.get("next_date")
+    earnings_not_applicable = (
+        isinstance(earnings_calendar, dict) and earnings_calendar.get("earnings_applicable") is False
+    )
+    earnings_estimated = (
+        isinstance(earnings_calendar, dict) and earnings_calendar.get("date_status") == "estimated"
+    )
     earnings_date_confirmed = bool(earnings_next)
-    if not earnings_date_confirmed:
+    if earnings_not_applicable:
+        earnings_date_confirmed = False
+        catalyst_days = None
+    elif not earnings_date_confirmed and not earnings_estimated:
         catalyst_days = None
     elif catalyst_days is None and isinstance(earnings_calendar, dict):
         catalyst_days = earnings_calendar.get("dte")
@@ -394,7 +403,15 @@ def build_layers(
         auto_exec_threshold=auto_execution_threshold,
         back_month_available=back_month_ready,
         catalyst_days=int(catalyst_days) if catalyst_days is not None else None,
-        earnings_date_confirmed=earnings_date_confirmed if earnings_next or earnings_alert or earnings_calendar else None,
+        earnings_date_confirmed=(
+            None
+            if earnings_not_applicable
+            else True
+            if earnings_estimated
+            else earnings_date_confirmed
+            if earnings_next or earnings_alert or earnings_calendar
+            else None
+        ),
         risk_profile=risk_profile,
         rule_context=rule_context,
         sentiment_bias=(sentiment_layer or {}).get("bias") if isinstance(sentiment_layer, dict) else None,
@@ -929,10 +946,10 @@ def _restore_scored_strategy_layer(layer: dict[str, Any], composite: float, thre
     if not isinstance(why, str) or not why.startswith("Composite "):
         return
     sentence = (
-        f"Composite {composite:g}/100 meets your auto-execution threshold ({threshold:.0f})."
+        f"Composite {float(composite):.1f}/100 meets your auto-execution threshold ({threshold:.0f})."
         if tier == "auto_exec"
         else (
-            f"Composite {composite:g}/100 — manual review required below your auto-execution threshold "
+            f"Composite {float(composite):.1f}/100 — manual review required below your auto-execution threshold "
             f"({threshold:.0f})."
         )
     )
@@ -941,5 +958,5 @@ def _restore_scored_strategy_layer(layer: dict[str, Any], composite: float, thre
     layer["why_recommended"] = sentence + (why[boundary + 1 :] if boundary != -1 else "")
     fit = layer.get("why_it_fits")
     if isinstance(fit, str) and fit.startswith("Composite "):
-        fit_dot = fit.find(".")
-        layer["why_it_fits"] = sentence + (fit[fit_dot + 1 :] if fit_dot != -1 else "")
+        fit_boundary = fit.find(". ")
+        layer["why_it_fits"] = sentence + (fit[fit_boundary + 1 :] if fit_boundary != -1 else "")

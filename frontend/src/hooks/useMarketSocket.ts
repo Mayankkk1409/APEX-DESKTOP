@@ -1,4 +1,5 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { getAccessToken, subscribeAccessToken } from "../api";
 import { WS_BASE } from "../constants";
 import { connectMarketSocket, marketSocketUrl, type MarketSocketMessage } from "../lib/marketSocket";
 
@@ -17,11 +18,21 @@ export function useMarketSocket(opts: {
   symbolsRef.current = opts.symbols;
   const sendRef = useRef<(data: string) => boolean>(() => false);
   const symbolKey = (opts.symbols ?? []).filter(Boolean).join(",");
+  const [liveToken, setLiveToken] = useState<string | null>(opts.token);
 
   useEffect(() => {
-    if (!opts.token || typeof WebSocket === "undefined") return;
+    setLiveToken(opts.token);
+  }, [opts.token]);
+
+  useEffect(() => subscribeAccessToken(setLiveToken), []);
+
+  useEffect(() => {
+    const token = liveToken || getAccessToken();
+    if (!token || typeof WebSocket === "undefined") return;
     const conn = connectMarketSocket({
-      url: marketSocketUrl(WS_BASE, opts.token),
+      url: marketSocketUrl(WS_BASE, token),
+      getToken: getAccessToken,
+      urlForToken: (next) => marketSocketUrl(WS_BASE, next),
       getSymbols: () => symbolsRef.current ?? [],
       onMessage: (msg) => onMessageRef.current(msg),
     });
@@ -30,10 +41,10 @@ export function useMarketSocket(opts: {
       sendRef.current = () => false;
       conn.close();
     };
-  }, [opts.token]);
+  }, [liveToken]);
 
   useEffect(() => {
     if (!symbolKey) return;
     sendRef.current(JSON.stringify({ type: "subscribe", symbols: symbolKey.split(",") }));
-  }, [opts.token, symbolKey]);
+  }, [liveToken, symbolKey]);
 }

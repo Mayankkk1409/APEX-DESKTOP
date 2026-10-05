@@ -115,7 +115,7 @@ describe("orderPlacement", () => {
     expect(placement.autoSubmitOnAck).toBe(false);
     expect(placement.placeTradeEnabled).toBe(true);
     expect(placement.note).toBe(
-      "Manual confirmation required (score 62 vs. your auto-execute minimum 70).",
+      "Manual confirmation required (score 62.0 vs. your auto-execute minimum 70.0).",
     );
     expect(placement.note).not.toContain("BELOW EXECUTION THRESHOLD");
     expect(manualConfirmationNote(62, 70)).toBe(placement.note);
@@ -129,7 +129,7 @@ describe("orderPlacement", () => {
       note: null,
     });
     expect(autoExecEligibilityLine(66, 40)).toBe(
-      "Composite 66. Your minimum 40. Auto-execute eligible.",
+      "Composite 66.0. Your minimum 40.0. Auto-execute eligible.",
     );
   });
 
@@ -209,7 +209,7 @@ describe("orderPlacement", () => {
       executable: false,
       validationPassed: false,
       placeable: false,
-      blockReason: "Composite 62.9. Your minimum 50. Not auto-executable: quote 17 min old.",
+      blockReason: "Composite 62.9. Your minimum 50.0. Not auto-executable: quote 17 min old.",
     });
     expect(placement.autoSubmitOnAck).toBe(false);
     expect(placement.acknowledgeEnabled).toBe(false);
@@ -217,7 +217,7 @@ describe("orderPlacement", () => {
     expect(placement.note).toContain("quote 17 min old");
     expect(placement.note).not.toContain("Auto-execute eligible");
     expect(blockedEligibilityLine(62.9, 50, "quote 17 min old")).toBe(
-      "Composite 62.9. Your minimum 50. Not auto-executable: quote 17 min old.",
+      "Composite 62.9. Your minimum 50.0. Not auto-executable: quote 17 min old.",
     );
   });
 

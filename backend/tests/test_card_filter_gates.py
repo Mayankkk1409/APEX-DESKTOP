@@ -211,6 +211,64 @@ def test_confirmed_earnings_inside_one_day_blocks_auto_execute() -> None:
     open_block, open_note = earnings_position_note("Long Call", days=None, confirmed=False)
     assert open_block is False
     assert open_note == "Earnings date is unconfirmed."
+    from app.services.strategy_engine import _earnings_inputs
+
+    etf_days, _etf_confirmed, etf_discussed = _earnings_inputs(
+        {"earnings_calendar": {"earnings_applicable": False, "next_date": None, "security_type": "etf"}},
+        {},
+    )
+    assert etf_discussed is False
+    assert etf_days is None
+    est_days, est_confirmed, est_discussed = _earnings_inputs(
+        {
+            "earnings_calendar": {
+                "earnings_applicable": True,
+                "next_date": "2026-10-28",
+                "date_status": "estimated",
+                "display": "2026-10-28 est.",
+                "dte": 23,
+            }
+        },
+        {},
+    )
+    assert est_discussed is True
+    assert est_confirmed is True
+    assert est_days == 23
+    est_block, est_note = earnings_position_note("Long Call", days=est_days, confirmed=est_confirmed)
+    assert est_block is False
+    assert est_note != "Earnings date is unconfirmed."
+    from app.services.strategy_recommendation import (
+        MarketSnapshot,
+        TechnicalAnalysisResultRef,
+        recommend_strategy,
+    )
+
+    market = MarketSnapshot(symbol="SPY", spot=500.0, direction="neutral", data_fresh=True, adv=50_000_000)
+    technical = TechnicalAnalysisResultRef(score=70, direction="neutral", confirmed_pattern_count=1)
+    skipped = recommend_strategy(
+        market=market,
+        technical=technical,
+        composite=60,
+        vol_signal="fair",
+        earnings_date_confirmed=None,
+    )
+    assert "Earnings date is unconfirmed." not in skipped.risk_notes
+    estimated = recommend_strategy(
+        market=market,
+        technical=technical,
+        composite=60,
+        vol_signal="fair",
+        earnings_date_confirmed=True,
+    )
+    assert "Earnings date is unconfirmed." not in estimated.risk_notes
+    unknown = recommend_strategy(
+        market=MarketSnapshot(symbol="AAPL", spot=200.0, direction="neutral", data_fresh=True, adv=50_000_000),
+        technical=technical,
+        composite=60,
+        vol_signal="fair",
+        earnings_date_confirmed=False,
+    )
+    assert "Earnings date is unconfirmed." in unknown.risk_notes
 
     passing = _aapl_call(delta=0.60, theta=-0.04)
     blocked_layer = _layer(

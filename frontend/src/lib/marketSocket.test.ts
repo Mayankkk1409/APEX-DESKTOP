@@ -104,6 +104,42 @@ describe("market socket", () => {
     expect(FakeSocket.sockets).toHaveLength(1);
   });
 
+  it("reconnects a 4401 when the in-memory token was refreshed", () => {
+    let token = "expired";
+    FakeSocket.sockets = [];
+    const pending: Array<(() => void) | null> = [];
+    const conn = connectMarketSocket({
+      url: marketSocketUrl("ws://127.0.0.1:5173", token),
+      getToken: () => token,
+      urlForToken: (next) => marketSocketUrl("ws://127.0.0.1:5173", next),
+      onMessage: () => undefined,
+      WebSocketImpl: FakeSocket,
+      schedule: (fn) => {
+        pending.push(fn);
+        return pending.length;
+      },
+      cancel: (id) => {
+        pending[id - 1] = null;
+      },
+    });
+    const first = FakeSocket.sockets[0];
+    first.open();
+    token = "refreshed";
+    first.close(4401);
+    expect(pending.filter(Boolean)).toHaveLength(1);
+    pending[0]?.();
+    const second = FakeSocket.sockets[1];
+    expect(second.url).toContain("token=refreshed");
+    expect(second.url).not.toContain("expired");
+    conn.close();
+  });
+
+  it("does not reopen a 4401 when the token is unchanged", () => {
+    const { pending } = harness();
+    FakeSocket.sockets[0].close(4401);
+    expect(pending.filter(Boolean)).toHaveLength(0);
+  });
+
   it("does not reconnect after stop", () => {
     const { conn, pending, delays } = harness(() => ["SPX"]);
     FakeSocket.sockets[0].close(1006);

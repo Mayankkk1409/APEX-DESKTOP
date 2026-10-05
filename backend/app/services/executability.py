@@ -14,6 +14,7 @@ from typing import Any
 from loguru import logger
 
 from app.analysis.gate_config import QUOTE_FRESHNESS_SECONDS, quote_is_stale
+from app.analysis.options_rules import classify_quote_freshness
 
 # The spec says a non-executable candidate must not outrank an executable one
 # with a close score. It does not define "close". Five points stays inside the
@@ -150,7 +151,7 @@ def quote_problem(quote: Any, *, now: datetime | None = None) -> str | None:
     price = _number(_attr(quote, "price"))
     if bid is not None and ask is not None and bid > ask:
         return "Quote not current. Bid is above the ask."
-    if quote_is_stale(as_of, now=now):
+    if _quote_failed_stale(quote, as_of, now=now):
         age = quote_age_phrase(as_of, now=now)
         stamp = _text(as_of) or "unknown time"
         if age:
@@ -391,10 +392,37 @@ def _short_block(reason: str) -> str:
 
 
 def _one_decimal(value: float) -> str:
-    rounded = round(float(value) + 0.0, 1)
-    if rounded == int(rounded):
-        return str(int(rounded))
-    return f"{rounded:.1f}"
+    """One decimal. 59 → 59.0. 62.9 stays 62.9. Does not change the score."""
+    return f"{float(value):.1f}"
+
+
+def _quote_failed_stale(quote: Any, as_of: Any, *, now: datetime | None) -> bool:
+    """Age past the cap during the session is stale. A last close is not.
+
+    ``QUOTE_FRESHNESS_SECONDS`` is unchanged. Outside the regular session the
+    classifier returns ``last_close`` and this is not a failure.
+    """
+    meta = None
+    if isinstance(quote, dict):
+        raw = quote.get("quote_meta") or quote.get("quoteMeta")
+        if isinstance(raw, dict):
+            meta = raw
+    elif quote is not None:
+        raw = getattr(quote, "quote_meta", None) or getattr(quote, "quoteMeta", None)
+        if isinstance(raw, dict):
+            meta = raw
+    if meta is not None and meta.get("staleReason") == "last_close":
+        return False
+    clock = now or datetime.now(timezone.utc)
+    is_stale, reason = classify_quote_freshness(quoted_at=as_of, now=clock)
+    if reason == "last_close":
+        return False
+    if meta is not None and meta.get("isStale") is True and reason != "last_close":
+        return True
+    if is_stale:
+        return True
+    # Same 300s cap when the clock is inside the session and meta is absent.
+    return quote_is_stale(as_of, now=clock) and reason != "last_close"
 
 
 def _dedupe(items: list[str]) -> list[str]:

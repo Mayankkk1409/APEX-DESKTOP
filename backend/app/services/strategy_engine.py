@@ -23,10 +23,9 @@ from app.analysis.gate_config import (
     hysteresis_action,
     iv_below_hv,
     mids_are_exact_double,
-    quote_is_stale,
     rule1_theta_failures,
 )
-from app.analysis.options_rules import daily_theta_per_share
+from app.analysis.options_rules import classify_quote_freshness, daily_theta_per_share
 from app.services.executability import (
     can_auto_execute,
     eligibility_sentence,
@@ -1509,7 +1508,7 @@ def _risk_apex_section(
     )
 
     score_meaning = (
-        f"Risk synthesis score {risk_score}/100 ({band}). Composite {composite}/100 → tier '{tier}'. "
+        f"Risk synthesis score {risk_score}/100 ({band}). Composite {float(composite):.1f}/100 → tier '{tier}'. "
         "This score summarizes whether the book should automate entry — not whether the trade idea is "
         "interesting on chart alone."
     )
@@ -1631,7 +1630,7 @@ def build_apex_score_layer(
 
     synthesis_parts = [
         (
-            f"APEX Composite Score {composite}/100 synthesizes weighted pillars: "
+            f"APEX Composite Score {float(composite):.1f}/100 synthesizes weighted pillars: "
             f"technicals {tech_score} ({tech_contrib} pts), volatility {vol_score} ({vol_contrib} pts), "
             f"Greeks quality {greek_score} ({opt_contrib} pts), sentiment {sent_label}, "
             f"fundamentals {fund_score} ({fund_contrib} pts). Risk is advisory and weighted 0."
@@ -2396,11 +2395,46 @@ def _leg_spread_pct(source: dict[str, Any]) -> float | None:
     return (float(ask) - float(bid)) / mid
 
 
+def _quote_meta(source: dict[str, Any], leg: dict[str, Any]) -> dict[str, Any] | None:
+    for row in (source, leg):
+        if not isinstance(row, dict):
+            continue
+        raw = row.get("quote_meta") or row.get("quoteMeta")
+        if isinstance(raw, dict):
+            return raw
+    return None
+
+
+def _quote_is_stale_failure(
+    source: dict[str, Any],
+    leg: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Stale during the session. A last close is not a failure. The 300s cap stays."""
+    meta = _quote_meta(source, leg)
+    if meta is not None and meta.get("staleReason") == "last_close":
+        return False
+    quoted = None
+    if isinstance(source, dict):
+        quoted = source.get("quote_as_of") or source.get("as_of")
+    if not quoted and isinstance(leg, dict):
+        quoted = leg.get("quote_as_of") or leg.get("as_of")
+    clock = now or datetime.now(timezone.utc)
+    is_stale, reason = classify_quote_freshness(quoted_at=quoted, now=clock)
+    if reason == "last_close":
+        return False
+    if meta is not None and meta.get("isStale") is True:
+        return True
+    return bool(is_stale)
+
+
 def suspect_quote_failures(
     legs: list[dict[str, Any]],
     contracts: list[dict[str, Any]],
     *,
     spot: float | None,
+    now: datetime | None = None,
 ) -> list[str]:
     """Flag a mid whose implied vol is more than 5 points from the chain IV, a stale quote, or a 2:1 mid."""
     from app.analysis.black_scholes import implied_vol, year_fraction
@@ -2414,7 +2448,7 @@ def suspect_quote_failures(
         mid = _row_mid(source) or _row_mid(leg)
         if mid is not None:
             mids.append(float(mid))
-        if quote_is_stale(source.get("quote_as_of") or leg.get("quote_as_of")):
+        if _quote_is_stale_failure(source, leg, now=now):
             failures.append("Stale or suspect quote")
             continue
         chain_iv = source.get("iv")
@@ -2569,7 +2603,7 @@ def _stale_quote_phrase(legs: list[dict[str, Any]], contracts: list[dict[str, An
             continue
         source = _contract_for_leg(leg, contracts)
         raw = source.get("quote_as_of") or leg.get("quote_as_of")
-        if not quote_is_stale(raw, now=clock):
+        if not _quote_is_stale_failure(source, leg, now=clock):
             continue
         phrase = quote_age_phrase(raw, now=clock)
         if not phrase:
@@ -2614,8 +2648,29 @@ def _earnings_inputs(
     sentiment = sentiment_layer or {}
     calendar = fundamentals.get("earnings_calendar") if isinstance(fundamentals.get("earnings_calendar"), dict) else None
     alert = sentiment.get("earnings_alert") if isinstance(sentiment.get("earnings_alert"), dict) else None
+    if calendar is not None and calendar.get("earnings_applicable") is False:
+        return None, False, False
     if calendar is None and alert is None:
         return None, False, False
+    status = calendar.get("date_status") if calendar is not None else None
+    if status == "estimated":
+        next_date = calendar.get("next_date") if calendar is not None else None
+        if not next_date and alert is not None:
+            next_date = alert.get("next_date")
+        raw_days = None
+        if calendar is not None:
+            raw_days = calendar.get("dte")
+            if raw_days is None:
+                raw_days = calendar.get("days_until")
+        if raw_days is None and alert is not None:
+            raw_days = alert.get("dte")
+            if raw_days is None:
+                raw_days = alert.get("days_until")
+        try:
+            days = int(raw_days) if raw_days is not None else None
+        except (TypeError, ValueError):
+            days = None
+        return days, True, True
     next_date = None
     if calendar is not None:
         next_date = calendar.get("next_date")
@@ -2676,10 +2731,17 @@ def build_strategy_layer(
 
     tier = _execution_tier(composite, auto_exec_threshold=auto_exec_threshold)
     strategy_name = _executable_name(strategy_name, direction=direction, leg_structure=leg_structure)
+    earnings_calendar = (fundamentals_layer or {}).get("earnings_calendar")
+    drop_unconfirmed = (
+        isinstance(earnings_calendar, dict) and earnings_calendar.get("earnings_applicable") is False
+    )
     notes = [
         note
         for note in (risk_notes or [])
-        if isinstance(note, str) and note.strip() and "1.35" not in note
+        if isinstance(note, str)
+        and note.strip()
+        and "1.35" not in note
+        and not (drop_unconfirmed and note.strip() == "Earnings date is unconfirmed.")
     ]
     _ = gate_reason
 
@@ -2849,7 +2911,7 @@ def build_strategy_layer(
     exit_level = printed_exit_level(execution)
     if exit_level is not None and composite < exit_level:
         block_notes.append(
-            f"Composite {composite:g} is already below the exit level { _threshold_token(exit_level) } printed on the card."
+            f"Composite {float(composite):.1f} is already below the exit level { _threshold_token(exit_level) } printed on the card."
         )
     earn_days, earn_confirmed, earn_discussed = _earnings_inputs(fundamentals_layer, sentiment_layer)
     earnings_sentence: str | None = None
@@ -2878,6 +2940,30 @@ def build_strategy_layer(
             latest_expiry,
             confirmed=earn_confirmed and bool(next_raw),
         )
+        if (
+            isinstance(calendar, dict)
+            and calendar.get("date_status") == "estimated"
+            and isinstance(crush_note, str)
+            and crush_note.startswith("Earnings on ")
+        ):
+            shown = calendar.get("display") or next_raw
+            if isinstance(shown, str) and shown.strip():
+                label = shown if shown.endswith("est.") else f"{shown} est."
+                tail = crush_note.split(" before expiry", 1)
+                if len(tail) == 2:
+                    crush_note = f"Earnings on {label} before expiry{tail[1]}"
+        if (
+            isinstance(calendar, dict)
+            and calendar.get("earnings_applicable") is False
+        ):
+            crush_note = None
+            earn_note = None
+        if crush_note == "Earnings date is unconfirmed." and isinstance(calendar, dict):
+            if calendar.get("earnings_applicable") is False:
+                crush_note = None
+            elif calendar.get("date_status") == "estimated":
+                shown = calendar.get("display")
+                crush_note = f"Earnings date {shown}." if isinstance(shown, str) and shown else None
         if crush_note and crush_note not in notes:
             notes.append(crush_note)
             earnings_sentence = crush_note
@@ -2919,25 +3005,25 @@ def build_strategy_layer(
         lead = f"NOT EXECUTABLE. Failed checks: {failed}."
     elif position_action == "no_entry":
         lead = (
-            f"Composite {composite:g}/100 is below the entry line ({entry_composite_min():.0f}), "
+            f"Composite {float(composite):.1f}/100 is below the entry line ({entry_composite_min():.0f}), "
             "so this is not a new entry."
         )
     elif position_action == "hold":
         lead = (
-            f"Composite {composite:g}/100 is at or above the exit line ({exit_composite_min():.0f}), "
+            f"Composite {float(composite):.1f}/100 is at or above the exit line ({exit_composite_min():.0f}), "
             "so an open position is held."
         )
     elif position_action == "exit":
         lead = (
-            f"Composite {composite:g}/100 is below the exit line ({exit_composite_min():.0f})."
+            f"Composite {float(composite):.1f}/100 is below the exit line ({exit_composite_min():.0f})."
         )
     elif tier == "caution":
         lead = (
-            f"Composite {composite}/100 — manual review required below your auto-execution threshold "
+            f"Composite {float(composite):.1f}/100 — manual review required below your auto-execution threshold "
             f"({auto_exec_threshold:.0f})."
         )
     else:
-        lead = f"Composite {composite}/100 meets your auto-execution threshold ({auto_exec_threshold:.0f})."
+        lead = f"Composite {float(composite):.1f}/100 meets your auto-execution threshold ({auto_exec_threshold:.0f})."
     why_parts_direction = f"Technical bias {direction} (score {tech_score})."
     why_parts = [
         lead,

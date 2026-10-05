@@ -50,7 +50,7 @@ def test_score_above_equal_and_below_the_minimum() -> None:
     assert equal.eligible is True
     assert below.eligible is False
     line = eligibility_sentence(84.9, 85, below)
-    assert line == "Composite 84.9. Your minimum 85. Not auto-executable: composite is below your minimum."
+    assert line == "Composite 84.9. Your minimum 85.0. Not auto-executable: composite is below your minimum."
     assert "Auto-execute eligible" not in line
     assert "NO TRADE" not in line
 
@@ -67,7 +67,7 @@ def test_jpm_not_executable_does_not_say_auto_execute_eligible() -> None:
     )
     assert decision.eligible is False
     line = eligibility_sentence(62.9, 50, decision)
-    assert line == "Composite 62.9. Your minimum 50. Not auto-executable: quote 17 min old."
+    assert line == "Composite 62.9. Your minimum 50.0. Not auto-executable: quote 17 min old."
     assert "Auto-execute eligible" not in line
 
 
@@ -114,9 +114,19 @@ def test_missing_timestamp_with_a_price_is_not_stale() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stale_quote_is_refetched_once_then_rejected() -> None:
-    now = datetime.now(timezone.utc)
-    stale = (now - timedelta(minutes=17)).isoformat()
+async def test_stale_quote_is_refetched_once_then_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Pin the clock inside the regular session. After the close, the same age is last close.
+    session = datetime(2026, 10, 5, 16, 0, tzinfo=timezone.utc)
+
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz: timezone | None = None) -> datetime:
+            if tz is None:
+                return session.replace(tzinfo=None)
+            return session.astimezone(tz)
+
+    monkeypatch.setattr("app.services.executability.datetime", Frozen)
+    stale = (session - timedelta(minutes=17)).isoformat()
 
     class Adapter:
         def __init__(self) -> None:
@@ -267,3 +277,42 @@ def test_held_shares_are_a_protective_put_and_the_note_counts_them() -> None:
     assert plan.note is not None
     assert "Uses 100 of your 150 shares" in plan.note
     assert "No additional shares are bought" in plan.note
+
+
+def test_last_close_is_not_a_stale_failure_and_the_session_cap_stays() -> None:
+    """Saturday last close is not stale. 301s during the session still is. Cap stays 300s."""
+    saturday = datetime(2026, 10, 10, 15, 0, tzinfo=timezone.utc)
+    old = (saturday - timedelta(hours=20)).isoformat()
+    assert quote_problem({"price": 100, "bid": 99, "ask": 101, "as_of": old}, now=saturday) is None
+    labeled = quote_problem(
+        {
+            "price": 100,
+            "bid": 99,
+            "ask": 101,
+            "as_of": old,
+            "quote_meta": {"staleReason": "last_close", "isStale": False},
+        },
+        now=saturday,
+    )
+    assert labeled is None
+    session = datetime(2026, 10, 5, 16, 0, tzinfo=timezone.utc)
+    stale = (session - timedelta(seconds=301)).isoformat()
+    fresh = (session - timedelta(seconds=299)).isoformat()
+    assert "Quote not current" in (quote_problem({"price": 100, "bid": 99, "ask": 101, "as_of": stale}, now=session) or "")
+    assert quote_problem({"price": 100, "bid": 99, "ask": 101, "as_of": fresh}, now=session) is None
+    from app.services.strategy_engine import suspect_quote_failures
+
+    quiet = suspect_quote_failures(
+        [{"side": "call", "quote_as_of": old, "quote_meta": {"staleReason": "last_close", "isStale": False}}],
+        [],
+        spot=100.0,
+        now=saturday,
+    )
+    assert "Stale or suspect quote" not in quiet
+    loud = suspect_quote_failures(
+        [{"side": "call", "quote_as_of": stale}],
+        [],
+        spot=100.0,
+        now=session,
+    )
+    assert "Stale or suspect quote" in loud

@@ -43,6 +43,9 @@ export function connectMarketSocket(opts: {
   url: string;
   getSymbols?: () => string[];
   onMessage: (msg: MarketSocketMessage) => void;
+  /** In-memory access token. A 4401 reconnects only when this has changed. */
+  getToken?: () => string | null;
+  urlForToken?: (token: string) => string;
   WebSocketImpl?: new (url: string) => MarketSocket;
   schedule?: (fn: () => void, ms: number) => number;
   cancel?: (id: number) => void;
@@ -55,6 +58,7 @@ export function connectMarketSocket(opts: {
   let attempt = 0;
   let timer: number | null = null;
   let socket: MarketSocket | null = null;
+  let openedToken = opts.getToken?.() ?? null;
 
   const clearTimer = () => {
     if (timer == null) return;
@@ -72,10 +76,11 @@ export function connectMarketSocket(opts: {
     }
   };
 
-  const connect = () => {
+  const connect = (url = opts.url) => {
     if (stopped) return;
     clearTimer();
-    const ws = new WSImpl(opts.url);
+    openedToken = opts.getToken?.() ?? openedToken;
+    const ws = new WSImpl(url);
     socket = ws;
 
     ws.onopen = () => {
@@ -106,13 +111,31 @@ export function connectMarketSocket(opts: {
 
     ws.onclose = (ev) => {
       if (socket === ws) socket = null;
-      if (!shouldReconnect(ev?.code ?? 1006, stopped)) return;
+      const code = ev?.code ?? 1006;
+      const nextToken = opts.getToken?.() ?? null;
+      if (
+        !stopped &&
+        code === 4401 &&
+        nextToken &&
+        nextToken !== openedToken &&
+        opts.urlForToken
+      ) {
+        if (timer != null) return;
+        const recovered = opts.urlForToken(nextToken);
+        timer = schedule(() => {
+          timer = null;
+          connect(recovered);
+        }, 0);
+        return;
+      }
+      if (!shouldReconnect(code, stopped)) return;
       if (timer != null) return;
       const delay = nextReconnectDelay(attempt);
       attempt = Math.min(attempt + 1, 4);
       timer = schedule(() => {
         timer = null;
-        connect();
+        const live = opts.getToken?.();
+        connect(live && opts.urlForToken ? opts.urlForToken(live) : opts.url);
       }, delay);
     };
   };

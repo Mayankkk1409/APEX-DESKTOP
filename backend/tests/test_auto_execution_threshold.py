@@ -112,7 +112,7 @@ def test_restored_layer_keeps_the_real_score_sentence() -> None:
     assert layer["composite_score"] == 30
     assert layer["execution_tier"] == "caution"
     assert layer["why_recommended"].startswith(
-        "Composite 30/100 — manual review required below your auto-execution threshold (40)."
+        "Composite 30.0/100 — manual review required below your auto-execution threshold (40)."
     )
     assert "Technical bias bullish" in layer["why_recommended"]
     assert "51.0" not in layer["why_recommended"]
@@ -125,7 +125,7 @@ def test_score_66_clears_saved_minimum_40() -> None:
     from app.services.strategy_recommendation import auto_exec_status_line, is_defined_risk_strategy
 
     line = auto_exec_status_line(66, 40, defined_risk=is_defined_risk_strategy(decision.best_match))
-    assert line == "Composite score 66 · Your auto-execute minimum 40 · Auto-execute eligible"
+    assert line == "Composite score 66.0 · Your auto-execute minimum 40.0 · Auto-execute eligible"
 
 
 def test_score_below_saved_minimum_keeps_the_strategy() -> None:

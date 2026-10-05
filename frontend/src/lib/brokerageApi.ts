@@ -1,5 +1,5 @@
 import { API_BASE } from "../constants";
-import { getAccessToken } from "../api";
+import { getAccessToken, refreshAccessTokenOnce } from "../api";
 
 export type BrokerageAccount = {
   id: string;
@@ -31,7 +31,7 @@ export type BrokeragePosition = {
   day_pnl?: number | null;
 };
 
-async function brokerageReq<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function brokerageReq<T>(path: string, init: RequestInit = {}, retried = false): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Content-Type", "application/json");
   const token = getAccessToken();
@@ -41,6 +41,10 @@ async function brokerageReq<T>(path: string, init: RequestInit = {}): Promise<T>
     res = await fetch(`${API_BASE}${path}`, { ...init, headers, credentials: "include" });
   } catch {
     throw new Error("Cannot reach APEX API. Make sure the backend is running on port 8000.");
+  }
+  if (res.status === 401 && !retried) {
+    const next = await refreshAccessTokenOnce();
+    if (next) return brokerageReq<T>(path, init, true);
   }
   if (!res.ok) {
     let detail = res.statusText || "Request failed";

@@ -302,10 +302,8 @@ def _fallback_structure(direction: str, *, ivr: float | None = None) -> str:
 
 
 def _score_token(value: float) -> str:
-    rounded = round(float(value), 1)
-    if rounded == int(rounded):
-        return str(int(rounded))
-    return f"{rounded:g}"
+    """One decimal in strategy sentences. Does not change the score."""
+    return f"{float(value):.1f}"
 
 
 def auto_exec_status_line(composite: float, threshold: float, *, defined_risk: bool) -> str | None:

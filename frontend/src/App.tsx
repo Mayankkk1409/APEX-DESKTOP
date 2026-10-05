@@ -1,6 +1,6 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
-import { getAccessToken } from "./api";
+import { getAccessToken, restoreSession } from "./api";
 import { Dashboard } from "./pages/Dashboard";
 import { DeepScan } from "./pages/DeepScan";
 import { Login } from "./pages/Login";
@@ -14,9 +14,31 @@ import { useSession } from "./store";
 /** Splash plays once on the marketing entry route; deep links skip it so /portfolio is not blocked. */
 const SPLASH_ENTRY = "/";
 
+/** True when the desk may render. A missing memory token waits for the refresh cookie. */
+export async function resolveAuthGuard(opts: {
+  token: string | null;
+  restore: () => Promise<boolean>;
+}): Promise<boolean> {
+  if (opts.token) return true;
+  return opts.restore();
+}
+
 function Guard({ children }: { children: JSX.Element }) {
   const loc = useLocation();
-  if (!getAccessToken()) return <Navigate to="/login" replace state={{ from: loc.pathname }} />;
+  const [allowed, setAllowed] = useState<boolean | null>(() => (getAccessToken() ? true : null));
+
+  useEffect(() => {
+    let cancelled = false;
+    resolveAuthGuard({ token: getAccessToken(), restore: restoreSession }).then((ok) => {
+      if (!cancelled) setAllowed(ok);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [loc.pathname]);
+
+  if (allowed === null) return null;
+  if (!allowed) return <Navigate to="/login" replace state={{ from: loc.pathname }} />;
   return children;
 }
 

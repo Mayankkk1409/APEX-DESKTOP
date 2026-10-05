@@ -159,6 +159,11 @@ async function refreshAccessToken(): Promise<string | null> {
   return refreshInFlight;
 }
 
+/** One silent refresh. Callers that see 401 retry a single time with the new memory token. */
+export function refreshAccessTokenOnce(): Promise<string | null> {
+  return refreshAccessToken();
+}
+
 /** Reload path: the access token is gone with the page, the refresh cookie is not. */
 export async function restoreSession(): Promise<boolean> {
   const token = await refreshAccessToken();

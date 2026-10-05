@@ -1,3 +1,5 @@
+import { formatCompositeDecimal } from "./scoreFormat";
+
 /**
  * Acknowledge vs Place Trade.
  * Eligibility is the server decision: composite >= the saved minimum, executable,
@@ -27,27 +29,22 @@ export function autoSubmitArms(input: {
   return composite >= input.threshold;
 }
 
-function formatGateScore(value: number): string {
-  const rounded = Math.round(value * 10) / 10;
-  return Number.isInteger(rounded) ? String(rounded) : String(rounded);
-}
-
 /** Neutral placement note. The saved minimum never hides the recommendation. */
 export function manualConfirmationNote(score: number, minimum: number): string {
-  return `Manual confirmation required (score ${formatGateScore(score)} vs. your auto-execute minimum ${formatGateScore(minimum)}).`;
+  return `Manual confirmation required (score ${formatCompositeDecimal(score)} vs. your auto-execute minimum ${formatCompositeDecimal(minimum)}).`;
 }
 
 export const AUTO_EXECUTION_OFF_NOTE = "Auto-execution is off.";
 
 /** Shown when the shared decision says the trade may auto-execute. */
 export function autoExecEligibilityLine(score: number, minimum: number): string {
-  return `Composite ${formatGateScore(score)}. Your minimum ${formatGateScore(minimum)}. Auto-execute eligible.`;
+  return `Composite ${formatCompositeDecimal(score)}. Your minimum ${formatCompositeDecimal(minimum)}. Auto-execute eligible.`;
 }
 
 /** Same sentence the server uses when the trade must not auto-execute. */
 export function blockedEligibilityLine(score: number, minimum: number, reason: string): string {
   const detail = reason.replace(/\.$/, "");
-  return `Composite ${formatGateScore(score)}. Your minimum ${formatGateScore(minimum)}. Not auto-executable: ${detail}.`;
+  return `Composite ${formatCompositeDecimal(score)}. Your minimum ${formatCompositeDecimal(minimum)}. Not auto-executable: ${detail}.`;
 }
 
 export type OrderPlacement = {
