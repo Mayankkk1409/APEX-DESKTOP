@@ -123,3 +123,13 @@ Sources, fetched 5 October 2026:
 - Real-time option data: the websocket path is `wss://stream.data.alpaca.markets/v1beta1/{feed}` with `indicative` or `opra`. https://docs.alpaca.markets/us/docs/real-time-option-data
 - Latest quotes: `feed=opra` is the official OPRA feed; `feed=indicative` is the free feed where trades are delayed and quotes are modified. Default is `opra` if subscribed, otherwise `indicative`. https://docs.alpaca.markets/us/reference/optionlatestquotes
 - Pricing page lists Algo Trader Plus at $99/mo. https://alpaca.markets/data
+
+## Frontend suite re-run (agent 3C)
+
+Command: `npm test` (`vitest run`) from `frontend/` on `change12/3C`, 5 October 2026.
+
+**302 passed, 0 failed** (55 files passed).
+
+`src/pages/DeepScan.order.test.tsx` › `shows Place Trade below the saved minimum` now expects `score 39.0` and `minimum 40.0`. That is the string `formatCompositeDecimal` already renders. The formatter was not changed.
+
+Backend the same day, `pytest -q --tb=line -rs` from `backend/`: **1717 passed, 59 skipped, 0 failed**. The 59 skip reasons are the list above. None were removed. The pass count is higher than 1659 because this branch already contains the phase 3 WIP tests plus the seven order-path checks in `backend/tests/test_change12_3c.py`.
