@@ -19,48 +19,61 @@ export function RiskReviewOrderActions({
   onPlace: () => void;
 }) {
   const state = thesisCheckboxState(placement);
-  const locked = state.disabled || pending;
+  const ready = thesisAccepted && !pending;
+  const showOverrideActions = placement.overrideRequired && thesisAccepted;
   return (
     <>
-      {state.disabled && state.reason ? (
-        <p className="text-sm text-champagne/80" data-testid="order-blocked-reason" role="note">
-          {state.reason}
-        </p>
-      ) : null}
-      {!state.disabled && placement.note ? (
+      {!placement.overrideRequired && placement.note ? (
         <p className="text-sm text-champagne/70" data-testid="manual-confirmation-note" role="note">
           {placement.note}
         </p>
       ) : null}
-      <label
-        className={
-          state.disabled
-            ? "flex cursor-not-allowed items-center gap-2 text-sm leading-snug text-champagne/50"
-            : "flex cursor-pointer items-center gap-2 text-sm leading-snug"
-        }
-      >
+      <label className="flex cursor-pointer items-center gap-2 text-sm leading-snug">
         <input
           type="checkbox"
           className="shrink-0"
           data-testid="thesis"
-          disabled={locked}
+          disabled={pending}
           checked={thesisAccepted}
           onChange={(e) => {
-            if (locked) return;
+            if (pending) return;
             onThesisChange?.(e.target.checked);
           }}
         />
         <span>{THESIS_ACCEPTANCE_TEXT}</span>
       </label>
-      {placement.acknowledgeEnabled ? (
+      {!placement.overrideRequired && placement.acknowledgeEnabled && state.submitsOnAccept ? (
         <p className="text-sm text-champagne/70" data-testid="auto-exec-hint">
           Accepting the thesis submits these legs.
         </p>
       ) : null}
-      {placement.placeTradeEnabled ? (
+      {showOverrideActions ? (
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            data-testid="acknowledge-order"
+            disabled={!ready}
+            onClick={onPlace}
+            className="rounded-md border border-gold px-4 py-2 text-champagne disabled:opacity-40"
+          >
+            Acknowledge
+          </button>
+          <button
+            type="button"
+            data-testid="submit-order"
+            disabled={!ready}
+            onClick={onPlace}
+            className="rounded-md bg-gold px-4 py-2 text-ink disabled:opacity-40"
+          >
+            Place Trade
+          </button>
+        </div>
+      ) : null}
+      {!placement.overrideRequired && placement.placeTradeEnabled ? (
         <button
+          type="button"
           data-testid="submit-order"
-          disabled={pending}
+          disabled={!ready}
           onClick={onPlace}
           className="rounded-md bg-gold px-4 py-2 text-ink disabled:opacity-40"
         >

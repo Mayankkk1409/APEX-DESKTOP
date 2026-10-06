@@ -24,6 +24,14 @@ function rememberExpiryNoticeShown(userId: string, marketDay: string) {
   }
 }
 
+function expiryNoticeAlreadyShown(userId: string, marketDay: string): boolean {
+  try {
+    return sessionStorage.getItem(expiryNoticeStorageKey(userId)) === marketDay;
+  } catch {
+    return false;
+  }
+}
+
 /** After a reload, Guard sends the user to /login with the screen they were on. */
 export function pathAfterSessionRestore(from: unknown): string {
   if (typeof from !== "string" || !from.startsWith("/")) return "/app";
@@ -54,7 +62,28 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
   const [stage, setStage] = useState<Stage>("identify");
   const formRef = useRef<HTMLFormElement>(null);
   const flowRef = useRef<Flow>("login");
+  const afterExpiryPath = useRef("/app");
   flowRef.current = flow;
+
+  async function maybeShowExpiry(me: import("../types").User): Promise<boolean> {
+    try {
+      const watch = await api.expiryWatch();
+      const rows = expiryLoginRows(watch.items, watch.market_day);
+      if (rows.length === 0 || expiryNoticeAlreadyShown(me.id, watch.market_day)) {
+        setExpiryNoticeOnLogin(false);
+        return false;
+      }
+      rememberExpiryNoticeShown(me.id, watch.market_day);
+      setExpiryNoticeOnLogin(false);
+      setExpiryIsPaper(watch.is_paper);
+      setExpiryRows(rows);
+      setCheckingSession(false);
+      return true;
+    } catch {
+      setExpiryNoticeOnLogin(true);
+      return false;
+    }
+  }
 
   useEffect(() => {
     if (skipSessionRestore) return;
@@ -74,7 +103,9 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
           const me = (await api.me()) as import("../types").User;
           if (cancelled) return;
           setUser(me);
-          nav(pathAfterSessionRestore(from), { replace: true });
+          afterExpiryPath.current = pathAfterSessionRestore(from);
+          if (await maybeShowExpiry(me)) return;
+          nav(afterExpiryPath.current, { replace: true });
           return;
         } catch {
           /* refresh cookie was not enough to read the profile */
@@ -208,20 +239,8 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
       const me = (await api.me()) as import("../types").User;
       setUser(me);
       setModal(true);
-      try {
-        const watch = await api.expiryWatch();
-        const rows = expiryLoginRows(watch.items, watch.market_day);
-        if (rows.length > 0) {
-          rememberExpiryNoticeShown(me.id, watch.market_day);
-          setExpiryNoticeOnLogin(false);
-          setExpiryIsPaper(watch.is_paper);
-          setExpiryRows(rows);
-          return;
-        }
-        setExpiryNoticeOnLogin(false);
-      } catch {
-        setExpiryNoticeOnLogin(true);
-      }
+      afterExpiryPath.current = "/app";
+      if (await maybeShowExpiry(me)) return;
       nav("/app");
     } catch (ex) {
       setErr((ex as Error).message);
@@ -241,7 +260,19 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
         ? "Reset password"
         : "Verify code";
 
-  if (checkingSession) {
+  const expiryDialog =
+    expiryRows && expiryRows.length > 0 ? (
+      <ExpiryLoginCertificate
+        items={expiryRows}
+        isPaper={expiryIsPaper}
+        onDismiss={() => {
+          setExpiryRows(null);
+          nav(afterExpiryPath.current);
+        }}
+      />
+    ) : null;
+
+  if (checkingSession && !expiryDialog) {
     return (
       <main className="min-h-screen flex items-center justify-center px-4" data-testid="session-restore">
         <p className="text-subtle">Restoring session…</p>
@@ -251,16 +282,7 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
 
   return (
     <>
-    {expiryRows && expiryRows.length > 0 ? (
-      <ExpiryLoginCertificate
-        items={expiryRows}
-        isPaper={expiryIsPaper}
-        onDismiss={() => {
-          setExpiryRows(null);
-          nav("/app");
-        }}
-      />
-    ) : null}
+    {expiryDialog}
     <main className="min-h-screen flex items-center justify-center px-4">
       <form
         ref={formRef}

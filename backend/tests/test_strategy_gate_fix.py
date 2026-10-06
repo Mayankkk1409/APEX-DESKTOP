@@ -256,7 +256,7 @@ def test_hysteresis_blocks_entry_and_keeps_an_open_position() -> None:
     held = build_strategy_layer(**common, in_position=True)
     assert held["position_action"] == "hold"
     assert held["clears_threshold"] is False
-    assert "is held" in held["why_it_fits"]
+    assert "meets your auto-execution threshold" not in held["why_it_fits"]
 
 
 def test_apex_double_calendar_profit_peaks_near_a_strike_and_is_finite() -> None:

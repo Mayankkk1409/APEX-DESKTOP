@@ -98,6 +98,7 @@ describe("orderPlacement", () => {
       placeTradeEnabled: false,
       acknowledgeEnabled: true,
       note: null,
+      overrideRequired: false,
     });
   });
 
@@ -107,6 +108,7 @@ describe("orderPlacement", () => {
       placeTradeEnabled: false,
       acknowledgeEnabled: true,
       note: null,
+      overrideRequired: false,
     });
   });
 
@@ -123,7 +125,8 @@ describe("orderPlacement", () => {
     });
     expect(placement.placeTradeEnabled).toBe(true);
     expect(placement.autoSubmitOnAck).toBe(false);
-    expect(placement.acknowledgeEnabled).toBe(false);
+    expect(placement.acknowledgeEnabled).toBe(true);
+    expect(placement.overrideRequired).toBe(true);
   });
 
   it("keeps Place Trade enabled below the saved minimum with a neutral note", () => {
@@ -143,6 +146,7 @@ describe("orderPlacement", () => {
       placeTradeEnabled: false,
       acknowledgeEnabled: true,
       note: null,
+      overrideRequired: false,
     });
     expect(autoExecEligibilityLine(66, 40)).toBe(
       "Composite 66.0. Your minimum 40.0. Auto-execute eligible.",
@@ -163,6 +167,7 @@ describe("orderPlacement", () => {
       placeTradeEnabled: false,
       acknowledgeEnabled: true,
       note: null,
+      overrideRequired: false,
     });
     expect(
       orderPlacement({
@@ -190,6 +195,7 @@ describe("orderPlacement", () => {
       placeTradeEnabled: true,
       acknowledgeEnabled: false,
       note: "Auto-execution is off.",
+      overrideRequired: false,
     });
   });
 
@@ -199,6 +205,7 @@ describe("orderPlacement", () => {
       placeTradeEnabled: false,
       acknowledgeEnabled: true,
       note: null,
+      overrideRequired: false,
     });
     expect(
       orderPlacement({
@@ -213,6 +220,7 @@ describe("orderPlacement", () => {
       placeTradeEnabled: false,
       acknowledgeEnabled: true,
       note: null,
+      overrideRequired: false,
     });
   });
 
@@ -228,8 +236,9 @@ describe("orderPlacement", () => {
       blockReason: "Composite 62.9. Your minimum 50.0. Not auto-executable: quote 17 min old.",
     });
     expect(placement.autoSubmitOnAck).toBe(false);
-    expect(placement.acknowledgeEnabled).toBe(false);
-    expect(placement.placeTradeEnabled).toBe(false);
+    expect(placement.acknowledgeEnabled).toBe(true);
+    expect(placement.placeTradeEnabled).toBe(true);
+    expect(placement.overrideRequired).toBe(true);
     expect(placement.note).toContain("quote 17 min old");
     expect(placement.note).not.toContain("Auto-execute eligible");
     expect(blockedEligibilityLine(62.9, 50, "quote 17 min old")).toBe(

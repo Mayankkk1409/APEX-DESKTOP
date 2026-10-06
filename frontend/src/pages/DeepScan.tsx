@@ -16,7 +16,7 @@ import { VolatilityScan } from "../components/volatility/VolatilityScan";
 import { CAROUSEL_LAYERS, SCAN_SLIDE_LAYERS, SNAPSHOT_STUDIES } from "../constants";
 import { scoreTier } from "../lib/chartHighlight";
 import { optionReviewRows, optionsLegBlockReason } from "../lib/orderTicket";
-import { orderPlacement, thesisCheckboxState } from "../lib/riskReview";
+import { orderPlacement, overrideReasonText, thesisCheckboxState } from "../lib/riskReview";
 import { normalizeStrategyName } from "../lib/strategyDisplay";
 import { readUserSettings } from "../lib/userSettings";
 import { buildOrderConfirmationDetails } from "../lib/orderFormat";
@@ -57,6 +57,7 @@ export function DeepScan() {
   const [intro, setIntro] = useState(true);
   const [idx, setIdx] = useState(0);
   const [thesis, setThesis] = useState(false);
+  const [overrideOpen, setOverrideOpen] = useState(false);
   const [spreadConfirmed, setSpreadConfirmed] = useState(false);
   const [contractsPerLeg, setContractsPerLeg] = useState(1);
   const [msg, setMsg] = useState("");
@@ -297,16 +298,27 @@ export function DeepScan() {
     return () => window.removeEventListener("keydown", onKey);
   }, [layers.length, nav, ownsArrows]);
 
+  const overrideReasons = overrideReasonText([
+    riskReview?.quote_not_current
+      ? `Quote not current${riskReview.quote_as_of ? `. Quoted ${riskReview.quote_as_of}` : ""}`
+      : null,
+    ...(riskReview?.spread_block_reasons ?? []),
+    riskReview?.block_reason,
+    eligibilityLine?.includes("Not auto-executable:")
+      ? eligibilityLine.split("Not auto-executable:")[1]
+      : null,
+  ]);
   const order = useMutation({
     // The accepted thesis travels with the submit so the checkbox click does not
-    // race React state. The server re-checks consent, the quote, and the spread.
-    mutationFn: (thesisAccepted: boolean) => {
+    // race React state. An explicit override is the only path past a failed check.
+    mutationFn: (input: { thesisAccepted: boolean; userOverride?: boolean }) => {
       if (!reviewRows.length) {
         throw new Error(emptyLegReason);
       }
+      const userOverride = input.userOverride === true;
       return api.order({
         scan_id: scan.data?.id,
-        thesis_accepted: thesisAccepted,
+        thesis_accepted: input.thesisAccepted,
         asset_class: "us_option",
         legs: reviewRows.map((leg) => ({
           symbol: leg.symbol,
@@ -316,11 +328,13 @@ export function DeepScan() {
           option_side: leg.optionSide,
           expiry: leg.expiry,
           price: leg.price,
-          order_type: leg.orderType,
-          limit_price: leg.orderType === "limit" ? leg.price : null,
+          order_type: "limit",
+          limit_price: leg.price,
         })),
         contracts_per_leg: contractsPerLeg,
         spread_confirmed: spreadConfirmed,
+        user_override: userOverride,
+        override_reasons: userOverride ? [overrideReasons] : [],
       });
     },
     onSuccess: (r) => {
@@ -528,18 +542,21 @@ export function DeepScan() {
                       thesisAccepted={thesis}
                       onThesisChange={(checked) => {
                         setThesis(checked);
-                        if (checked && thesisState.submitsOnAccept && !order.isPending) {
+                        if (checked && thesisState.submitsOnAccept && !placement.overrideRequired && !order.isPending) {
                           setMsg("");
-                          order.mutate(true);
+                          order.mutate({ thesisAccepted: true });
                         }
                       }}
                       onPlace={() => {
-                        if (thesisState.disabled) return;
                         if (!thesis) {
                           setMsg("Accept the thesis to place this trade.");
                           return;
                         }
-                        order.mutate(true);
+                        if (placement.overrideRequired) {
+                          setOverrideOpen(true);
+                          return;
+                        }
+                        order.mutate({ thesisAccepted: true });
                       }}
                     />
                     {msg && <p className="text-sm">{msg}</p>}
@@ -550,6 +567,51 @@ export function DeepScan() {
           </motion.section>
         </AnimatePresence>
       )}
+
+      {overrideOpen ? (
+        <div
+          className="order-cert-backdrop fixed inset-0 z-[60] flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="trade-override-title"
+          data-testid="trade-override"
+        >
+          <div className="order-cert-card w-full max-w-lg">
+            <div className="order-cert-frame">
+              <div className="order-cert-inner">
+                <h2 id="trade-override-title" className="order-cert-title">
+                  APEX could not verify this trade
+                </h2>
+                <p className="mt-4 text-sm leading-relaxed text-champagne/80" data-testid="trade-override-body">
+                  APEX flagged this trade as not executable: {overrideReasons}. You may proceed at your own risk or cancel.
+                </p>
+                <div className="mt-6 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    className="rounded-md border border-line px-4 py-2 text-sm"
+                    data-testid="trade-override-cancel"
+                    onClick={() => setOverrideOpen(false)}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-md bg-gold px-4 py-2 text-sm text-ink disabled:opacity-40"
+                    data-testid="trade-override-proceed"
+                    disabled={order.isPending}
+                    onClick={() => {
+                      setOverrideOpen(false);
+                      order.mutate({ thesisAccepted: true, userOverride: true });
+                    }}
+                  >
+                    Proceed at my own risk
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {orderConfirmation ? (
         <OrderConfirmationCertificate

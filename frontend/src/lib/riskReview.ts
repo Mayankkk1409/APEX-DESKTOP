@@ -52,6 +52,8 @@ export type OrderPlacement = {
   placeTradeEnabled: boolean;
   acknowledgeEnabled: boolean;
   note: string | null;
+  /** Failed checks do not lock the ticket. Acknowledge and Place Trade open the disclaimer. */
+  overrideRequired: boolean;
 };
 
 /**
@@ -74,31 +76,38 @@ export function orderPlacement(input: {
   blockReason?: string | null;
 }): OrderPlacement {
   const blockedNote = input.blockReason?.trim() || null;
-  const belowMinimum =
-    input.composite != null &&
-    Number.isFinite(input.composite) &&
-    Number.isFinite(input.threshold) &&
-    input.composite < input.threshold;
   if (!input.hasLegs) {
-    return { autoSubmitOnAck: false, placeTradeEnabled: false, acknowledgeEnabled: false, note: blockedNote };
+    return {
+      autoSubmitOnAck: false,
+      placeTradeEnabled: false,
+      acknowledgeEnabled: false,
+      note: blockedNote,
+      overrideRequired: false,
+    };
   }
-  // Stale quotes, wide spreads, and failed pre-trade checks still lock the box.
-  // A score under the saved minimum does not: that path keeps Place Trade.
-  if (input.placeable === false) {
-    return { autoSubmitOnAck: false, placeTradeEnabled: false, acknowledgeEnabled: false, note: blockedNote };
-  }
-  if (input.validationPassed === false && !input.spreadConfirmationRequired) {
-    return { autoSubmitOnAck: false, placeTradeEnabled: false, acknowledgeEnabled: false, note: blockedNote };
-  }
-  if (input.executable === false && !input.spreadConfirmationRequired && !belowMinimum) {
-    return { autoSubmitOnAck: false, placeTradeEnabled: false, acknowledgeEnabled: false, note: blockedNote };
-  }
-  if (input.spreadConfirmationRequired && !input.spreadConfirmed) {
-    return { autoSubmitOnAck: false, placeTradeEnabled: false, acknowledgeEnabled: false, note: blockedNote };
+  const flagged =
+    input.placeable === false ||
+    input.validationPassed === false ||
+    input.executable === false ||
+    (input.spreadConfirmationRequired === true && input.spreadConfirmed !== true);
+  if (flagged) {
+    return {
+      autoSubmitOnAck: false,
+      placeTradeEnabled: true,
+      acknowledgeEnabled: true,
+      note: blockedNote,
+      overrideRequired: true,
+    };
   }
   const autoSubmitOnAck = autoSubmitArms(input);
   if (autoSubmitOnAck) {
-    return { autoSubmitOnAck: true, placeTradeEnabled: false, acknowledgeEnabled: true, note: null };
+    return {
+      autoSubmitOnAck: true,
+      placeTradeEnabled: false,
+      acknowledgeEnabled: true,
+      note: null,
+      overrideRequired: false,
+    };
   }
   const below =
     input.composite != null &&
@@ -116,32 +125,37 @@ export function orderPlacement(input: {
     placeTradeEnabled: true,
     acknowledgeEnabled: false,
     note,
+    overrideRequired: false,
   };
 }
 
-/** Last-resort sentence so a locked checkbox always carries a readable reason. */
-export const ORDER_BLOCKED_FALLBACK_REASON = "This order cannot be submitted right now.";
-
-/**
- * The thesis checkbox stays off when the server will refuse the order.
- * Place Trade (score under the saved minimum) and the auto-submit path leave it on.
- */
-export function thesisCheckboxDisabled(placement: OrderPlacement): boolean {
-  return !placement.autoSubmitOnAck && !placement.placeTradeEnabled;
+/** One line for the disclaimer. Drops blanks and repeats. */
+export function overrideReasonText(parts: Array<string | null | undefined>): string {
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const part of parts) {
+    const text = (part ?? "").trim().replace(/\.$/, "");
+    if (!text || seen.has(text.toLowerCase())) continue;
+    seen.add(text.toLowerCase());
+    lines.push(text);
+  }
+  return lines.join(" · ") || "Pre-trade checks did not pass";
 }
 
-/** Checkbox lock, whether checking it submits, and the reason shown before a blocked click. */
+/** The thesis checkbox is always clickable. A failed check opens the disclaimer instead of locking it. */
+export function thesisCheckboxDisabled(_placement: OrderPlacement): boolean {
+  return false;
+}
+
+/** Whether checking the box submits immediately. A flagged trade waits for Acknowledge or Place Trade. */
 export function thesisCheckboxState(placement: OrderPlacement): {
   disabled: boolean;
   submitsOnAccept: boolean;
   reason: string | null;
 } {
-  if (!thesisCheckboxDisabled(placement)) {
-    return { disabled: false, submitsOnAccept: placement.autoSubmitOnAck, reason: null };
-  }
   return {
-    disabled: true,
-    submitsOnAccept: false,
-    reason: placement.note?.trim() || ORDER_BLOCKED_FALLBACK_REASON,
+    disabled: false,
+    submitsOnAccept: placement.autoSubmitOnAck && !placement.overrideRequired,
+    reason: null,
   };
 }

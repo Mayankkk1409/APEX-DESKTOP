@@ -219,6 +219,7 @@ async def execute_market_fill(
     spread_confirmed: bool = False,
     spread_max: float = DEFAULT_SPREAD_MAX,
     submission_path: str = "market_fill",
+    user_override: bool = False,
 ) -> Order:
     from app.services.executability import enforce_submission_quotes, marketable_limit
 
@@ -230,6 +231,7 @@ async def execute_market_fill(
         contracts=qty,
         multiplier=position_multiplier(asset_class),
         spread_max=spread_max,
+        user_override=user_override,
     )
     if asset_class == "us_option":
         quote = await adapter.quote(symbol)
@@ -351,6 +353,60 @@ async def execute_market_fill(
     return order
 
 
+async def _record_user_override(
+    *,
+    user_id: str,
+    scan_id: str | None,
+    reasons: list[str],
+    adapter: Any,
+    legs: list[dict[str, Any]],
+) -> None:
+    """Refetch each leg once and keep the latest price as the limit. Auto-exec never calls this."""
+    from app.contracts import LedgerEntry
+    from app.services.evidence_ledger import record
+    from app.services.executability import load_submission_quote, marketable_limit
+
+    now = datetime.now(timezone.utc).isoformat()
+    used: list[dict[str, Any]] = []
+    for leg in legs:
+        symbol = str(leg.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        quote, problem = await load_submission_quote(adapter, symbol)
+        side = str(leg.get("side") or "buy")
+        live = marketable_limit(side, quote) if quote is not None else None
+        price = live[0] if live else _positive_mark(getattr(quote, "price", None) if quote is not None else None)
+        if price is not None:
+            leg["order_type"] = "limit"
+            leg["limit_price"] = price
+            leg["price"] = price
+        used.append(
+            {
+                "symbol": symbol,
+                "price": price,
+                "bid": getattr(quote, "bid", None) if quote is not None else None,
+                "ask": getattr(quote, "ask", None) if quote is not None else None,
+                "problem": problem,
+            }
+        )
+    logger.info("user override user={} time={} reasons={} quotes={}", user_id, now, reasons, used)
+    if not scan_id:
+        return
+    record(
+        LedgerEntry(
+            scanId=scan_id,
+            kind="value",
+            key="user_override",
+            value={"user_id": user_id, "reasons": reasons, "quotes": used},
+            inputs={"user_id": user_id, "reasons": reasons, "quotes": used, "recorded_at": now},
+            source="user",
+            feed=None,
+            timestamp=now,
+            fn="execute_strategy_legs",
+        )
+    )
+
+
 async def execute_strategy_legs(
     *,
     user: User,
@@ -369,13 +425,16 @@ async def execute_strategy_legs(
     spread_max: float = DEFAULT_SPREAD_MAX,
     submission_path: str = "strategy_legs",
     wide_spread_only: bool = False,
+    user_override: bool = False,
+    override_reasons: list[str] | None = None,
 ) -> list[Order]:
     """Fill stock first, then options. A short call is sent only after covering shares are in place."""
     from app.analysis.gate_config import refuse_if_checks_failed
     from app.services.executability import enforce_submission_quotes, order_symbols
     from app.services.stock_leg import SHORT_STOCK_INFEASIBLE, is_short_call, partition_option_legs
 
-    if checks_passed is False and not (wide_spread_only and spread_confirmed):
+    honored_override = bool(user_override) and not auto_execute
+    if checks_passed is False and not honored_override and not (wide_spread_only and spread_confirmed):
         try:
             refuse_if_checks_failed(checks_passed=checks_passed, auto_execute=auto_execute)
         except ValueError as exc:
@@ -388,7 +447,16 @@ async def execute_strategy_legs(
         spread_confirmed=spread_confirmed,
         contracts=contracts_per_leg,
         spread_max=spread_max,
+        user_override=honored_override,
     )
+    if honored_override:
+        await _record_user_override(
+            user_id=user.id,
+            scan_id=scan_id,
+            reasons=list(override_reasons or []),
+            adapter=adapter,
+            legs=legs,
+        )
     if not legs and not equity_legs:
         raise ValueError("Strategy legs are required for execution")
     if strategy_name and certificate:
@@ -425,7 +493,8 @@ async def execute_strategy_legs(
     strict = bool(equity_legs) or bool(shorts) or equity_satisfied
     orders: list[Order] = []
     routing: dict[str, Any] = {"force_paper": False}
-    marks = _premium_marks(list((certificate or {}).get("legs") or []), list(legs))
+    stored = list((certificate or {}).get("legs") or [])
+    marks = _premium_marks(list(legs), stored) if honored_override else _premium_marks(stored, list(legs))
 
     def _option_limit(leg: dict[str, Any]) -> tuple[str, float | None]:
         kind = str(leg.get("order_type") or "market").lower()
@@ -471,6 +540,7 @@ async def execute_strategy_legs(
             routing=routing,
             spread_confirmed=spread_confirmed,
             spread_max=spread_max,
+            user_override=honored_override,
         )
 
     def _holdback(exc: Exception, *, short_leg: bool) -> ValueError:
@@ -531,6 +601,7 @@ async def execute_strategy_legs(
                     spread_confirmed=spread_confirmed,
                     spread_max=spread_max,
                     submission_path=submission_path,
+                    user_override=honored_override,
                 )
             )
             return orders
@@ -709,6 +780,7 @@ async def _execute_combo(
     spread_confirmed: bool = False,
     spread_max: float = DEFAULT_SPREAD_MAX,
     submission_path: str = "strategy_legs",
+    user_override: bool = False,
 ) -> Order:
     """One limit combo at the net mid. A rejection is not split into market orders.
 
@@ -792,6 +864,7 @@ async def _execute_combo(
                 contracts=qty,
                 multiplier=mult,
                 spread_max=spread_max,
+                user_override=user_override,
             )
         except ValueError as exc:
             raise ComboHeldBack(_sentence(str(exc), "Quote not current")) from exc

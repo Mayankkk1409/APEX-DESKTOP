@@ -255,6 +255,54 @@ async def test_paper_fill_stops_when_the_recheck_spread_is_wider_than_the_cap(db
 
 
 @pytest.mark.asyncio
+async def test_user_override_fills_a_stale_quote_at_the_latest_limit(db: AsyncSession) -> None:
+    adapter = _Broker(_UNCOVERED, fresh_reads=0)
+    user = _user()
+    db.add(user)
+    await db.commit()
+    orders = await execute_strategy_legs(
+        user=user,
+        db=db,
+        adapter=adapter,
+        legs=_legs(),
+        contracts_per_leg=1,
+        checks_passed=False,
+        scan_id="scan-override",
+        user_override=True,
+        override_reasons=["Quote not current"],
+    )
+    assert orders[0].status == "filled"
+    assert orders[0].order_type == "limit"
+    assert adapter.payloads[0]["order_type"] == "limit"
+    from app.services.evidence_ledger import get
+
+    rows = [row for row in get("scan-override") if row.key == "user_override"]
+    assert rows
+    assert rows[-1].inputs["reasons"] == ["Quote not current"]
+    assert rows[-1].inputs["user_id"] == user.id
+
+
+@pytest.mark.asyncio
+async def test_auto_execute_ignores_user_override(db: AsyncSession) -> None:
+    adapter = _Broker(_UNCOVERED, fresh_reads=0)
+    user = _user()
+    db.add(user)
+    await db.commit()
+    with pytest.raises(ValueError, match="pre-trade checks did not all pass"):
+        await execute_strategy_legs(
+            user=user,
+            db=db,
+            adapter=adapter,
+            legs=_legs(),
+            contracts_per_leg=1,
+            checks_passed=False,
+            auto_execute=True,
+            user_override=True,
+            override_reasons=["Quote not current"],
+        )
+
+
+@pytest.mark.asyncio
 async def test_a_single_short_is_not_paper_filled_on_an_uncovered_refusal(db: AsyncSession) -> None:
     adapter = _Broker(_UNCOVERED)
     user = _user()

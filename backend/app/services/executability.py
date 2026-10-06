@@ -286,17 +286,24 @@ async def enforce_submission_quotes(
     contracts: float = 1,
     multiplier: int = 100,
     spread_max: float = DEFAULT_SPREAD_MAX,
+    user_override: bool = False,
 ) -> None:
-    """Re-check freshness and spread before Alpaca paper or demo fill. Log every block."""
+    """Re-check freshness and spread before Alpaca paper or demo fill. Log every block.
+
+    ``user_override`` still refetches a stale quote once, then continues. Auto-execution
+    must not set this flag. Only an explicit user click may.
+    """
     for symbol in symbols:
         if not symbol:
             continue
         _quote, problem = await load_submission_quote(adapter, symbol)
-        if problem:
+        if problem and not user_override:
             logger.warning("order blocked path={} symbol={} reason={}", path, symbol, problem)
             raise ValueError(problem)
+        if problem and user_override:
+            logger.info("user override quote path={} symbol={} reason={}", path, symbol, problem)
         frac = spread_vs_mid(_quote)
-        if frac is not None and frac > spread_max + EPS and not spread_confirmed:
+        if frac is not None and frac > spread_max + EPS and not spread_confirmed and not user_override:
             slip = slippage_dollars(_quote, qty=contracts, multiplier=multiplier)
             reason = spread_confirmation_text(spread_pct=frac, threshold=spread_max, slippage=slip)
             logger.warning("order blocked path={} symbol={} reason={}", path, symbol, reason)

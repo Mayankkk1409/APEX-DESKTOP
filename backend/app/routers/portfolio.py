@@ -41,6 +41,8 @@ class OrderIn(BaseModel):
     legs: list[StrategyLegIn] | None = None
     contracts_per_leg: float = Field(default=1, gt=0)
     spread_confirmed: bool = False
+    user_override: bool = False
+    override_reasons: list[str] = Field(default_factory=list)
 
 
 def _position_row(pos: Position) -> dict:
@@ -318,7 +320,10 @@ async def place_order(
                 }
                 from app.services.executability import submission_block_reason
 
-                if strategy_name:
+                user_override = bool(body.user_override)
+                if user_override and not body.override_reasons:
+                    raise HTTPException(400, "Override reasons are required")
+                if strategy_name and not user_override:
                     blocked = submission_block_reason(
                         strategy_layer,
                         spread_confirmed=body.spread_confirmed,
@@ -330,7 +335,7 @@ async def place_order(
                 spread_override = bool(strategy_layer.get("placeable")) and bool(
                     strategy_layer.get("spread_block_reasons")
                 ) and body.spread_confirmed
-                if not spread_override:
+                if not spread_override and not user_override:
                     try:
                         refuse_if_checks_failed(
                             checks_passed=strategy_layer.get("checks_passed"),
@@ -388,6 +393,8 @@ async def place_order(
                 wide_spread_only=bool(strategy_layer.get("placeable"))
                 and bool(strategy_layer.get("spread_block_reasons")),
                 submission_path="place_order",
+                user_override=bool(body.user_override),
+                override_reasons=list(body.override_reasons),
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc

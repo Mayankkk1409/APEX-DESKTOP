@@ -163,7 +163,7 @@ describe("DeepScan risk review order panel", () => {
     expect(html).not.toContain("NO TRADE");
   });
 
-  it("disables the checkbox with the server reason when the order would be rejected", () => {
+  it("keeps the checkbox clickable and opens Acknowledge when the order would be rejected", () => {
     const stale = "Composite 62.9. Your minimum 50.0. Not auto-executable: quote 17 min old.";
     const placement = orderPlacement({
       ...executableScan,
@@ -174,22 +174,23 @@ describe("DeepScan risk review order panel", () => {
       placeable: false,
       blockReason: stale,
     });
-    const html = renderOrderActions(placement);
+    const html = renderOrderActions(placement, true);
     expect(thesisCheckboxState(placement)).toEqual({
-      disabled: true,
+      disabled: false,
       submitsOnAccept: false,
-      reason: stale,
+      reason: null,
     });
-    expect(html).toContain('data-testid="order-blocked-reason"');
-    expect(html).toContain("quote 17 min old");
-    expect(html).toContain('<input type="checkbox" class="shrink-0" data-testid="thesis" disabled=""');
-    expect(html).toContain("cursor-not-allowed");
-    expect(html).not.toContain('data-testid="submit-order"');
-    expect(html).not.toContain('data-testid="auto-exec-hint"');
-    expect(html).not.toContain("Acknowledge");
+    expect(placement.overrideRequired).toBe(true);
+    expect(html).not.toContain('data-testid="order-blocked-reason"');
+    expect(html).toContain('data-testid="thesis"');
+    expect(html).not.toContain('disabled=""');
+    expect(html).toContain('data-testid="acknowledge-order"');
+    expect(html).toContain("Acknowledge");
+    expect(html).toContain('data-testid="submit-order"');
+    expect(html).toContain("Place Trade");
   });
 
-  it("disables the checkbox until a wide spread is confirmed", () => {
+  it("keeps the checkbox clickable until a wide spread is confirmed", () => {
     const reason = "Bid/ask spread is 12% of mid. Confirm to continue.";
     const unconfirmed = orderPlacement({
       ...executableScan,
@@ -200,11 +201,12 @@ describe("DeepScan risk review order panel", () => {
       blockReason: reason,
     });
     expect(thesisCheckboxState(unconfirmed)).toEqual({
-      disabled: true,
+      disabled: false,
       submitsOnAccept: false,
-      reason,
+      reason: null,
     });
-    expect(renderOrderActions(unconfirmed)).toContain(reason);
+    expect(unconfirmed.overrideRequired).toBe(true);
+    expect(renderOrderActions(unconfirmed, true)).toContain("Acknowledge");
     const confirmed = orderPlacement({
       ...executableScan,
       composite: 80,
@@ -215,29 +217,33 @@ describe("DeepScan risk review order panel", () => {
     const state = thesisCheckboxState(confirmed);
     expect(state.disabled).toBe(false);
     expect(state.submitsOnAccept).toBe(true);
+    expect(confirmed.overrideRequired).toBe(false);
   });
 
-  it("names a reason even when the server sent none", () => {
+  it("does not lock the checkbox when the server sent no sentence", () => {
     const placement = orderPlacement({ ...executableScan, composite: 80, threshold: 40, placeable: false });
     expect(thesisCheckboxState(placement)).toEqual({
-      disabled: true,
+      disabled: false,
       submitsOnAccept: false,
-      reason: "This order cannot be submitted right now.",
+      reason: null,
     });
-    expect(renderOrderActions(placement)).toContain("This order cannot be submitted right now.");
+    expect(placement.overrideRequired).toBe(true);
+    expect(renderOrderActions(placement, true)).toContain("Acknowledge");
+    expect(renderOrderActions(placement)).not.toContain("This order cannot be submitted right now.");
   });
 
-  it("wires the checkbox to the order mutation and keeps no Acknowledge control", () => {
+  it("wires the checkbox to the order mutation and the override disclaimer", () => {
     const page = readFileSync(resolve(here, "DeepScan.tsx"), "utf8");
     expect(page).toContain("thesisState.submitsOnAccept");
-    expect(page).toContain("order.mutate(true)");
-    // The same POST as Place Trade; the server still validates before filling.
-    expect(page).toContain("thesis_accepted: thesisAccepted");
-    expect(page).not.toContain("acknowledge");
-    expect(page).not.toContain("Acknowledge");
+    expect(page).toContain("order.mutate({ thesisAccepted: true })");
+    expect(page).toContain("userOverride: true");
+    expect(page).toContain("thesis_accepted: input.thesisAccepted");
+    expect(page).toContain("APEX could not verify this trade");
+    expect(page).toContain("Proceed at my own risk");
+    expect(page).not.toContain("Strategy layer is not tradeable");
     const actions = readFileSync(resolve(here, "../components/RiskReviewOrderActions.tsx"), "utf8");
-    expect(actions).not.toContain("acknowledge-order");
-    expect(actions).not.toContain("Acknowledge");
+    expect(actions).toContain("acknowledge-order");
+    expect(actions).toContain("Acknowledge");
   });
 
   it("renders each option leg from the scan ticket and not the empty sentence", () => {
@@ -490,7 +496,8 @@ describe("DeepScan risk review order panel", () => {
     expect(html).not.toContain("market · us_option");
     expect(placement.placeTradeEnabled).toBe(true);
     expect(html).toContain("Place Trade");
-    expect(html).toContain('<button data-testid="submit-order" class="rounded-md bg-gold');
+    expect(html).toContain('data-testid="submit-order"');
+    expect(html).toContain("Place Trade");
   });
 
   it("says the scan returned no legs when both leg arrays are empty", () => {
