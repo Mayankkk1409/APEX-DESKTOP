@@ -165,6 +165,7 @@ async def _one(adapter: AlpacaAdapter, settings, ticker: str, expiry: str) -> di
                 "applicable": calendar.get("earnings_applicable"),
                 "next_date": calendar.get("next_date"),
                 "status": calendar.get("status"),
+                "date_status": calendar.get("date_status"),
                 "display": calendar.get("display"),
             },
             "quote_as_of": quote.as_of,
@@ -173,6 +174,7 @@ async def _one(adapter: AlpacaAdapter, settings, ticker: str, expiry: str) -> di
             "unmatched": unmatched,
             "recommended_expiry": chain_layer.get("expiry"),
         },
+        "evaluation_ledger": ledger,
         "ledger_gamma": [
             row
             for row in ledger
