@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { expiryLoginRows, withinExpiryLoginWindow } from "./expiryLoginNotice";
+import {
+  EXPIRY_LOGIN_AUTO_CLOSE,
+  EXPIRY_LOGIN_BROKER_SETTLES,
+  expiryLoginNotes,
+  expiryLoginRows,
+  withinExpiryLoginWindow,
+} from "./expiryLoginNotice";
 import type { ExpiryNoticeItem } from "./expiryNotice";
 
 const MARKET_DAY = "2026-10-02";
@@ -77,5 +83,36 @@ describe("expiry login window", () => {
     expect(rows[0].strikeLabel).toBe("150");
     expect(rows[0].right).toBe("call");
     expect(rows[0].direction).toBe("short");
+  });
+
+  it("holds the window across a month boundary", () => {
+    expect(withinExpiryLoginWindow("2026-10-26", "2026-11-02")).toBe(true);
+    expect(withinExpiryLoginWindow("2026-10-26", "2026-11-03")).toBe(false);
+    expect(withinExpiryLoginWindow("2026-10-02", "2026-10-01")).toBe(false);
+  });
+});
+
+describe("expiryLoginNotes", () => {
+  const paperRow = {
+    key: "pos-1",
+    positionId: "pos-1",
+    symbol: "AAPL",
+    strategy: "Bull Call Spread",
+    expiryLabel: "Oct 9, 2026",
+    strikeLabel: "150",
+    right: "call" as const,
+    direction: "long" as const,
+  };
+  const brokerRow = { ...paperRow, key: "NVDA", positionId: null, symbol: "NVDA" };
+
+  it("promises the 16:00 New York close only for paper ledger rows", () => {
+    expect(expiryLoginNotes([paperRow], true)).toEqual([EXPIRY_LOGIN_AUTO_CLOSE]);
+    expect(expiryLoginNotes([brokerRow], true)).toEqual([EXPIRY_LOGIN_BROKER_SETTLES]);
+    expect(expiryLoginNotes([paperRow, brokerRow], true)).toEqual([
+      EXPIRY_LOGIN_AUTO_CLOSE,
+      EXPIRY_LOGIN_BROKER_SETTLES,
+    ]);
+    expect(expiryLoginNotes([paperRow], false)).toEqual([EXPIRY_LOGIN_BROKER_SETTLES]);
+    expect(expiryLoginNotes([], true)).toEqual([]);
   });
 });

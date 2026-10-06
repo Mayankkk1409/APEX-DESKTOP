@@ -7,8 +7,13 @@ export const EXPIRY_LOGIN_WINDOW_DAYS = 7;
 export const EXPIRY_LOGIN_AUTO_CLOSE =
   "These positions will be closed automatically at 16:00 America/New_York on the expiry day if still open.";
 
+/** Read-only brokerage books are listed but never traded by the desk. */
+export const EXPIRY_LOGIN_BROKER_SETTLES =
+  "Read-only brokerage positions are settled by your broker. APEX does not place orders for them.";
+
 export type ExpiryLoginRow = {
   key: string;
+  positionId: string | null;
   symbol: string;
   strategy: string | null;
   expiryLabel: string;
@@ -77,6 +82,7 @@ export function expiryLoginRows(items: readonly ExpiryNoticeItem[], marketDay: s
       const strike = item.strike ?? parsed?.strike ?? null;
       return {
         key: item.position_id ?? item.symbol,
+        positionId: item.position_id ?? null,
         symbol: parsed?.root ?? item.symbol,
         strategy: knownStrategy(item.strategy),
         expiryLabel: formatExpiryLoginDate(item.expiry),
@@ -85,4 +91,33 @@ export function expiryLoginRows(items: readonly ExpiryNoticeItem[], marketDay: s
         direction: asDirection(item.direction),
       };
     });
+}
+
+/** A paper ledger row is the only kind the 16:00 America/New_York job can close. */
+export function isDeskManaged(row: ExpiryLoginRow, isPaper: boolean): boolean {
+  return isPaper && row.positionId != null;
+}
+
+/**
+ * Sentences under the title. The auto-close promise is only made for rows the
+ * desk actually closes, so a read-only brokerage book is never told that APEX
+ * will trade it.
+ */
+export function expiryLoginNotes(rows: readonly ExpiryLoginRow[], isPaper: boolean): string[] {
+  const notes: string[] = [];
+  if (rows.some((row) => isDeskManaged(row, isPaper))) notes.push(EXPIRY_LOGIN_AUTO_CLOSE);
+  if (rows.some((row) => !isDeskManaged(row, isPaper))) notes.push(EXPIRY_LOGIN_BROKER_SETTLES);
+  return notes;
+}
+
+export function formatRightLabel(right: "call" | "put" | null): string {
+  if (right === "call") return "Call";
+  if (right === "put") return "Put";
+  return "—";
+}
+
+export function formatDirectionLabel(direction: "long" | "short" | null): string {
+  if (direction === "long") return "Long";
+  if (direction === "short") return "Short";
+  return "—";
 }

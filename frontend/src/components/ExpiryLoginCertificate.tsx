@@ -1,6 +1,12 @@
 import { motion } from "framer-motion";
 import { useEscapeKey, useFocusTrap } from "../hooks/useFocusTrap";
-import { EXPIRY_LOGIN_AUTO_CLOSE, type ExpiryLoginRow } from "../lib/expiryLoginNotice";
+import {
+  expiryLoginNotes,
+  formatDirectionLabel,
+  formatRightLabel,
+  isDeskManaged,
+  type ExpiryLoginRow,
+} from "../lib/expiryLoginNotice";
 import { ApexLogo } from "./ApexLogo";
 
 type Props = {
@@ -47,9 +53,13 @@ export function ExpiryLoginCertificate({ items, isPaper, onDismiss }: Props) {
               <p className="order-cert-status">Next 7 days</p>
             </div>
 
-            <p className="sf-panel-note" data-testid="expiry-login-copy">
-              {EXPIRY_LOGIN_AUTO_CLOSE}
-            </p>
+            <div className="mb-3 space-y-1" data-testid="expiry-login-copy">
+              {expiryLoginNotes(items, isPaper).map((note) => (
+                <p key={note} className="sf-panel-note">
+                  {note}
+                </p>
+              ))}
+            </div>
 
             <div className="order-cert-legs" data-testid="expiry-login-list">
               <p className="order-cert-legs-label">Open trades</p>
@@ -79,11 +89,19 @@ export function ExpiryLoginCertificate({ items, isPaper, onDismiss }: Props) {
                       </div>
                       <div className="order-cert-row">
                         <dt>Call/Put</dt>
-                        <dd data-testid={`expiry-login-right-${item.key}`}>{item.right ?? "—"}</dd>
+                        <dd data-testid={`expiry-login-right-${item.key}`}>{formatRightLabel(item.right)}</dd>
                       </div>
                       <div className="order-cert-row">
                         <dt>Long/Short</dt>
-                        <dd data-testid={`expiry-login-direction-${item.key}`}>{item.direction ?? "—"}</dd>
+                        <dd data-testid={`expiry-login-direction-${item.key}`}>
+                          {formatDirectionLabel(item.direction)}
+                        </dd>
+                      </div>
+                      <div className="order-cert-row">
+                        <dt>Settles</dt>
+                        <dd data-testid={`expiry-login-settles-${item.key}`}>
+                          {isDeskManaged(item, isPaper) ? "APEX auto-close" : "Your broker"}
+                        </dd>
                       </div>
                     </dl>
                   </li>
