@@ -220,7 +220,59 @@ def test_rejected_narrative_falls_back_to_the_selected_strategy_sentence() -> No
     assert kb is not None
     assert any(sentence and sentence in result.text for sentence in kb.why_it_fits.split(". "))
     assert "The composite is 58 with IV 42 percent." in result.text
+    assert "Payoff is the model grid" not in result.text
+    assert result.text.lower().count("collar") <= 1
     assert check_narrative(result.text, scan_id="MDB", strategy_id="Collar").accepted is True
+
+
+def test_fallback_keeps_the_selected_composite_not_an_earlier_row() -> None:
+    _seed_recommendation_rows("MDB")
+    record_card_value(
+        "MDB",
+        "composite",
+        11.1,
+        inputs={"measured": 11.1},
+        source="strategy_layer",
+        feed="indicative",
+        timestamp="2026-10-05T13:00:00Z",
+        fn="build_strategy_layer",
+    )
+    record_card_value(
+        "MDB",
+        "composite",
+        58.0,
+        inputs={"measured": 58.0, "strategy": "Collar"},
+        source="strategy_layer",
+        feed="indicative",
+        timestamp="2026-10-05T14:00:00Z",
+        fn="build_strategy_layer",
+    )
+    record_card_value(
+        "MDB",
+        "iv",
+        0.42,
+        inputs={"measured": 0.42, "strategy": "Collar"},
+        source="strategy_layer",
+        feed="indicative",
+        timestamp="2026-10-05T14:00:00Z",
+        fn="build_strategy_layer",
+    )
+    record_card_value(
+        "MDB",
+        "hv",
+        0.33,
+        inputs={"measured": 0.33, "strategy": "Collar"},
+        source="strategy_layer",
+        feed="indicative",
+        timestamp="2026-10-05T14:00:00Z",
+        fn="build_strategy_layer",
+    )
+    result = check_narrative("Invented figure 999.9.", scan_id="MDB", strategy_id="Collar")
+    assert "11.1" not in result.text
+    assert "999.9" not in result.text
+    assert "The composite is 58 with IV 42 percent and HV 33 percent." in result.text
+    for marker in _DUMP_MARKERS:
+        assert marker not in result.text, marker
 
 
 def test_fallback_without_a_strategy_does_not_quote_the_ledger() -> None:

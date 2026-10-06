@@ -3853,6 +3853,17 @@ def build_strategy_layer(
         "threshold_delta_theta": 10,
         "symbol": str(ticker or chain_analysis.get("symbol") or ""),
     }
+    if (
+        isinstance(front_iv, (int, float))
+        and not isinstance(front_iv, bool)
+        and isinstance(back_iv, (int, float))
+        and not isinstance(back_iv, bool)
+        and float(back_iv) > 0
+    ):
+        # The term-structure sentence prints this ratio to two decimals.
+        figures["front_iv"] = float(front_iv)
+        figures["back_iv"] = float(back_iv)
+        figures["front_back_iv_ratio"] = round(float(front_iv) / float(back_iv), 2)
     calendar = fundamentals_layer.get("earnings_calendar") if isinstance(fundamentals_layer, dict) else None
     if isinstance(calendar, dict) and calendar.get("next_date"):
         figures["earnings_date"] = str(calendar.get("next_date"))[:10]

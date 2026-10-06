@@ -26,16 +26,17 @@ A second, smaller cause sat on the accepted path: the term-structure sentence pr
 `backend/app/services/narrative_guard.py`
 
 - Deleted `_fact_lines`. The ledger is never joined into prose.
-- `_fallback` is now a short knowledge-base sentence for the **selected** strategy plus one headline figure sentence:
-  - `_catalog_sentences` reads only the selected strategy's entry, fills `{key}` placeholders from the ledger, drops a sentence that is just the strategy's own name (so the structure is named once), and takes the first grounded sentence (`_FALLBACK_SENTENCE_CAP = 1`) from `why_it_fits`, then `summary`, then `key_risks`.
-  - `_figure_sentence` prints only the card's headline figures from recorded `value` rows: `The composite is 58 with IV 42 percent and HV 33 percent.` Composite is one decimal with a trailing `.0` trimmed; IV and HV print as percents, converting a stored fraction such as `0.3031` to `30.3`.
+- `_fallback` is now a short knowledge-base sentence for the **selected** strategy plus one headline figure sentence, and a sentiment-conflict sentence only when that strategy has one recorded:
+  - `_catalog_sentences` reads only the selected strategy's entry, fills `{key}` placeholders from the ledger, drops a sentence that is just the strategy's own name (so the structure is named once), drops model-grid and payoff-grid sentences, and takes the first grounded sentence (`_FALLBACK_SENTENCE_CAP = 1`) from `why_it_fits`, then `key_risks`. The catalog summary is not used, because it repeats the name and opens with the model-grid line.
+  - `_figure_sentence` prints only the selected strategy's headline figures: `The composite is 58 with IV 42 percent and HV 33 percent.` A row tagged with that strategy wins over an earlier untagged composite. Composite is one decimal with a trailing `.0` trimmed; IV and HV print as percents, converting a stored fraction such as `0.3031` to `30.3`.
   - Every kept sentence is re-checked against the ledger, so the fallback still has zero unmatched tokens. When nothing survives, the text is the existing one-line rejection sentence.
 - Module docstring records that the ledger stays on `GET /api/ledger` and in the log.
 
 `backend/app/services/strategy_engine.py` (card text and card figures only)
 
 - `_narrative_line` replaces the inline `f"Recommended: {name}. {summary} {execution}"`. When the summary already opens with the structure name, the lead is dropped, so the narrative names the structure once.
-- `build_strategy_layer` records `front_back_iv_ratio`, `front_iv`, and `back_iv` as card figures, because the term-structure sentence prints them. Nothing else about that sentence changed.
+- `_without_ledger_prose` drops any remaining sentence that still names a ledger source, a producing function, `data_freshness is`, `:score is 0`, or a payoff-grid row, so those strings cannot be why-it-fits, how-to-use, a risk note, or the Risk Review line.
+- `build_strategy_layer` records `front_back_iv_ratio`, `front_iv`, and `back_iv` as card figures, because the term-structure sentence prints them. The ratio is the two-decimal value the sentence already shows. Nothing else about that sentence, the weights, or the ±5 band changed.
 
 `frontend/src/components/StrategyScan.tsx` — not edited. It renders backend strings and structured metrics (legs, max profit, max loss, breakevens, payoff table); it does not print raw layer strings, so there was nothing to strip.
 
@@ -45,10 +46,11 @@ A second, smaller cause sat on the accepted path: the term-structure sentence pr
 
 - `test_card_copy_never_carries_the_evidence_ledger[MDB]` and `[NFLX]` — why-it-fits, how-to-use, what-is-this, the Risk Review line, the narrative, the outlook, and every risk note contain none of `from strategy_recommendation`, `via recommend_strategy`, `via build_strategy_layer`, `data_freshness is`, `:score is 0`, `payoff_grid`, `measured True`, or the injected figure. The ledger still holds those rows and the rejection is still logged.
 - `test_fallback_is_short_and_names_the_strategy_once[MDB]` and `[NFLX]` — the fallback is at most three sentences, has no newline, names the selected strategy at most once, and passes `check_narrative` on re-check.
-- `test_rejected_narrative_falls_back_to_the_selected_strategy_sentence` — the fallback carries a `why_it_fits` sentence from the selected strategy's knowledge-base entry and `The composite is 58 with IV 42 percent.`, and none of the dump markers.
+- `test_rejected_narrative_falls_back_to_the_selected_strategy_sentence` — the fallback carries a `why_it_fits` sentence from the selected strategy's knowledge-base entry and `The composite is 58 with IV 42 percent.`, names Collar at most once, and contains neither the model-grid line nor the dump markers.
+- `test_fallback_keeps_the_selected_composite_not_an_earlier_row` — an earlier untagged composite of `11.1` does not replace the Collar composite `58` with IV `42` percent and HV `33` percent.
 - `test_fallback_without_a_strategy_does_not_quote_the_ledger` — with no `strategy_id`, the fallback still refuses to quote ledger rows.
 
-All six fail on `297104c` with the old `_fallback` and pass after the change (verified by stashing the production diff).
+The new tests fail on `297104c` with the old `_fallback` and pass after the change.
 
 No existing test was edited or weakened. `tests/test_change12_2a.py::test_long_leg_spans_earnings_names_the_leg_and_date` now passes on the real generated sentence instead of the dump, because the front/back IV ratio is recorded.
 
@@ -56,7 +58,7 @@ No existing test was edited or weakened. `tests/test_change12_2a.py::test_long_l
 
 From `/Users/Mayank/Desktop/APEX-change12-4A/backend`, outside the sandbox, with `/Users/Mayank/Desktop/APEX DESKTOP/backend/.venv/bin/python -m pytest -q --tb=line`:
 
-**1741 passed, 59 skipped, 0 failed**, 1 warning (`StarletteDeprecationWarning` in `tests/test_ws.py`). Exit code 0. Elapsed 71.8s. Baseline on this branch was 1735 passed / 59 skipped; the six new tests account for the difference.
+**1742 passed, 59 skipped, 0 failed**, 1 warning (`StarletteDeprecationWarning` in `tests/test_ws.py`). Exit code 0. Elapsed 52.96s. Baseline on this branch before the card-copy tests was 1735 passed / 59 skipped. The seven tests in `test_change12_card_copy.py` account for the difference.
 
 ## Not verified in a browser
 
