@@ -111,6 +111,16 @@ def test_window_includes_today_and_excludes_eight_days() -> None:
     assert parse_occ_expiry(_occ(TODAY)) == TODAY
     assert parse_occ_expiry(_occ(TODAY + timedelta(days=8))) == TODAY + timedelta(days=8)
 
+    user = _user()
+    today_pos = _position(user, _occ(TODAY), qty=-1)
+    later = _position(user, _occ(TODAY + timedelta(days=8), root="MSFT"), strategy="Bear Put Spread")
+    listed = expiring_notices(user, [today_pos, later], TODAY)
+    assert [row["symbol"] for row in listed] == [today_pos.symbol]
+    assert listed[0]["days_left"] == 0
+    assert listed[0]["direction"] == "short"
+    assert listed[0]["right"] == "call"
+    assert listed[0]["strike"] == 150
+
 
 async def test_expires_today_is_included(db: AsyncSession) -> None:
     user = _user()
@@ -126,6 +136,9 @@ async def test_expires_today_is_included(db: AsyncSession) -> None:
     assert listed[0]["symbol"] == pos.symbol
     assert listed[0]["strategy"] == "Bull Call Spread"
     assert listed[0]["can_close"] is True
+    assert listed[0]["strike"] == 150
+    assert listed[0]["right"] == "call"
+    assert listed[0]["direction"] == "long"
 
     adapter = StubAdapter()
     await close_expiring_paper_positions(db, adapter, now=morning)

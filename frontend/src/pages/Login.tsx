@@ -4,7 +4,10 @@ import { ApexLogo } from "../components/ApexLogo";
 import { PasswordField } from "../components/PasswordField";
 import { OtpBoxes } from "../components/OtpBoxes";
 import { LegalFooter } from "../components/LegalFooter";
+import { ExpiryLoginCertificate } from "../components/ExpiryLoginCertificate";
 import { api, AUTH_REDIRECT_KEY, getAccessToken, restoreSession, setAccessToken } from "../api";
+import { expiryNoticeStorageKey } from "../lib/expiryNotice";
+import { expiryLoginRows, type ExpiryLoginRow } from "../lib/expiryLoginNotice";
 import { resolveAutofillCode } from "../lib/otpAutofill";
 import { useSession } from "../store";
 
@@ -12,6 +15,14 @@ type Flow = "login" | "recovery";
 type Stage = "identify" | "code";
 
 const RESTORED_SCREENS = ["/app", "/scan", "/portfolio", "/settings"];
+
+function rememberExpiryNoticeShown(userId: string, marketDay: string) {
+  try {
+    sessionStorage.setItem(expiryNoticeStorageKey(userId), marketDay);
+  } catch {
+    /* private mode */
+  }
+}
 
 /** After a reload, Guard sends the user to /login with the screen they were on. */
 export function pathAfterSessionRestore(from: unknown): string {
@@ -37,6 +48,8 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
   const [otpNonce, setOtpNonce] = useState(0);
   const [otpUser, setOtpUser] = useState("");
   const [err, setErr] = useState("");
+  const [expiryRows, setExpiryRows] = useState<ExpiryLoginRow[] | null>(null);
+  const [expiryIsPaper, setExpiryIsPaper] = useState(false);
   const [flow, setFlow] = useState<Flow>("login");
   const [stage, setStage] = useState<Stage>("identify");
   const formRef = useRef<HTMLFormElement>(null);
@@ -194,8 +207,21 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
       setAccessToken(res.access_token, res.expires_in, res.refresh_in);
       const me = (await api.me()) as import("../types").User;
       setUser(me);
-      setExpiryNoticeOnLogin(true);
       setModal(true);
+      try {
+        const watch = await api.expiryWatch();
+        const rows = expiryLoginRows(watch.items, watch.market_day);
+        if (rows.length > 0) {
+          rememberExpiryNoticeShown(me.id, watch.market_day);
+          setExpiryNoticeOnLogin(false);
+          setExpiryIsPaper(watch.is_paper);
+          setExpiryRows(rows);
+          return;
+        }
+        setExpiryNoticeOnLogin(false);
+      } catch {
+        setExpiryNoticeOnLogin(true);
+      }
       nav("/app");
     } catch (ex) {
       setErr((ex as Error).message);
@@ -224,6 +250,17 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
   }
 
   return (
+    <>
+    {expiryRows && expiryRows.length > 0 ? (
+      <ExpiryLoginCertificate
+        items={expiryRows}
+        isPaper={expiryIsPaper}
+        onDismiss={() => {
+          setExpiryRows(null);
+          nav("/app");
+        }}
+      />
+    ) : null}
     <main className="min-h-screen flex items-center justify-center px-4">
       <form
         ref={formRef}
@@ -330,5 +367,6 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
         <LegalFooter className="mt-6" />
       </form>
     </main>
+    </>
   );
 }
