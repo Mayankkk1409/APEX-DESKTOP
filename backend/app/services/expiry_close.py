@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.trading import Position
 from app.models.user import User
 from app.services.fills import execute_market_fill
-from app.services.occ_symbol import expiry_iso_from_text, parse_occ_expiry
+from app.services.occ_symbol import expiry_iso_from_text, parse_occ, parse_occ_expiry
 
 NY = ZoneInfo("America/New_York")
 MARKET_OPEN = time(9, 30)
@@ -60,6 +60,33 @@ def due_for_auto_close(expiry: date, today: date, local: datetime, cutoff: time)
     return expiry == today and local.time() >= cutoff
 
 
+def _direction(qty: float | None) -> str | None:
+    if qty is None or qty == 0:
+        return None
+    return "short" if qty < 0 else "long"
+
+
+def _contract_fields(symbol: str, qty: float | None) -> dict[str, Any]:
+    """Strike, call/put, and long/short from the same OCC row the close job reads."""
+    parsed = parse_occ(symbol)
+    if parsed is None:
+        return {"strike": None, "right": None, "direction": _direction(qty)}
+    return {
+        "strike": parsed.strike,
+        "right": "call" if parsed.right == "C" else "put",
+        "direction": _direction(qty),
+    }
+
+
+def _qty_or_none(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def expiring_notices(user: User, positions: list[Position], today: date) -> list[dict[str, Any]]:
     closable = user.account_mode == "paper_funded"
     rows: list[dict[str, Any]] = []
@@ -77,6 +104,7 @@ def expiring_notices(user: User, positions: list[Position], today: date) -> list
                 "expiry": expiry.isoformat(),
                 "days_left": (expiry - today).days,
                 "can_close": bool(closable and pos.qty > 0),
+                **_contract_fields(pos.symbol, float(pos.qty)),
             }
         )
     rows.sort(key=lambda row: (row["expiry"], row["symbol"]))
@@ -99,6 +127,7 @@ def notices_from_external(rows: list[dict[str, Any]], today: date) -> list[dict[
         symbol = str(row.get("symbol") or "").strip()
         if not symbol:
             continue
+        qty = _qty_or_none(row.get("quantity") if row.get("quantity") is not None else row.get("qty"))
         out.append(
             {
                 "position_id": None,
@@ -107,6 +136,7 @@ def notices_from_external(rows: list[dict[str, Any]], today: date) -> list[dict[
                 "expiry": expiry.isoformat(),
                 "days_left": (expiry - today).days,
                 "can_close": False,
+                **_contract_fields(symbol, qty),
             }
         )
     return out

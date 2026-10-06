@@ -10,6 +10,9 @@ export type ExpiryNoticeItem = {
   expiry: string;
   days_left: number;
   can_close: boolean;
+  strike?: number | null;
+  right?: "call" | "put" | null;
+  direction?: "long" | "short" | null;
 };
 
 export type ExpiryWatchResponse = {
