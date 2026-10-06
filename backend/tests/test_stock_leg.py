@@ -308,6 +308,7 @@ async def test_failed_option_does_not_submit_the_short_call(db: AsyncSession) ->
             contracts_per_leg=1,
         )
     assert "No short leg was submitted" in str(raised.value)
+    assert "The short call was not submitted" not in str(raised.value)
     assert call not in adapter.symbols
     assert put not in adapter.symbols
     assert adapter.symbols[0] == "AAPL"

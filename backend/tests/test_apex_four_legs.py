@@ -541,6 +541,8 @@ async def test_real_brokerage_keeps_the_market_hours_reason(db: AsyncSession) ->
     assert str(raised.value).startswith("options market orders are only allowed during market hours")
     assert "not split into market orders" in str(raised.value)
     assert "No short leg was submitted" in str(raised.value)
+    assert "The short call was not submitted" not in str(raised.value)
+    assert "The paper order filled" not in str(raised.value)
     for leg in shorts:
         assert leg["symbol"] not in adapter.symbols
     held = (await db.scalars(select(Position).where(Position.user_id == user.id))).all()
