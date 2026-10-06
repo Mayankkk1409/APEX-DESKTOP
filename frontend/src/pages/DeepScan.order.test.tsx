@@ -1,34 +1,35 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { RiskReviewLegs } from "../components/RiskReviewLegs";
-import { RiskReviewOrderActions } from "../components/RiskReviewOrderActions";
+import { RiskReviewOrderActions, THESIS_ACCEPTANCE_TEXT } from "../components/RiskReviewOrderActions";
 import { optionReviewRows, optionsLegBlockReason, type OptionReviewRow } from "../lib/orderTicket";
-import { orderPlacement } from "../lib/riskReview";
+import { orderPlacement, thesisCheckboxState, type OrderPlacement } from "../lib/riskReview";
 import { DEFAULT_USER_SETTINGS } from "../lib/userSettings";
 
-/** Minimal risk-review markup mirror for layout regression tests. */
-function RiskReviewOrderPanel({
-  orderTypeLabel,
-  thesisText,
-}: {
-  orderTypeLabel: string;
-  thesisText: string;
-}) {
-  return (
-    <div data-testid="risk-review">
-      <label className="flex cursor-pointer items-center gap-2 text-sm leading-snug">
-        <input type="checkbox" className="shrink-0" data-testid="thesis" />
-        <span>{thesisText}</span>
-      </label>
-      <div className="grid grid-cols-2 gap-3 text-sm">
-        <p>Type</p>
-        <p className="font-mono text-champagne/90" data-testid="order-type">
-          {orderTypeLabel}
-        </p>
-      </div>
-    </div>
+const here = dirname(fileURLToPath(import.meta.url));
+
+function renderOrderActions(placement: OrderPlacement, thesisAccepted = false): string {
+  return renderToStaticMarkup(
+    <RiskReviewOrderActions
+      placement={placement}
+      thesisAccepted={thesisAccepted}
+      onThesisChange={() => undefined}
+      onPlace={() => undefined}
+    />,
   );
 }
+
+const executableScan = {
+  serverAutoSubmit: true,
+  definedRisk: true,
+  hasLegs: true,
+  executable: true,
+  validationPassed: true,
+  placeable: true,
+};
 
 function ticketTypeLabel(rows: OptionReviewRow[]): string {
   return rows.map((row) => row.orderTypeLabel).join(" · ");
@@ -87,58 +88,156 @@ function buildOrderReview(input: {
 }
 
 describe("DeepScan risk review order panel", () => {
-  it("shows formatted order type and inline thesis checkbox", () => {
-    const thesis =
-      "I accept the thesis and have reviewed each options leg, contract quantity, estimated premium, and account impact.";
+  it("shows formatted order type and the inline thesis checkbox", () => {
+    const placement = orderPlacement({ ...executableScan, composite: 66, threshold: 40 });
     const html = renderToStaticMarkup(
-      <RiskReviewOrderPanel orderTypeLabel="market · us_option" thesisText={thesis} />,
+      <div data-testid="risk-review">
+        <RiskReviewOrderActions
+          placement={placement}
+          thesisAccepted={false}
+          onThesisChange={() => undefined}
+          onPlace={() => undefined}
+        />
+        <div className="grid grid-cols-2 gap-3 text-sm">
+          <p>Type</p>
+          <p className="font-mono text-champagne/90" data-testid="order-type">
+            market · us_option
+          </p>
+        </div>
+      </div>,
     );
     expect(html).toContain('data-testid="order-type"');
     expect(html).toContain("market · us_option");
     expect(html).toContain('class="flex cursor-pointer items-center gap-2 text-sm leading-snug"');
     expect(html).toContain('class="shrink-0"');
-    expect(html).toContain(thesis);
+    expect(html).toContain(THESIS_ACCEPTANCE_TEXT);
   });
 
-  it("shows Acknowledge when the server auto-submits and the browser toggle defaults off", () => {
+  it("submits on one checkbox above the saved minimum with no Acknowledge button", () => {
     expect(DEFAULT_USER_SETTINGS.autoExecEnabled).toBe(false);
     const placement = orderPlacement({
+      ...executableScan,
       toggleOn: DEFAULT_USER_SETTINGS.autoExecEnabled,
-      serverAutoSubmit: true,
       composite: 52.8,
       threshold: 40,
-      definedRisk: true,
-      hasLegs: true,
     });
-    const html = renderToStaticMarkup(
-      <RiskReviewOrderActions placement={placement} onPlace={() => undefined} />,
-    );
+    const html = renderOrderActions(placement);
     expect(placement.autoSubmitOnAck).toBe(true);
+    expect(thesisCheckboxState(placement)).toEqual({
+      disabled: false,
+      submitsOnAccept: true,
+      reason: null,
+    });
+    expect(html).toContain('data-testid="thesis"');
+    expect(html).not.toContain("disabled");
     expect(html).toContain('data-testid="auto-exec-hint"');
-    expect(html).toContain("Acknowledge — accepting the thesis submits these legs.");
+    expect(html).toContain("Accepting the thesis submits these legs.");
     expect(html).not.toContain('data-testid="submit-order"');
+    expect(html).not.toContain('data-testid="acknowledge-order"');
+    expect(html).not.toContain("Acknowledge");
     expect(html).not.toContain("NO TRADE");
   });
 
-  it("shows Place Trade below the saved minimum", () => {
+  it("shows Place Trade below the saved minimum and keeps the checkbox as consent", () => {
     const placement = orderPlacement({
+      ...executableScan,
       toggleOn: DEFAULT_USER_SETTINGS.autoExecEnabled,
       serverAutoSubmit: false,
       composite: 39,
       threshold: 40,
-      definedRisk: true,
-      hasLegs: true,
     });
-    const html = renderToStaticMarkup(
-      <RiskReviewOrderActions placement={placement} onPlace={() => undefined} />,
-    );
+    const html = renderOrderActions(placement);
     expect(placement.placeTradeEnabled).toBe(true);
+    expect(thesisCheckboxState(placement)).toEqual({
+      disabled: false,
+      submitsOnAccept: false,
+      reason: null,
+    });
     expect(html).toContain('data-testid="submit-order"');
     expect(html).toContain("Place Trade");
+    expect(html).toContain('data-testid="thesis"');
     expect(html).toContain('data-testid="manual-confirmation-note"');
     expect(html).toContain("Manual confirmation required (score 39.0 vs. your auto-execute minimum 40.0).");
     expect(html).not.toContain('data-testid="auto-exec-hint"');
+    expect(html).not.toContain("Acknowledge");
     expect(html).not.toContain("NO TRADE");
+  });
+
+  it("disables the checkbox with the server reason when the order would be rejected", () => {
+    const stale = "Composite 62.9. Your minimum 50.0. Not auto-executable: quote 17 min old.";
+    const placement = orderPlacement({
+      ...executableScan,
+      composite: 62.9,
+      threshold: 50,
+      executable: false,
+      validationPassed: false,
+      placeable: false,
+      blockReason: stale,
+    });
+    const html = renderOrderActions(placement);
+    expect(thesisCheckboxState(placement)).toEqual({
+      disabled: true,
+      submitsOnAccept: false,
+      reason: stale,
+    });
+    expect(html).toContain('data-testid="order-blocked-reason"');
+    expect(html).toContain("quote 17 min old");
+    expect(html).toContain('<input type="checkbox" class="shrink-0" data-testid="thesis" disabled=""');
+    expect(html).toContain("cursor-not-allowed");
+    expect(html).not.toContain('data-testid="submit-order"');
+    expect(html).not.toContain('data-testid="auto-exec-hint"');
+    expect(html).not.toContain("Acknowledge");
+  });
+
+  it("disables the checkbox until a wide spread is confirmed", () => {
+    const reason = "Bid/ask spread is 12% of mid. Confirm to continue.";
+    const unconfirmed = orderPlacement({
+      ...executableScan,
+      composite: 80,
+      threshold: 40,
+      spreadConfirmationRequired: true,
+      spreadConfirmed: false,
+      blockReason: reason,
+    });
+    expect(thesisCheckboxState(unconfirmed)).toEqual({
+      disabled: true,
+      submitsOnAccept: false,
+      reason,
+    });
+    expect(renderOrderActions(unconfirmed)).toContain(reason);
+    const confirmed = orderPlacement({
+      ...executableScan,
+      composite: 80,
+      threshold: 40,
+      spreadConfirmationRequired: true,
+      spreadConfirmed: true,
+    });
+    const state = thesisCheckboxState(confirmed);
+    expect(state.disabled).toBe(false);
+    expect(state.submitsOnAccept).toBe(true);
+  });
+
+  it("names a reason even when the server sent none", () => {
+    const placement = orderPlacement({ ...executableScan, composite: 80, threshold: 40, placeable: false });
+    expect(thesisCheckboxState(placement)).toEqual({
+      disabled: true,
+      submitsOnAccept: false,
+      reason: "This order cannot be submitted right now.",
+    });
+    expect(renderOrderActions(placement)).toContain("This order cannot be submitted right now.");
+  });
+
+  it("wires the checkbox to the order mutation and keeps no Acknowledge control", () => {
+    const page = readFileSync(resolve(here, "DeepScan.tsx"), "utf8");
+    expect(page).toContain("thesisState.submitsOnAccept");
+    expect(page).toContain("order.mutate(true)");
+    // The same POST as Place Trade; the server still validates before filling.
+    expect(page).toContain("thesis_accepted: thesisAccepted");
+    expect(page).not.toContain("acknowledge");
+    expect(page).not.toContain("Acknowledge");
+    const actions = readFileSync(resolve(here, "../components/RiskReviewOrderActions.tsx"), "utf8");
+    expect(actions).not.toContain("acknowledge-order");
+    expect(actions).not.toContain("Acknowledge");
   });
 
   it("renders each option leg from the scan ticket and not the empty sentence", () => {
@@ -280,12 +379,10 @@ describe("DeepScan risk review order panel", () => {
       multiplier: 100,
     });
     const placement = orderPlacement({
-      serverAutoSubmit: true,
+      ...executableScan,
       composite: 80,
       threshold: 40,
-      definedRisk: true,
       hasLegs: review.rows.length > 0,
-      checksPassed: review.failedChecks.length === 0,
     });
     const html = renderToStaticMarkup(
       review.rows.length === 0 ? (
@@ -296,12 +393,13 @@ describe("DeepScan risk review order panel", () => {
           {review.failedChecks.length > 0 ? (
             <p data-testid="execution-banner">{notExecutableLine(review.failedChecks)}</p>
           ) : null}
-          <label>
-            <input type="checkbox" data-testid="thesis" />
-            <span>I accept the thesis and have reviewed each options leg.</span>
-          </label>
           <p data-testid="order-type">{review.typeLabel}</p>
-          <RiskReviewOrderActions placement={placement} onPlace={() => undefined} />
+          <RiskReviewOrderActions
+            placement={placement}
+            thesisAccepted={false}
+            onThesisChange={() => undefined}
+            onPlace={() => undefined}
+          />
         </div>
       ),
     );
@@ -325,7 +423,8 @@ describe("DeepScan risk review order panel", () => {
     expect(html).toContain("account impact credit $840.00");
     expect(html).toContain('data-testid="thesis"');
     expect(placement.autoSubmitOnAck).toBe(true);
-    expect(html).toContain("Acknowledge — accepting the thesis submits these legs.");
+    expect(html).toContain("Accepting the thesis submits these legs.");
+    expect(html).not.toContain("Acknowledge");
   });
 
   it("does not render expected 2; actual 0 when strategy_legs already has two legs", () => {
@@ -336,7 +435,8 @@ describe("DeepScan risk review order panel", () => {
     expect(html).toContain("MSFT261016P00500000");
     expect(html).toContain("limit at mid");
     expect(html).not.toContain("market · us_option");
-    expect(html).toContain("Acknowledge — accepting the thesis submits these legs.");
+    expect(html).toContain("Accepting the thesis submits these legs.");
+    expect(html).not.toContain("Acknowledge");
   });
 
   it("renders a stock leg as shares at the mid and keeps Place Trade when no check failed", () => {
@@ -361,18 +461,22 @@ describe("DeepScan risk review order panel", () => {
       multiplier: 100,
     });
     const placement = orderPlacement({
+      ...executableScan,
       serverAutoSubmit: false,
       composite: 30,
       threshold: 40,
-      definedRisk: true,
       hasLegs: review.rows.length > 0,
-      checksPassed: review.failedChecks.length === 0,
     });
     const html = renderToStaticMarkup(
       <div>
         <RiskReviewLegs rows={review.rows} />
         <p data-testid="order-type">{review.typeLabel}</p>
-        <RiskReviewOrderActions placement={placement} onPlace={() => undefined} />
+        <RiskReviewOrderActions
+          placement={placement}
+          thesisAccepted={false}
+          onThesisChange={() => undefined}
+          onPlace={() => undefined}
+        />
       </div>,
     );
     expect(html).not.toContain("expected 2; actual 0");

@@ -1,9 +1,9 @@
 import { formatCompositeDecimal } from "./scoreFormat";
 
 /**
- * Acknowledge vs Place Trade.
+ * Thesis checkbox vs Place Trade.
  * Eligibility is the server decision: composite >= the saved minimum, executable,
- * and pre-trade validation passed. A score by itself does not arm Acknowledge.
+ * and pre-trade validation passed. A score by itself does not submit the order.
  */
 export function autoSubmitArms(input: {
   /** Ignored. Kept so callers can show the browser toggle is not a second gate. */
@@ -55,7 +55,7 @@ export type OrderPlacement = {
 };
 
 /**
- * The shared server decision chooses acknowledgement.
+ * The shared server decision chooses whether the thesis checkbox submits.
  * A score at or above the minimum does not, when the structure is not executable.
  */
 export function orderPlacement(input: {
@@ -109,5 +109,32 @@ export function orderPlacement(input: {
     placeTradeEnabled: true,
     acknowledgeEnabled: false,
     note,
+  };
+}
+
+/** Last-resort sentence so a locked checkbox always carries a readable reason. */
+export const ORDER_BLOCKED_FALLBACK_REASON = "This order cannot be submitted right now.";
+
+/**
+ * The thesis checkbox stays off when the server will refuse the order.
+ * Place Trade (score under the saved minimum) and the auto-submit path leave it on.
+ */
+export function thesisCheckboxDisabled(placement: OrderPlacement): boolean {
+  return !placement.autoSubmitOnAck && !placement.placeTradeEnabled;
+}
+
+/** Checkbox lock, whether checking it submits, and the reason shown before a blocked click. */
+export function thesisCheckboxState(placement: OrderPlacement): {
+  disabled: boolean;
+  submitsOnAccept: boolean;
+  reason: string | null;
+} {
+  if (!thesisCheckboxDisabled(placement)) {
+    return { disabled: false, submitsOnAccept: placement.autoSubmitOnAck, reason: null };
+  }
+  return {
+    disabled: true,
+    submitsOnAccept: false,
+    reason: placement.note?.trim() || ORDER_BLOCKED_FALLBACK_REASON,
   };
 }
