@@ -513,6 +513,19 @@ def test_outside_regular_hours_quote_is_last_close_and_threshold_stays() -> None
     )
     assert closed["isStale"] is False
     assert closed["staleReason"] == "last_close"
+    missing_stamp = build_quote_meta(
+        provider="Alpaca",
+        feed="opra",
+        quoted_at=None,
+        received_at=saturday,
+        bid=2.0,
+        ask=2.1,
+        bid_size=1,
+        ask_size=1,
+        now=saturday,
+    )
+    assert missing_stamp["isStale"] is True
+    assert missing_stamp["staleReason"] == "stale"
 
     session = datetime(2026, 10, 5, 15, 0, tzinfo=timezone.utc)
     stale = build_quote_meta(

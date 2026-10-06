@@ -969,7 +969,8 @@ def classify_quote_freshness(
 ) -> tuple[bool, str | None]:
     """Market-hours staleness. The age cap stays ``QUOTE_FRESHNESS_SECONDS``.
 
-    Outside a regular session the quote is last close and is not failed for age.
+    Outside a regular session a quote that has a timestamp is last close and is
+    not failed for age. A missing timestamp is stale in or out of the session.
     A delayed feed is labeled ``delayed``. During the session an age past the cap
     is still stale.
     """
@@ -977,6 +978,8 @@ def classify_quote_freshness(
     if sessions is None:
         sessions = weekday_sessions(clock.astimezone(NY).date())
     if not in_regular_session(clock, sessions):
+        if _parse_quoted_at(quoted_at) is None:
+            return True, "stale"
         return False, "last_close"
     quoted = _parse_quoted_at(quoted_at)
     if quoted is None:

@@ -312,6 +312,13 @@ def test_last_close_is_not_a_stale_failure_and_the_session_cap_stays() -> None:
         now=saturday,
     )
     assert "Stale or suspect quote" not in quiet
+    missing = suspect_quote_failures(
+        [{"side": "call", "quote_meta": {"staleReason": "last_close", "isStale": False}}],
+        [],
+        spot=100.0,
+        now=saturday,
+    )
+    assert "Stale or suspect quote" in missing
     loud = suspect_quote_failures(
         [{"side": "call", "quote_as_of": stale}],
         [],

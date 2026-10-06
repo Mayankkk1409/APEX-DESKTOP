@@ -416,6 +416,9 @@ def _quote_failed_stale(quote: Any, as_of: Any, *, now: datetime | None) -> bool
         raw = getattr(quote, "quote_meta", None) or getattr(quote, "quoteMeta", None)
         if isinstance(raw, dict):
             meta = raw
+    parsed_as_of = _parse_time(as_of)
+    if parsed_as_of is None:
+        return True
     if meta is not None and meta.get("staleReason") == "last_close":
         return False
     clock = now or datetime.now(timezone.utc)

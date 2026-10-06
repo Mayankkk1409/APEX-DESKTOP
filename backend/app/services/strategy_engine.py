@@ -2427,16 +2427,27 @@ def _row_mid(row: dict[str, Any]) -> float | None:
 
 
 def _contract_for_leg(leg: dict[str, Any], contracts: list[dict[str, Any]]) -> dict[str, Any]:
-    symbol = leg.get("symbol")
+    symbol = str(leg.get("symbol") or "")
     for row in contracts:
         if symbol and row.get("symbol") == symbol:
             return row
     strike = leg.get("strike")
     side = leg.get("side")
+    leg_exp = str(leg.get("expiry") or "")[:10]
     for row in contracts:
-        if side and row.get("side") == side and strike is not None and row.get("strike") is not None:
-            if abs(float(row["strike"]) - float(strike)) < 0.01:
-                return row
+        if not (side and row.get("side") == side and strike is not None and row.get("strike") is not None):
+            continue
+        if abs(float(row["strike"]) - float(strike)) >= 0.01:
+            continue
+        row_symbol = str(row.get("symbol") or "")
+        # A same strike on another expiry is a different contract. Using it
+        # makes the ±5 vol-point check look like a stale quote.
+        if symbol and row_symbol and row_symbol != symbol:
+            continue
+        row_exp = str(row.get("expiry") or "")[:10]
+        if leg_exp and row_exp and row_exp != leg_exp:
+            continue
+        return row
     return leg
 
 
@@ -2538,15 +2549,20 @@ def _quote_is_stale_failure(
     *,
     now: datetime | None = None,
 ) -> bool:
-    """Stale during the session. A last close is not a failure. The 300s cap stays."""
-    meta = _quote_meta(source, leg)
-    if meta is not None and meta.get("staleReason") == "last_close":
-        return False
+    """Stale during the session. A last close with a timestamp is not a failure.
+
+    A missing timestamp is stale even when the session is closed. The 300s cap stays.
+    """
     quoted = None
     if isinstance(source, dict):
         quoted = source.get("quote_as_of") or source.get("as_of")
     if not quoted and isinstance(leg, dict):
         quoted = leg.get("quote_as_of") or leg.get("as_of")
+    if quoted is None or not str(quoted).strip():
+        return True
+    meta = _quote_meta(source, leg)
+    if meta is not None and meta.get("staleReason") == "last_close":
+        return False
     clock = now or datetime.now(timezone.utc)
     is_stale, reason = classify_quote_freshness(quoted_at=quoted, now=clock)
     if reason == "last_close":
@@ -3803,7 +3819,15 @@ def build_strategy_layer(
     )
     hard_blocks, spread_blocks = split_block_notes(block_notes)
     if validation_blocked and not hard_blocks:
-        hard_blocks = ["Pre-trade validation did not pass."]
+        detail = None
+        if validation_errors:
+            first = validation_errors[0]
+            check = first.get("check") or "validation"
+            detail = (
+                f"Pre-trade check {check}: expected {first.get('expected')}; "
+                f"actual {first.get('actual')}."
+            )
+        hard_blocks = [detail or "Pre-trade validation did not pass."]
     placeable = not validation_blocked and not hard_blocks
     executable_flag = bool(placeable and not spread_blocks and defined and not auto_exec_blocked)
     validation_flag = not validation_blocked and not hard_blocks

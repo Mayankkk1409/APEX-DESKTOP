@@ -110,6 +110,22 @@ describe("orderPlacement", () => {
     });
   });
 
+  it("keeps Place Trade when the score is under the minimum even if auto-execute is off", () => {
+    const placement = orderPlacement({
+      ...legs,
+      serverAutoSubmit: false,
+      composite: 54.3,
+      threshold: 55.6,
+      executable: false,
+      placeable: true,
+      validationPassed: true,
+      blockReason: "Composite 54.3. Your minimum 55.6. Not auto-executable: composite is below your minimum.",
+    });
+    expect(placement.placeTradeEnabled).toBe(true);
+    expect(placement.autoSubmitOnAck).toBe(false);
+    expect(placement.acknowledgeEnabled).toBe(false);
+  });
+
   it("keeps Place Trade enabled below the saved minimum with a neutral note", () => {
     const placement = orderPlacement({ ...legs, composite: 62, threshold: 70 });
     expect(placement.autoSubmitOnAck).toBe(false);

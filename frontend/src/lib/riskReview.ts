@@ -74,16 +74,23 @@ export function orderPlacement(input: {
   blockReason?: string | null;
 }): OrderPlacement {
   const blockedNote = input.blockReason?.trim() || null;
+  const belowMinimum =
+    input.composite != null &&
+    Number.isFinite(input.composite) &&
+    Number.isFinite(input.threshold) &&
+    input.composite < input.threshold;
   if (!input.hasLegs) {
     return { autoSubmitOnAck: false, placeTradeEnabled: false, acknowledgeEnabled: false, note: blockedNote };
   }
+  // Stale quotes, wide spreads, and failed pre-trade checks still lock the box.
+  // A score under the saved minimum does not: that path keeps Place Trade.
   if (input.placeable === false) {
     return { autoSubmitOnAck: false, placeTradeEnabled: false, acknowledgeEnabled: false, note: blockedNote };
   }
-  if (input.executable === false && !input.spreadConfirmationRequired) {
+  if (input.validationPassed === false && !input.spreadConfirmationRequired) {
     return { autoSubmitOnAck: false, placeTradeEnabled: false, acknowledgeEnabled: false, note: blockedNote };
   }
-  if (input.validationPassed === false && !input.spreadConfirmationRequired) {
+  if (input.executable === false && !input.spreadConfirmationRequired && !belowMinimum) {
     return { autoSubmitOnAck: false, placeTradeEnabled: false, acknowledgeEnabled: false, note: blockedNote };
   }
   if (input.spreadConfirmationRequired && !input.spreadConfirmed) {
