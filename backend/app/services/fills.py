@@ -40,7 +40,7 @@ def _broker_rejected(broker: object) -> bool:
 
 
 # Alpaca refuses option market orders when the session is closed. A paper account
-# can still fill on the local book. A buying-power or contract rejection cannot.
+# can still fill on the local book. A buying-power rejection cannot.
 _SESSION_PAPER_MARKERS = (
     "options market orders are only allowed during market hours",
     "market orders are only allowed during market hours",
@@ -48,6 +48,20 @@ _SESSION_PAPER_MARKERS = (
     "outside of market hours",
     "outside market hours",
 )
+
+# The broker's option approval level is a property of the broker account, not of the
+# structure. A defined-risk spread carries its own cover, so a paper account fills the
+# whole structure on the local book instead of shopping the short leg on its own.
+_UNCOVERED_PAPER_MARKERS = (
+    "uncovered option",
+    "naked option",
+    "not eligible to trade uncovered",
+    "not approved for uncovered",
+)
+
+
+class ComboHeldBack(ValueError):
+    """A combo rejection whose sentence already states that no short leg was submitted."""
 
 
 def _broker_reason(broker: dict) -> str:
@@ -60,6 +74,31 @@ def _broker_reason(broker: dict) -> str:
 def _session_restricted(reason: str) -> bool:
     text = reason.lower()
     return any(marker in text for marker in _SESSION_PAPER_MARKERS)
+
+
+def paper_fill_sentence(reason: str) -> str:
+    """Broker reason, then the local fill. One notice. No naked-short stack."""
+    text = reason.strip() or "Broker rejected the order"
+    if text[-1] not in ".!?":
+        text = f"{text}."
+    return f"{text} The paper order filled at the mid."
+
+
+def _uncovered_restricted(reason: str) -> bool:
+    text = reason.lower()
+    return any(marker in text for marker in _UNCOVERED_PAPER_MARKERS)
+
+
+def _paper_fillable(reason: str) -> bool:
+    """A closed session or an uncovered-option refusal is a broker limit a paper book can absorb."""
+    return _session_restricted(reason) or _uncovered_restricted(reason)
+
+
+def _sentence(reason: str, fallback: str) -> str:
+    text = reason.strip() or fallback
+    if text[-1] not in ".!?":
+        text = f"{text}."
+    return text
 
 
 def _positive_mark(raw: object) -> float | None:
@@ -118,12 +157,15 @@ async def _submit_for_fill(
         broker = await adapter.submit_order(**payload)
     except Exception as exc:  # noqa: BLE001
         reason = str(exc).strip() or "Broker order failed"
+        # Uncovered-option refusals are absorbed only by the combo path. A single short
+        # is not filled on its own.
         if strict and not (session_paper and _session_restricted(reason)):
             raise ValueError(reason) from exc
         logger.warning("Broker order failed ({}); using paper fill", type(exc).__name__)
         paper = await _paper_submit(payload)
         if _session_restricted(reason):
             paper["session_paper_fill"] = True
+            paper["paper_fill_note"] = paper_fill_sentence(reason)
         return paper
     if not isinstance(broker, dict) or _broker_rejected(broker):
         reason = _broker_reason(broker) if isinstance(broker, dict) else "Broker rejected the order"
@@ -136,6 +178,7 @@ async def _submit_for_fill(
         paper = await _paper_submit(payload)
         if _session_restricted(reason):
             paper["session_paper_fill"] = True
+            paper["paper_fill_note"] = paper_fill_sentence(reason)
         return paper
     return broker
 
@@ -242,6 +285,10 @@ async def execute_market_fill(
     )
     if routing is not None and isinstance(broker, dict) and broker.get("session_paper_fill"):
         routing["force_paper"] = True
+    note = broker.get("paper_fill_note") if isinstance(broker, dict) else None
+    paper_note = note if isinstance(note, str) and note.strip() else None
+    if paper_note:
+        logger.info("paper fill note symbol={} note={}", order.symbol, paper_note)
     fill_px = float(broker.get("filled_avg_price") or px)
     order.status = "filled"
     order.fill_price = fill_px
@@ -283,6 +330,7 @@ async def execute_market_fill(
     await refresh_portfolio_value(user, db, adapter)
     await db.commit()
     await db.refresh(order)
+    order.fill_note = paper_note  # type: ignore[attr-defined]
 
     await hub.broadcast(
         user.id,
@@ -297,6 +345,7 @@ async def execute_market_fill(
             "balance": user.cash_balance,
             "buying_power": user.buying_power,
             "portfolio_value": user.portfolio_value,
+            "note": paper_note,
         },
     )
     return order
@@ -425,9 +474,11 @@ async def execute_strategy_legs(
         )
 
     def _holdback(exc: Exception, *, short_leg: bool) -> ValueError:
-        reason = str(exc).strip() or "Option or stock order failed"
-        if reason[-1] not in ".!?":
-            reason = f"{reason}."
+        reason = _sentence(str(exc), "Option or stock order failed")
+        if "No short leg was submitted" in reason:
+            # A combo rejection already covers the holdback. Saying more would invent a
+            # naked short that was never sent.
+            return ValueError(reason)
         if short_leg:
             safety = "Remaining short legs were not submitted."
         elif any(is_short_call(leg) for leg in shorts):
@@ -479,6 +530,7 @@ async def execute_strategy_legs(
                     marks=marks,
                     spread_confirmed=spread_confirmed,
                     spread_max=spread_max,
+                    submission_path=submission_path,
                 )
             )
             return orders
@@ -498,7 +550,13 @@ async def execute_strategy_legs(
                     limit_price=limit_price,
                 )
             )
+    except ComboHeldBack:
+        # The combo sentence already says nothing was split and no short leg went out.
+        raise
     except Exception as exc:
+        # A multi-leg order is one combo. Its rejection already says no short leg was sent.
+        if len(legs) >= 2:
+            raise
         if shorts:
             raise _holdback(exc, short_leg=False) from exc
         raise
@@ -576,6 +634,7 @@ async def _open_combo_positions(
     certificate: dict[str, Any] | None,
     order: Order,
     cash_impact: float,
+    note: str | None = None,
 ) -> None:
     for leg in legs:
         symbol = str(leg.get("symbol") or "").upper()
@@ -631,6 +690,7 @@ async def _open_combo_positions(
             "buying_power": user.buying_power,
             "portfolio_value": user.portfolio_value,
             "combo": True,
+            "note": note,
         },
     )
 
@@ -648,9 +708,23 @@ async def _execute_combo(
     marks: dict[str, float],
     spread_confirmed: bool = False,
     spread_max: float = DEFAULT_SPREAD_MAX,
+    submission_path: str = "strategy_legs",
 ) -> Order:
-    """One limit combo at the net mid. A rejection is not split into market orders."""
-    net = combo_net_mid(legs, marks)
+    """One limit combo at the net mid. A rejection is not split into market orders.
+
+    On a paper account a closed session or an uncovered-option refusal fills the whole
+    combo on the local book at the net mid, after the same server-side quote check. A
+    real brokerage account keeps the broker's rejection.
+    """
+    from app.services.executability import enforce_submission_quotes
+
+    try:
+        net = combo_net_mid(legs, marks)
+    except ValueError as exc:
+        raise ComboHeldBack(
+            f"{_sentence(str(exc), 'Live mid is unavailable')} "
+            "The combo was not split into market orders. No short leg was submitted."
+        ) from exc
     side = "buy" if net >= 0 else "sell"
     limit = round(abs(net), 2)
     combo_symbol = _combo_symbol(legs)
@@ -671,7 +745,7 @@ async def _execute_combo(
     mult = position_multiplier("us_option")
     cost = estimate_order_cost(qty, limit, asset_class="us_option", multiplier=mult)
     if side == "buy" and cost > user.buying_power:
-        raise ValueError("Insufficient buying power. No short leg was submitted.")
+        raise ComboHeldBack("Insufficient buying power. No short leg was submitted.")
 
     payload = {
         "symbol": combo_symbol,
@@ -685,31 +759,44 @@ async def _execute_combo(
     }
     session_paper = user.account_mode != "real_brokerage"
 
-    async def _reject(reason: str) -> None:
-        text = reason.strip() or "Broker cannot accept a combo order"
-        if text[-1] not in ".!?":
-            text = f"{text}."
-        raise ValueError(
+    def _reject(reason: str) -> ComboHeldBack:
+        text = _sentence(reason, "Broker cannot accept a combo order")
+        return ComboHeldBack(
             f"{text} The combo was not split into market orders. No short leg was submitted."
         )
 
+    paper_note: str | None = None
     try:
         broker = await adapter.submit_order(**payload)
     except TypeError as exc:
-        raise ValueError(
+        raise ComboHeldBack(
             "Broker cannot accept a combo order. The combo was not split into market orders. No short leg was submitted."
         ) from exc
     except Exception as exc:  # noqa: BLE001
         reason = str(exc).strip() or "Broker order failed"
-        if session_paper and _session_restricted(reason):
-            broker = {"session_paper_fill": True, "status": "rejected", "reason": reason}
-        else:
-            await _reject(reason)
-            raise
+        if not (session_paper and _paper_fillable(reason)):
+            raise _reject(reason) from exc
+        broker = {"session_paper_fill": True, "status": "rejected", "reason": reason}
     if not isinstance(broker, dict) or _broker_rejected(broker):
         reason = _broker_reason(broker) if isinstance(broker, dict) else "Broker rejected the order"
-        if not (session_paper and _session_restricted(reason)):
-            await _reject(reason)
+        if not (session_paper and _paper_fillable(reason)):
+            raise _reject(reason)
+        # The local book fills the whole structure, so re-run the server-side quote check
+        # that a broker fill would have gone through. A stale or wide quote still blocks.
+        try:
+            await enforce_submission_quotes(
+                adapter,
+                [str(leg["symbol"]) for leg in broker_legs],
+                path=submission_path,
+                spread_confirmed=spread_confirmed,
+                contracts=qty,
+                multiplier=mult,
+                spread_max=spread_max,
+            )
+        except ValueError as exc:
+            raise ComboHeldBack(_sentence(str(exc), "Quote not current")) from exc
+        paper_note = paper_fill_sentence(reason)
+        logger.info("combo paper fill symbol={} note={}", combo_symbol, paper_note)
         fill_px = limit
     else:
         raw_fill = broker.get("filled_avg_price")
@@ -730,6 +817,7 @@ async def _execute_combo(
         fill_price=fill_px,
         filled_at=datetime.now(timezone.utc),
     )
+    order.fill_note = paper_note  # type: ignore[attr-defined]
     db.add(order)
     await db.flush()
     await _open_combo_positions(
@@ -743,7 +831,9 @@ async def _execute_combo(
         certificate=certificate,
         order=order,
         cash_impact=account_impact(side, estimate_order_cost(qty, fill_px, asset_class="us_option", multiplier=mult)),
+        note=paper_note,
     )
+    order.fill_note = paper_note  # type: ignore[attr-defined]
     return order
 
 
