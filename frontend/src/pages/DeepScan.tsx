@@ -16,7 +16,7 @@ import { VolatilityScan } from "../components/volatility/VolatilityScan";
 import { CAROUSEL_LAYERS, SCAN_SLIDE_LAYERS, SNAPSHOT_STUDIES } from "../constants";
 import { scoreTier } from "../lib/chartHighlight";
 import { optionReviewRows, optionsLegBlockReason } from "../lib/orderTicket";
-import { orderPlacement } from "../lib/riskReview";
+import { orderPlacement, thesisCheckboxState } from "../lib/riskReview";
 import { normalizeStrategyName } from "../lib/strategyDisplay";
 import { readUserSettings } from "../lib/userSettings";
 import { buildOrderConfirmationDetails } from "../lib/orderFormat";
@@ -212,7 +212,9 @@ export function DeepScan() {
     spreadConfirmed,
     blockReason: eligibilityLine || riskReview?.block_reason || null,
   });
-  const autoSubmitOnAck = placement.acknowledgeEnabled;
+  // One checkbox: it submits at or above the saved minimum when the server says
+  // the structure is executable, and it stays off when the server will refuse.
+  const thesisState = thesisCheckboxState(placement);
   const orderTypeLabel = reviewRows.length
     ? reviewRows
         .map((leg) =>
@@ -296,13 +298,15 @@ export function DeepScan() {
   }, [layers.length, nav, ownsArrows]);
 
   const order = useMutation({
-    mutationFn: () => {
+    // The accepted thesis travels with the submit so the checkbox click does not
+    // race React state. The server re-checks consent, the quote, and the spread.
+    mutationFn: (thesisAccepted: boolean) => {
       if (!reviewRows.length) {
         throw new Error(emptyLegReason);
       }
       return api.order({
         scan_id: scan.data?.id,
-        thesis_accepted: thesis,
+        thesis_accepted: thesisAccepted,
         asset_class: "us_option",
         legs: reviewRows.map((leg) => ({
           symbol: leg.symbol,
@@ -480,8 +484,8 @@ export function DeepScan() {
                         ))}
                       </ul>
                     ) : null}
-                    {eligibilityLine ? (
-                      <p className="text-sm text-champagne/80" data-testid="auto-exec-eligibility">
+                    {eligibilityLine && eligibilityLine !== thesisState.reason ? (
+                      <p id="auto-exec-eligibility" className="text-sm text-champagne/80" data-testid="auto-exec-eligibility">
                         {eligibilityLine}
                       </p>
                     ) : null}
@@ -501,26 +505,6 @@ export function DeepScan() {
                         <span>{(riskReview.spread_block_reasons ?? []).join(" ") || eligibilityLine}</span>
                       </label>
                     ) : null}
-                    <label className="flex cursor-pointer items-center gap-2 text-sm leading-snug">
-                      <input
-                        type="checkbox"
-                        className="shrink-0"
-                        data-testid="thesis"
-                        checked={thesis}
-                        onChange={(e) => {
-                          const checked = e.target.checked;
-                          setThesis(checked);
-                          // TODO(legal-review): auto-submit for real accounts — paper executes immediately after ack.
-                          if (checked && autoSubmitOnAck && !order.isPending) {
-                            order.mutate();
-                          }
-                        }}
-                      />
-                      <span>
-                        I accept the thesis and have reviewed each option leg, the stock leg when this strategy includes
-                        shares, contract quantity, and account impact.
-                      </span>
-                    </label>
                     <div className="grid grid-cols-2 gap-3 text-sm">
                       <p>Contracts per leg</p>
                       <p>
@@ -541,12 +525,21 @@ export function DeepScan() {
                     <RiskReviewOrderActions
                       placement={placement}
                       pending={order.isPending}
+                      thesisAccepted={thesis}
+                      onThesisChange={(checked) => {
+                        setThesis(checked);
+                        if (checked && thesisState.submitsOnAccept && !order.isPending) {
+                          setMsg("");
+                          order.mutate(true);
+                        }
+                      }}
                       onPlace={() => {
+                        if (thesisState.disabled) return;
                         if (!thesis) {
                           setMsg("Accept the thesis to place this trade.");
                           return;
                         }
-                        order.mutate();
+                        order.mutate(true);
                       }}
                     />
                     {msg && <p className="text-sm">{msg}</p>}
