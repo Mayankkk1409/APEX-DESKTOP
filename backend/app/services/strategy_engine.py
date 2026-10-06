@@ -2307,6 +2307,15 @@ def _trader_vol_sentence(regime_view: Any, vol_layer: dict[str, Any], iv_rank_te
             f"{pair} is cheap at {abs(float(points)):.2f} vol points versus the {band:.0f} vol point band, {display}. {rank}"
         )
     if regime_view.tie_break and regime_view.iv_rank is not None and regime_view.short in {"sell premium", "buy premium"}:
+        # Rank breaks a tie only inside the ±5 band. A wider gap is the primary signal.
+        if isinstance(points, (int, float)) and abs(float(points)) > band:
+            gap = float(points)
+            # The ledger stores the signed gap. A cheap print uses IV, HV, and the band.
+            if gap < -band:
+                return f"{pair} is cheap versus the {band:.0f} vol point band. {rank}"
+            return (
+                f"{pair} is rich at {gap:.2f} vol points versus the {band:.0f} vol point band. {rank}"
+            )
         word = "rich" if regime_view.short == "sell premium" else "cheap"
         line = IV_RANK_RICH_ABOVE if word == "rich" else IV_RANK_CHEAP_BELOW
         shown = format_iv_rank(regime_view.iv_rank)
@@ -3151,13 +3160,21 @@ def _dte_window_note(
         high=high,
         today=today,
     )
+    if high is None:
+        window = f"more than {low - 1} day"
+    else:
+        window = f"{low} to {high} day"
+    days = "1 day" if dte == 1 else f"{dte} days"
     base = (
-        f"DTE penalty: selected expiry {user_expiry} is {dte} DTE, outside the how-to window of {_window_phrase(low, high)}."
+        f"The chosen expiry {user_expiry} is {days} out, outside the {window} window for this structure."
     )
     if nearest is None:
-        return base + " No listed expiry falls in that window."
+        return base + " No listed expiry is inside that window."
     nearest_dte = _dte_from_expiry(nearest, today=today)
-    return base + f" Nearest compliant expiry is {nearest} ({nearest_dte} DTE)."
+    if nearest_dte is None:
+        return base + f" Nearest listed expiry inside that window is {nearest}."
+    nearest_days = "1 day" if nearest_dte == 1 else f"{nearest_dte} days"
+    return base + f" Nearest listed expiry inside that window is {nearest} ({nearest_days} out)."
 
 
 def _sentiment_fit_note(

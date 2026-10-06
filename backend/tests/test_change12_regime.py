@@ -139,11 +139,12 @@ def test_amd_zero_dte_does_not_silently_pass_30_45() -> None:
         ticker="AMD",
     )
     text = layer["why_it_fits"]
-    assert "DTE penalty" in text
-    assert "0 DTE" in text
-    assert "30 to 45 DTE" in text
+    assert "DTE penalty" not in text
+    assert "how-to window" not in text
+    assert "0 days out" in text
+    assert "30 to 45 day window" in text
     assert compliant in text
-    assert "Nearest compliant expiry" in text
+    assert "Nearest listed expiry inside that window" in text
     assert layer.get("structure_label") == "Protective Put"
 
 

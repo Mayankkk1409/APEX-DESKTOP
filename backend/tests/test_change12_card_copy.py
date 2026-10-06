@@ -334,6 +334,53 @@ def test_why_it_fits_states_iv_versus_hv_once_and_skips_the_ledger() -> None:
     assert text.count("IV versus HV is primary") <= 1
     assert text.count("30.31%") == 1
     assert text.count("20.38%") == 1
+    wide = build_strategy_layer(
+        strategy_name="Bull Put Spread (credit)",
+        composite=52.8,
+        direction="bullish",
+        vol_signal="sell_premium",
+        chain_analysis={
+            "symbol": "MDB",
+            "spot": 342.0,
+            "expiry": "2026-10-09",
+            "recommendedContract": {"strike": 340.0, "side": "put", "expiry": "2026-10-09"},
+            "contracts": [
+                {
+                    "symbol": "MDB261009P00340000",
+                    "side": "put",
+                    "strike": 340.0,
+                    "expiry": "2026-10-09",
+                    "delta": -0.22,
+                    "bid": 1.10,
+                    "ask": 1.54,
+                    "iv": 0.5934,
+                },
+                {
+                    "symbol": "MDB261009P00337500",
+                    "side": "put",
+                    "strike": 337.5,
+                    "expiry": "2026-10-09",
+                    "delta": -0.18,
+                    "bid": 0.55,
+                    "ask": 1.90,
+                    "iv": 0.5934,
+                },
+            ],
+        },
+        vol_layer={"iv": 0.5934, "atm_iv": 0.5934, "hv": 0.8687, "iv_rank": 100, "feed": "indicative"},
+        sentiment_layer={"bias": "bullish", "score_0_100": 61},
+        fundamentals_layer={"score": 52},
+        tech_score=69.0,
+        ticker="MDB",
+        auto_exec_threshold=85.0,
+    )
+    wide_text = str(wide["why_it_fits"])
+    assert wide_text.count(rule) < 2
+    assert wide_text.count("59.34%") == 1
+    assert wide_text.count("86.87%") == 1
+    assert "breaks the tie" not in wide_text
+    assert "sell premium" not in wide_text
+    assert "is cheap" in wide_text
     assert "Failed checks:" in text
     assert text.lower().count("failed checks:") == 1
     assert "NOT EXECUTABLE" not in text

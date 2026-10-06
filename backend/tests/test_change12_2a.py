@@ -199,7 +199,8 @@ def test_amd_zero_dte_protective_put_states_the_30_to_45_window() -> None:
     ]
     assert "30" in text and "45" in text
     if not put_expiries or put_expiries[0][:10] == "2026-10-05":
-        assert "DTE penalty" in text
+        assert "days out" in text
+        assert "day window" in text
         assert "outside" in text
     else:
         assert "The candidate uses" in text
