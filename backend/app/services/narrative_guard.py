@@ -2,10 +2,13 @@
 
 The check extracts numbers, percentages, dates, and tickers. A token that does
 not match a ledger value within display rounding rejects the text. The fallback
-is the knowledge-base template with ledger values filled in, keeping only
+is a short knowledge-base sentence for the selected strategy with that
+strategy's values filled in, plus one headline figure sentence, keeping only
 sentences that themselves pass the check. Words such as high, low, rich, and
 cheap must cite a ledger value and a ledger threshold in the same sentence.
-This module does not compute prices, Greeks, or scores.
+The evidence ledger itself is never prose: rows stay on ``GET /api/ledger`` and
+in the rejection log, never on the card. This module does not compute prices,
+Greeks, or scores.
 """
 
 from __future__ import annotations
@@ -146,6 +149,11 @@ _STOP = frozenset(
 
 _THRESHOLD_KEYS = frozenset({"threshold", "thresholds"})
 _TICKER_KEYS = frozenset({"symbol", "ticker", "underlying"})
+
+# why-it-fits, then the short risk line. The summary repeats the name and the model grid.
+_FALLBACK_FIELDS = ("why_it_fits", "key_risks")
+_FALLBACK_SENTENCE_CAP = 1
+_GRID_PROSE = ("model grid", "payoff grid", "payoff_grid")
 
 _log_lock = threading.Lock()
 _rejection_log: dict[str, list[dict[str, Any]]] = {}
@@ -297,25 +305,153 @@ def _fallback(
     dates: set[str],
     tickers: set[str],
 ) -> str:
-    pieces: list[str] = []
-    if strategy_id:
-        from app.strategies.knowledge_base import entry_for
+    """Short knowledge-base copy for the selected strategy, filled with its values.
 
-        kb = entry_for(strategy_id)
-        if kb is not None:
-            template = "\n".join((kb.title, kb.summary, kb.why_it_fits, kb.how_to_use, kb.key_risks))
-            pieces.extend(_sentences(_fill_placeholders(template, entries)))
-    pieces.extend(_fact_lines(entries))
-    kept = [
-        sentence
-        for sentence in pieces
-        if sentence and not _problems(sentence, values, thresholds, dates, tickers)[0]
-        and not _problems(sentence, values, thresholds, dates, tickers)[1]
-    ]
+    The evidence ledger is not card copy. Rows stay on ``GET /api/ledger`` and in
+    the rejection log. This never joins ledger rows into the text, so gate names,
+    producing functions, unselected-strategy scores, and payoff-grid points cannot
+    reach the card.
+    """
+
+    def grounded(sentence: str) -> bool:
+        unmatched, qualitative = _problems(sentence, values, thresholds, dates, tickers)
+        return not unmatched and not qualitative
+
+    kept: list[str] = []
+    for sentence in _catalog_sentences(strategy_id, entries):
+        if len(kept) >= _FALLBACK_SENTENCE_CAP:
+            break
+        if sentence not in kept and grounded(sentence):
+            kept.append(sentence)
+    figures = _figure_sentence(strategy_id, entries)
+    if figures and figures not in kept and grounded(figures):
+        kept.append(figures)
+    conflict = _conflict_sentence(strategy_id, entries)
+    if conflict and conflict not in kept and grounded(conflict):
+        kept.append(conflict)
     text = " ".join(kept).strip()
     if not text:
         return "The generated explanation was rejected because a figure was not on the ledger."
     return text
+
+
+def _catalog_sentences(strategy_id: str | None, entries: list[LedgerEntry]) -> list[str]:
+    """Knowledge-base sentences for the selected strategy only, placeholders filled.
+
+    A sentence that is only the strategy's own name is dropped so the card names
+    the structure once.
+    """
+    if not strategy_id:
+        return []
+    from app.strategies.knowledge_base import entry_for
+
+    kb = entry_for(strategy_id)
+    if kb is None:
+        return []
+    title = str(getattr(kb, "title", "") or "").strip().rstrip(".").lower()
+    out: list[str] = []
+    for field in _FALLBACK_FIELDS:
+        raw = str(getattr(kb, field, "") or "")
+        if not raw.strip():
+            continue
+        for sentence in _sentences(_fill_placeholders(raw, entries)):
+            if title and sentence.strip().rstrip(".").lower() == title:
+                continue
+            if any(phrase in sentence.lower() for phrase in _GRID_PROSE):
+                continue
+            out.append(sentence)
+    return out
+
+
+def _named_strategy(entry: LedgerEntry) -> str | None:
+    for key in ("strategy", "strategy_id"):
+        named = entry.inputs.get(key)
+        if isinstance(named, str) and named.strip():
+            return named.strip()
+    return None
+
+
+def _latest_card_number(entries: list[LedgerEntry], strategy_id: str | None, key: str) -> float | None:
+    """Last headline figure for the selected strategy.
+
+    An earlier row for another pass, or an untagged row, does not replace the
+    value recorded for the strategy the card is explaining.
+    """
+    tagged: float | None = None
+    untagged: float | None = None
+    for entry in entries:
+        if entry.kind != "value" or entry.key != key:
+            continue
+        number = _card_number(entry.value)
+        if number is None:
+            continue
+        named = _named_strategy(entry)
+        if named:
+            if strategy_id and named == strategy_id:
+                tagged = number
+            continue
+        untagged = number
+    if tagged is not None:
+        return tagged
+    return untagged
+
+
+def _figure_sentence(strategy_id: str | None, entries: list[LedgerEntry]) -> str | None:
+    """One plain sentence with the selected strategy's headline figures."""
+    composite = _latest_card_number(entries, strategy_id, "composite")
+    volatility: list[str] = []
+    for label, key in (("IV", "iv"), ("HV", "hv")):
+        number = _latest_card_number(entries, strategy_id, key)
+        if number is not None:
+            volatility.append(f"{label} {_one_decimal(_as_percent_points(number))} percent")
+    vol_text = " and ".join(volatility)
+    if composite is not None and vol_text:
+        return f"The composite is {_one_decimal(composite)} with {vol_text}."
+    if composite is not None:
+        return f"The composite is {_one_decimal(composite)}."
+    if vol_text:
+        return f"Measured {vol_text}."
+    return None
+
+
+def _conflict_sentence(strategy_id: str | None, entries: list[LedgerEntry]) -> str | None:
+    """The recorded sentiment-conflict sentence, only when this strategy has one."""
+    text: str | None = None
+    for entry in entries:
+        if entry.key != "sentiment_conflict" or not isinstance(entry.value, str) or not entry.value.strip():
+            continue
+        named = _named_strategy(entry)
+        if named and strategy_id and named != strategy_id:
+            continue
+        text = entry.value.strip()
+    if not text:
+        return None
+    return _sentences(text)[0]
+
+
+def _card_number(value: Any) -> float | None:
+    if isinstance(value, dict):
+        return _card_number(value.get("measured"))
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _as_percent_points(value: float) -> float:
+    """A stored fraction such as 0.3031 displays as 30.3 percent."""
+    if 0 < abs(value) <= 1.5 and float(value) != float(int(value)):
+        return value * 100.0
+    return value
+
+
+def _one_decimal(value: float) -> str:
+    from decimal import Decimal, ROUND_HALF_UP
+
+    quantized = Decimal(str(value)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    if quantized == quantized.to_integral_value():
+        return str(quantized.to_integral_value())
+    return str(quantized)
 
 
 def _sentences(text: str) -> list[str]:
@@ -526,21 +662,6 @@ def _fill_placeholders(template: str, entries: list[LedgerEntry]) -> str:
         return _plain(by_key[key])
 
     return _PLACEHOLDER.sub(repl, template)
-
-
-def _fact_lines(entries: list[LedgerEntry]) -> list[str]:
-    lines: list[str] = []
-    for entry in entries:
-        origin = f"from {entry.source} via {entry.fn}"
-        if entry.kind == "gate" and isinstance(entry.value, dict) and "measured" in entry.value:
-            state = "pass" if entry.value.get("passed") else "fail"
-            lines.append(
-                f"{entry.key} measured {_plain(entry.value.get('measured'))} versus threshold "
-                f"{_plain(entry.value.get('threshold'))}, {state}, {origin}."
-            )
-        elif isinstance(entry.value, (int, float, str)):
-            lines.append(f"{entry.key} is {_plain(entry.value)} {origin}.")
-    return lines
 
 
 def _plain(value: Any) -> str:

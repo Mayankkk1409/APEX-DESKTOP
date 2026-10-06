@@ -3166,18 +3166,52 @@ def _without_catalog_sentences(text: str, strategy_name: str) -> str:
     return " ".join(pieces)
 
 
+def _narrative_line(strategy_name: str, summary: str, execution: str) -> str:
+    """Name the structure once. Catalog summaries already open with the name."""
+    body = " ".join(part for part in (summary.strip(), execution.strip()) if part)
+    lead = strategy_name.strip()
+    if lead and body.lower().startswith(f"{lead.lower()}."):
+        return body
+    return f"Recommended: {lead}. {body}".strip()
+
+
+_LEDGER_PROSE = (
+    "from strategy_recommendation",
+    "from strategy_layer",
+    "via recommend_strategy",
+    "via build_strategy_layer",
+    "data_freshness is",
+    ":score is 0",
+    "Payoff is the model grid",
+    "payoff_grid",
+)
+
+
+def _without_ledger_prose(text: str) -> str:
+    """Drop sentences that are ledger rows. The card keeps the prose that remains."""
+    kept: list[str] = []
+    for sentence in re.split(r"(?<=[.!?])\s+", (text or "").strip()):
+        cleaned = sentence.strip()
+        if cleaned and not any(marker in cleaned for marker in _LEDGER_PROSE):
+            kept.append(cleaned)
+    return " ".join(kept).strip()
+
+
 def _guard_card_text(text: str, *, scan_id: str, strategy_name: str) -> str:
     from app.services.narrative_guard import check_narrative
 
     result = check_narrative(text or "", scan_id=scan_id, strategy_id=strategy_name)
     if result.accepted:
-        return result.text
+        return _without_ledger_prose(result.text) or result.text
     remainder = _without_catalog_sentences(text or "", strategy_name)
     if remainder != (text or ""):
         again = check_narrative(remainder, scan_id=scan_id, strategy_id=strategy_name)
         if again.accepted:
-            return text
-    return result.text
+            return _without_ledger_prose(text) or text
+    cleaned = _without_ledger_prose(result.text)
+    if cleaned:
+        return cleaned
+    return "The generated explanation was rejected because a figure was not on the ledger."
 
 
 def _guard_strategy_card(
@@ -3904,7 +3938,7 @@ def build_strategy_layer(
             f"{outlook}, low conviction, direction margin {margin:.1f} "
             f"versus threshold {direction_margin_min():g}."
         )
-    narrative = f"Recommended: {strategy_name}. {summary} {execution}"
+    narrative = _narrative_line(str(strategy_name), summary, execution)
     fit, execution, notes, summary, status_line, narrative = _guard_strategy_card(
         scan_id=scan_key,
         strategy_name=strategy_name,
