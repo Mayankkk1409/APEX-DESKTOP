@@ -16,6 +16,8 @@ from app.analysis.layers import (
 from app.analysis.gate_config import (
     CREDIT_STRUCTURES,
     IV_MISMATCH_VOL_POINTS,
+    IV_RANK_CHEAP_BELOW,
+    IV_RANK_RICH_ABOVE,
     LONG_VEGA_RICH_PENALTY,
     NOT_EXECUTABLE,
     PLAIN_LONG_PREMIUM,
@@ -46,6 +48,7 @@ from app.services.strategy_recommendation import (
     StrategyRecommendation,
     TechnicalAnalysisResultRef,
     earnings_position_note,
+    format_iv_rank,
     format_iv_rank_with_reason,
     format_vol_percent,
     is_defined_risk_strategy,
@@ -2268,6 +2271,103 @@ def _vol_citation(vol_layer: dict[str, Any]) -> str | None:
     return None
 
 
+_SPREAD_CHECK = re.compile(
+    r"bid/ask spread is (\d+(?:\.\d+)?)% of mid, not below (\d+(?:\.\d+)?)%"
+    r"(?:\. Estimated slippage is \$(\d+(?:\.\d+)?)\.)?",
+    re.IGNORECASE,
+)
+
+
+def _trader_vol_sentence(regime_view: Any, vol_layer: dict[str, Any], iv_rank_text: str) -> str:
+    """One IV-versus-HV line. The textbook rule stays on the regime object, not the card."""
+    atm = vol_layer.get("atm_iv") if vol_layer.get("atm_iv") is not None else vol_layer.get("iv")
+    iv_txt = format_vol_percent(atm)
+    hv_txt = format_vol_percent(vol_layer.get("hv"))
+    rank = f"IV rank {iv_rank_text}."
+    if not iv_txt or not hv_txt:
+        return rank
+    pair = f"IV {iv_txt} versus HV {hv_txt}"
+    display = regime_view.display
+    points = regime_view.iv_minus_hv_pts
+    band = float(IV_MISMATCH_VOL_POINTS)
+    if (
+        regime_view.short == "sell premium"
+        and not regime_view.tie_break
+        and isinstance(points, (int, float))
+    ):
+        return (
+            f"{pair} is rich at {float(points):.2f} vol points versus the {band:.0f} vol point band, {display}. {rank}"
+        )
+    if (
+        regime_view.short == "buy premium"
+        and not regime_view.tie_break
+        and isinstance(points, (int, float))
+    ):
+        return (
+            f"{pair} is cheap at {abs(float(points)):.2f} vol points versus the {band:.0f} vol point band, {display}. {rank}"
+        )
+    if regime_view.tie_break and regime_view.iv_rank is not None and regime_view.short in {"sell premium", "buy premium"}:
+        word = "rich" if regime_view.short == "sell premium" else "cheap"
+        line = IV_RANK_RICH_ABOVE if word == "rich" else IV_RANK_CHEAP_BELOW
+        shown = format_iv_rank(regime_view.iv_rank)
+        return (
+            f"{pair}, {display}. IV rank {shown} is {word} versus the {line:.0f} threshold, so IV rank breaks the tie."
+        )
+    return f"{pair}, {display}. {rank}"
+
+
+def _trader_check_phrase(note: str) -> str:
+    """One failed check in trader words, using the figures already on the note."""
+    spread = _SPREAD_CHECK.search(note)
+    if spread:
+        phrase = f"wide spread {spread.group(1)}% of mid, above the {spread.group(2)}% cap"
+        if spread.group(3):
+            phrase += f", slippage ${spread.group(3)}"
+        return phrase
+    lowered = note.lower()
+    if "quote not current" in lowered or "stale" in lowered or "suspect" in lowered:
+        return "quote not current"
+    return note.strip().rstrip(".")
+
+
+def _trader_failed_checks(block_notes: list[str]) -> str:
+    phrases: list[str] = []
+    for note in block_notes:
+        phrase = _trader_check_phrase(note)
+        if phrase and phrase not in phrases:
+            phrases.append(phrase)
+    if not phrases:
+        phrases.append("a pre-trade check failed")
+    return "Failed checks: " + "; ".join(phrases) + "."
+
+
+def _payoff_sentence(metrics: dict[str, Any]) -> str | None:
+    """Credit or debit, max loss, and max gain from the scan. No invented P&L."""
+    if not isinstance(metrics, dict):
+        return None
+    bits: list[str] = []
+    net = metrics.get("net_debit_credit")
+    net_type = metrics.get("net_type")
+    if isinstance(net, (int, float)) and not isinstance(net, bool) and net_type in {"credit", "debit"}:
+        bits.append(f"{str(net_type).capitalize()} ${abs(float(net)):.2f}")
+    loss = metrics.get("max_loss")
+    if isinstance(loss, (int, float)) and not isinstance(loss, bool):
+        bits.append(f"max loss ${abs(float(loss)):.2f}")
+    elif metrics.get("max_loss_unlimited_allowed"):
+        bits.append("max loss unlimited")
+    if metrics.get("payoff_depends_on_remaining_leg"):
+        bits.append("max gain depends on the remaining long leg")
+    else:
+        profit = metrics.get("max_profit")
+        if isinstance(profit, (int, float)) and not isinstance(profit, bool):
+            bits.append(f"max gain ${float(profit):.2f}")
+        elif metrics.get("max_profit_unlimited_allowed"):
+            bits.append("max gain unlimited")
+    if not bits:
+        return None
+    return "Payoff: " + ", ".join(bits) + "."
+
+
 def _outlook_for(strategy_name: str, direction: str) -> str:
     bias = DEFINED_RISK_PLAYBOOK.get(strategy_name, {}).get("bias")
     if bias in {"bullish", "bearish", "neutral"}:
@@ -3578,72 +3678,42 @@ def build_strategy_layer(
         inversion_flagged=bool(vol_layer.get("term_structure_inverted")),
     )
     regime = regime_view.display
-    if auto_exec_blocked:
-        failed = "; ".join(block_notes) if block_notes else "a pre-trade check failed"
-        lead = f"NOT EXECUTABLE. Failed checks: {failed}."
-    elif position_action == "no_entry":
+    if position_action == "no_entry" and not auto_exec_blocked:
         lead = (
             f"Composite {float(composite):.1f}/100 is below the entry line ({entry_composite_min():.0f}), "
             "so this is not a new entry."
         )
-    elif position_action == "hold":
+    elif position_action == "hold" and not auto_exec_blocked:
         lead = (
             f"Composite {float(composite):.1f}/100 is at or above the exit line ({exit_composite_min():.0f}), "
             "so an open position is held."
         )
-    elif position_action == "exit":
+    elif position_action == "exit" and not auto_exec_blocked:
         lead = (
             f"Composite {float(composite):.1f}/100 is below the exit line ({exit_composite_min():.0f})."
         )
-    elif tier == "caution":
+    elif tier == "caution" and not auto_exec_blocked:
         lead = (
             f"Composite {float(composite):.1f}/100 — manual review required below your auto-execution threshold "
             f"({auto_exec_threshold:.0f})."
         )
-    else:
+    elif not auto_exec_blocked:
         lead = f"Composite {float(composite):.1f}/100 meets your auto-execution threshold ({auto_exec_threshold:.0f})."
-    why_parts_direction = f"Technical bias {direction} (score {tech_score})."
+    else:
+        lead = f"Composite {float(composite):.1f}."
     rank_reason = vol_layer.get("iv_rank_gap") if isinstance(vol_layer.get("iv_rank_gap"), str) else None
     if rank_reason is None and isinstance(vol_layer.get("iv_rank_invalid"), str):
         rank_reason = vol_layer.get("iv_rank_invalid")
     iv_rank_text = format_iv_rank_with_reason(vol_layer.get("iv_rank"), rank_reason)
-    why_parts = [
-        lead,
-        why_parts_direction,
-        f"Volatility regime: {regime} (IV rank {iv_rank_text}).",
-        regime_view.verdict,
-        regime_view.rule,
-    ]
-    if earnings_sentence:
-        why_parts.append(earnings_sentence)
-    atm_for_label = vol_layer.get("atm_iv") if vol_layer.get("atm_iv") is not None else vol_layer.get("iv")
-    contract_iv = None
-    if isinstance(recommended, dict):
-        contract_iv = recommended.get("iv")
-    if contract_iv is None and option_legs:
-        contract_iv = _contract_for_leg(option_legs[0], chain_rows).get("iv")
-    if "30-day ATM IV" not in regime_view.verdict and atm_for_label is not None and vol_layer.get("hv") is not None:
-        why_parts.append(
-            f"30-day ATM IV {format_vol_percent(atm_for_label)} versus HV {format_vol_percent(vol_layer.get('hv'))}."
-        )
-    if contract_iv is not None and format_vol_percent(contract_iv) != format_vol_percent(atm_for_label):
-        why_parts.append(f"Selected contract IV {format_vol_percent(contract_iv)}.")
-    if sentiment_layer.get("bias"):
-        shown_score = sentiment_layer.get("score_0_100")
-        score_text = "unavailable: sentiment score was not supplied" if shown_score is None else shown_score
-        why_parts.append(f"Sentiment {sentiment_layer.get('bias')} on 0–100 scale {score_text}.")
     conflict_note, low_conviction = _sentiment_fit_note(
         strategy_name=strategy_name,
         direction=direction,
         tech_score=tech_score,
         sentiment_layer=sentiment_layer,
     )
-    if conflict_note:
-        why_parts.append(conflict_note)
     vega_note = _selected_vega_note(strategy_name, regime_view)
     if vega_note:
         notes.append(vega_note)
-        why_parts.append(vega_note)
     event_note, event_points = _earnings_span_note(
         option_legs,
         fundamentals_layer=fundamentals_layer,
@@ -3653,21 +3723,30 @@ def build_strategy_layer(
     )
     if event_note:
         notes.append(event_note)
-        why_parts.append(event_note)
     dte_note = dte_switch_note or _dte_window_note(
         strategy_name,
         chain_analysis=chain_analysis,
         vol_layer=vol_layer,
         option_legs=option_legs,
     )
+    why_parts = [
+        lead,
+        f"Technical bias {direction} (score {tech_score}).",
+        _trader_vol_sentence(regime_view, vol_layer, iv_rank_text),
+    ]
+    if earnings_sentence:
+        why_parts.append(earnings_sentence)
+    if conflict_note:
+        why_parts.append(conflict_note)
+    if event_note:
+        why_parts.append(event_note)
     if dte_note:
         why_parts.append(dte_note)
-        execution = f"{execution} {dte_note}".strip()
-    for note in notes:
-        if "ranked first" in note and note not in why_parts:
-            why_parts.append(note)
-    if fundamentals_layer.get("score") is not None:
-        why_parts.append(f"Fundamentals score {fundamentals_layer.get('score')}.")
+    if auto_exec_blocked:
+        why_parts.append(_trader_failed_checks(block_notes))
+    payoff_line = _payoff_sentence(metrics)
+    if payoff_line:
+        why_parts.append(payoff_line)
 
     selection_rationale = selection_rationale_for(
         strategy_name,
@@ -3675,8 +3754,6 @@ def build_strategy_layer(
         tech_score=tech_score,
         vol_signal=vol_signal,
     )
-    if selection_rationale:
-        why_parts.append(selection_rationale)
     if strategy_name == "APEX Benchmark Greeks Strategy":
         from app.strategies.knowledge_base import RULE1_RATIO, RULE1_RISKS, RULE1_WHY
 

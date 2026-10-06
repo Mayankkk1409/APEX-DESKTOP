@@ -61,9 +61,11 @@ def test_aapl_iv_30_31_versus_hv_20_38_is_rich() -> None:
     text = layer["why_it_fits"]
     assert "30.31%" in text
     assert "20.38%" in text
+    assert text.count("30.31%") == 1
+    assert text.count("20.38%") == 1
     assert "IV much above HV" in text
     assert "IV rank 43.2" in text
-    assert "Rule:" in text
+    assert text.count("IV versus HV is primary") <= 1
 
 
 def test_near_band_stays_fair() -> None:

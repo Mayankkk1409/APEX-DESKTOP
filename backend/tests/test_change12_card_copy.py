@@ -282,3 +282,74 @@ def test_fallback_without_a_strategy_does_not_quote_the_ledger() -> None:
     for marker in _DUMP_MARKERS:
         assert marker not in result.text, marker
     assert "ZZZZ" not in result.text
+
+
+def test_why_it_fits_states_iv_versus_hv_once_and_skips_the_ledger() -> None:
+    """The visible Why it fits line is one comparison, not the rule essay twice."""
+    from app.analysis.gate_config import vol_regime_rule_text
+
+    layer = build_strategy_layer(
+        strategy_name="Bull Put Spread (credit)",
+        composite=52.8,
+        direction="bullish",
+        vol_signal="sell_premium",
+        chain_analysis={
+            "symbol": "MDB",
+            "spot": 342.0,
+            "expiry": "2026-10-09",
+            "recommendedContract": {"strike": 340.0, "side": "put", "expiry": "2026-10-09"},
+            "contracts": [
+                {
+                    "symbol": "MDB261009P00340000",
+                    "side": "put",
+                    "strike": 340.0,
+                    "expiry": "2026-10-09",
+                    "delta": -0.22,
+                    "bid": 1.10,
+                    "ask": 1.54,
+                    "iv": 0.40,
+                },
+                {
+                    "symbol": "MDB261009P00337500",
+                    "side": "put",
+                    "strike": 337.5,
+                    "expiry": "2026-10-09",
+                    "delta": -0.18,
+                    "bid": 0.55,
+                    "ask": 1.90,
+                    "iv": 0.42,
+                },
+            ],
+        },
+        vol_layer={"iv": 0.3031, "atm_iv": 0.3031, "hv": 0.2038, "iv_rank": 43.2, "feed": "indicative"},
+        sentiment_layer={"bias": "bullish", "score_0_100": 61},
+        fundamentals_layer={"score": 52},
+        tech_score=69.0,
+        ticker="MDB",
+        auto_exec_threshold=85.0,
+    )
+    text = str(layer["why_it_fits"])
+    rule = vol_regime_rule_text()
+    assert text.count(rule) < 2
+    assert text.count("IV versus HV is primary") <= 1
+    assert text.count("30.31%") == 1
+    assert text.count("20.38%") == 1
+    assert "Failed checks:" in text
+    assert text.lower().count("failed checks:") == 1
+    assert "NOT EXECUTABLE" not in text
+    assert "Fundamentals score" not in text
+    assert "on 0–100 scale" not in text
+    assert "on 0-100 scale" not in text
+    for marker in _DUMP_MARKERS:
+        assert marker not in text, marker
+    for field in (
+        "what_is_this",
+        "how_to_execute",
+        "narrative",
+        "auto_exec_line",
+        "outlook",
+        "selection_rationale",
+    ):
+        body = str(layer.get(field) or "")
+        for marker in _DUMP_MARKERS:
+            assert marker not in body, (field, marker)

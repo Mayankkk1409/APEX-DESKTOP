@@ -97,7 +97,21 @@ export function StrategyScan({
   }
 
   const executable = data.tradeable !== false && data.execution_banner !== "NOT EXECUTABLE" && !data.auto_exec_blocked;
-  const bannerNotes = data.failed_checks?.length ? data.failed_checks : data.risk_notes;
+  const whyText = data.why_it_fits || data.why_recommended || "";
+  const rawNotes = data.failed_checks?.length ? data.failed_checks : data.risk_notes;
+  const bannerNotes = (rawNotes ?? []).filter((note) => {
+    if (!note || whyText.includes(note)) return false;
+    if (!/failed checks/i.test(whyText)) return true;
+    const lower = note.toLowerCase();
+    return !(
+      lower.includes("bid/ask spread") ||
+      lower.includes("slippage") ||
+      lower.includes("% of mid") ||
+      lower.includes("stale") ||
+      lower.includes("suspect") ||
+      lower.includes("quote not current")
+    );
+  });
   const metrics = data.metrics ?? {
     max_loss: null,
     max_profit: null,
@@ -154,7 +168,7 @@ export function StrategyScan({
             {data.auto_exec_line}
           </p>
         ) : null}
-        {data.quote_not_current ? (
+        {data.quote_not_current && !/quote not current/i.test(whyText) ? (
           <p className="st-leg-hint" data-testid="quote-not-current">
             Quote not current{data.quote_as_of ? `. Quoted ${data.quote_as_of}` : ""}.
           </p>
