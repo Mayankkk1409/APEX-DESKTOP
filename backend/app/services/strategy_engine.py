@@ -30,6 +30,7 @@ from app.analysis.gate_config import (
     iv_below_hv,
     mids_are_exact_double,
     rule1_theta_failures,
+    rule2_short_delta_max,
 )
 from app.analysis.options_rules import classify_quote_freshness, daily_theta_per_share
 from app.services.executability import (
@@ -3891,6 +3892,10 @@ def build_strategy_layer(
         figures.update({"rule_ratio": 10, "rule_move_pct": 0.01, "rule_final_dte": 21})
     if benchmark_rule == "rule2":
         figures.update({"short_delta_cap": 0.20, "model_probability": 0.80, "profit_take": 0.50, "loss_multiple": 2})
+    # The credit-spread playbook cites this cap. Record the settings value the sentence prints.
+    short_cap = rule2_short_delta_max()
+    if f"{short_cap:.2f}" in execution:
+        figures.setdefault("short_delta_cap", float(short_cap))
     if strategy_name == "Gamma Trampoline™":
         figures.update({"gamma_days_min": 5, "gamma_days_max": 10})
     outlook = _outlook_for(strategy_name, direction)
@@ -3914,6 +3919,30 @@ def build_strategy_layer(
         quote_as_of=quote_as_of,
     )
     outlook = _guard_card_text(outlook, scan_id=scan_key, strategy_name=strategy_name)
+    equity_note = _guard_card_text(
+        str(metrics.get("equity_note") or ""),
+        scan_id=scan_key,
+        strategy_name=strategy_name,
+    ) if isinstance(metrics.get("equity_note"), str) and str(metrics.get("equity_note")).strip() else metrics.get("equity_note")
+    if isinstance(selection_rationale, str) and selection_rationale.strip():
+        selection_rationale = _guard_card_text(
+            selection_rationale,
+            scan_id=scan_key,
+            strategy_name=strategy_name,
+        )
+    hard_blocks = [
+        _guard_card_text(note, scan_id=scan_key, strategy_name=strategy_name)
+        for note in hard_blocks
+        if isinstance(note, str) and note.strip()
+    ]
+    spread_blocks = [
+        _guard_card_text(note, scan_id=scan_key, strategy_name=strategy_name)
+        for note in spread_blocks
+        if isinstance(note, str) and note.strip()
+    ]
+    block_reason = (hard_blocks or spread_blocks or [None])[0]
+    if isinstance(block_reason, str) and block_reason.strip():
+        block_reason = _guard_card_text(block_reason, scan_id=scan_key, strategy_name=strategy_name)
     return {
         "title": "Strategy playbook",
         "tradeable": checks_passed,
@@ -3932,7 +3961,7 @@ def build_strategy_layer(
         "recommended_contract": recommended,
         "equity_required": bool(spec and spec.equity_required),
         "equity_overlay_only": False,
-        "equity_note": metrics.get("equity_note"),
+        "equity_note": equity_note,
         "what_is_this": summary,
         "why_recommended": fit,
         "why_it_fits": fit,
@@ -3947,7 +3976,7 @@ def build_strategy_layer(
         "placeable": placeable,
         "hard_block_reasons": hard_blocks,
         "spread_block_reasons": spread_blocks,
-        "block_reason": (hard_blocks or spread_blocks or [None])[0],
+        "block_reason": block_reason,
         "quote_not_current": quote_not_current,
         "quote_as_of": quote_as_of,
         "metrics": metrics,

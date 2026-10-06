@@ -567,7 +567,12 @@ def build_layers(
         ),
     )
     if layer_composite != composite:
-        _restore_scored_strategy_layer(strategy_layer, composite, auto_execution_threshold)
+        _restore_scored_strategy_layer(
+            strategy_layer,
+            composite,
+            auto_execution_threshold,
+            scan_id=snapshot.symbol,
+        )
     strategy, strategy_layer = _promote_close_executable(
         strategy,
         strategy_layer,
@@ -618,12 +623,18 @@ def build_layers(
                 "expected": "stock leg for simultaneous equity strategy",
                 "actual": "missing",
             }
+            from app.services.strategy_engine import _guard_card_text
+
+            missing_equity_note = _guard_card_text(
+                "Pre-trade check equity_leg_required: expected stock leg for simultaneous equity strategy; actual missing.",
+                scan_id=snapshot.symbol,
+                strategy_name=str(strategy_layer.get("selected_strategy") or strategy),
+            )
             strategy_layer = {
                 **strategy_layer,
                 "tradeable": False,
                 "validation_errors": (strategy_layer.get("validation_errors") or []) + [equity_error],
-                "risk_notes": list(strategy_layer.get("risk_notes") or [])
-                + ["Pre-trade check equity_leg_required: expected stock leg for simultaneous equity strategy; actual missing."],
+                "risk_notes": list(strategy_layer.get("risk_notes") or []) + [missing_equity_note],
             }
             strategy_legs = []
     defined_risk = is_defined_risk_strategy(str(strategy_layer.get("selected_strategy") or strategy))
@@ -855,8 +866,38 @@ def build_layers(
             "stock_legs": _stock_context_rows(strategy_layer.get("metrics") or {}, snapshot.symbol),
         },
     }
+    _show_measured_event_vega(layers[DeepScanLayer.APEX_SCORE], snapshot.symbol)
     # Guarantee every documented layer key is present and ordered
     return {layer.value: layers[layer] for layer in DEEP_SCAN_LAYERS}
+
+
+def _show_measured_event_vega(score_layer: dict[str, Any], symbol: str) -> None:
+    """Add the ledger's measured event-vega penalty rows. Weights stay unchanged."""
+    from app.services.evidence_ledger import get
+
+    rows: list[dict[str, Any]] = []
+    for entry in get(symbol):
+        if not str(entry.key).endswith(":event_vega_penalty"):
+            continue
+        points = entry.inputs.get("points") if isinstance(entry.inputs, dict) else None
+        if isinstance(points, bool) or not isinstance(points, (int, float)):
+            continue
+        strategy = str(entry.key).rsplit(":event_vega_penalty", 1)[0]
+        note = entry.value if isinstance(entry.value, str) else None
+        rows.append(
+            {
+                "label": f"Event-vega penalty ({strategy})" if strategy else "Event-vega penalty",
+                "value": float(points),
+                "note": note,
+            }
+        )
+    if not rows:
+        return
+    for section in score_layer.get("sections") or []:
+        if section.get("id") != "risk":
+            continue
+        section["breakdown"] = list(section.get("breakdown") or []) + rows
+        return
 
 
 def _layer_is_executable(layer: dict[str, Any]) -> bool:
@@ -884,7 +925,12 @@ def _scored_strategy_layer(name: str, **kwargs: Any) -> dict[str, Any]:
         **kwargs,
     )
     if layer_composite != composite:
-        _restore_scored_strategy_layer(layer, composite, threshold)
+        _restore_scored_strategy_layer(
+            layer,
+            composite,
+            threshold,
+            scan_id=str(kwargs.get("ticker") or ""),
+        )
     return layer
 
 
@@ -977,7 +1023,13 @@ def _order_block_reason(strategy_layer: dict[str, Any]) -> str | None:
     return notes[0] if notes else None
 
 
-def _restore_scored_strategy_layer(layer: dict[str, Any], composite: float, threshold: float) -> None:
+def _restore_scored_strategy_layer(
+    layer: dict[str, Any],
+    composite: float,
+    threshold: float,
+    *,
+    scan_id: str | None = None,
+) -> None:
     """Put the real composite back after the playbook builder was asked above the old blocked band.
 
     The saved minimum only chooses auto-submit versus manual placement.
@@ -996,6 +1048,13 @@ def _restore_scored_strategy_layer(layer: dict[str, Any], composite: float, thre
             f"({threshold:.0f})."
         )
     )
+    sentence = _guard_restored_composite_sentence(
+        sentence,
+        layer,
+        composite=float(composite),
+        threshold=float(threshold),
+        scan_id=scan_id,
+    )
     # "51.0" contains a decimal point; split on the sentence boundary instead.
     boundary = why.find(". ")
     layer["why_recommended"] = sentence + (why[boundary + 1 :] if boundary != -1 else "")
@@ -1003,3 +1062,54 @@ def _restore_scored_strategy_layer(layer: dict[str, Any], composite: float, thre
     if isinstance(fit, str) and fit.startswith("Composite "):
         fit_boundary = fit.find(". ")
         layer["why_it_fits"] = sentence + (fit[fit_boundary + 1 :] if fit_boundary != -1 else "")
+
+
+def _guard_restored_composite_sentence(
+    sentence: str,
+    layer: dict[str, Any],
+    *,
+    composite: float,
+    threshold: float,
+    scan_id: str | None,
+) -> str:
+    """Check the rewritten composite sentence. Record only the measured score and the saved minimum."""
+    from app.services.evidence_ledger import record_card_value
+    from app.services.strategy_engine import _card_stamp, _guard_card_text
+
+    key = scan_id if isinstance(scan_id, str) and scan_id.strip() else "restore"
+    strategy_name = str(layer.get("selected_strategy") or "")
+    stamp = _card_stamp(layer.get("quote_as_of"))
+    record_card_value(
+        key,
+        "composite",
+        composite,
+        inputs={"measured": composite, "strategy": strategy_name},
+        source="strategy_layer",
+        feed=None,
+        timestamp=stamp,
+        fn="_restore_scored_strategy_layer",
+        strategy_id=strategy_name or None,
+    )
+    record_card_value(
+        key,
+        "threshold_auto_exec",
+        threshold,
+        inputs={"threshold": threshold, "strategy": strategy_name},
+        source="strategy_layer",
+        feed=None,
+        timestamp=stamp,
+        fn="_restore_scored_strategy_layer",
+        strategy_id=strategy_name or None,
+    )
+    record_card_value(
+        key,
+        "scale_high",
+        100,
+        inputs={"measured": 100, "strategy": strategy_name},
+        source="strategy_layer",
+        feed=None,
+        timestamp=stamp,
+        fn="_restore_scored_strategy_layer",
+        strategy_id=strategy_name or None,
+    )
+    return _guard_card_text(sentence, scan_id=key, strategy_name=strategy_name or "restore")

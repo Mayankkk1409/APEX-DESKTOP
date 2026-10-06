@@ -416,11 +416,10 @@ def build_chain_analysis(
     resolved_direction = direction or str(tech.get("direction") or "neutral")
     resolved_vol = vol_signal or "fair"
     if atm_iv and hv:
-        gap = atm_iv - hv
-        if gap > thresholds.iv_hv_rich_pts:
-            resolved_vol = "sell_premium"
-        elif gap < -thresholds.iv_hv_rich_pts:
-            resolved_vol = "buy_premium"
+        from app.analysis.gate_config import assess_vol_regime
+
+        view = assess_vol_regime(iv=atm_iv, hv=hv, iv_rank=iv_rank)
+        resolved_vol = {"sell premium": "sell_premium", "buy premium": "buy_premium", "fair": "fair"}[view.label]
     if not selected_strategy:
         return payload
     strategy = selected_strategy

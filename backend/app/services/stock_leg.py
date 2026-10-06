@@ -356,7 +356,11 @@ def apply_equity_holdings(
         metrics["validation_error"] = SHORT_STOCK_INFEASIBLE
     metrics["equity_order_qty"] = plan.order_qty
     metrics["equity_shares_used"] = plan.shares_used
+    metrics["equity_shares_held"] = int(holdings.shares_long)
+    metrics["equity_shares_encumbered"] = int(holdings.shares_encumbered)
     metrics["equity_covered_by_holdings"] = plan.covered_by_holdings
+    if plan.cost_basis is not None:
+        metrics["equity_cost_basis"] = float(plan.cost_basis)
     metrics["per_contract_multiplier"] = multiplier
     metrics["stock_entry"] = float(plan.entry) if plan.entry is not None else None
     metrics["stock_entry_source"] = plan.entry_source
