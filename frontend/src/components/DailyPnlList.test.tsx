@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { DailyPnlList, PositionDailyPnl } from "./DailyPnlList";
-import type { DailyPnlDay } from "../lib/dailyPnl";
+import { dayPlOrUnrealized, type DailyPnlDay } from "../lib/dailyPnl";
 
 const days: DailyPnlDay[] = [
   { date: "2026-10-01", pnl: 12.5, status: "marked" },
@@ -30,5 +30,19 @@ describe("PositionDailyPnl", () => {
     expect(html).toContain("unavailable");
     expect(html).not.toContain("$0");
     expect(html).not.toContain("+$0");
+  });
+});
+
+describe("dayPlOrUnrealized", () => {
+  it("uses the latest marked session", () => {
+    expect(dayPlOrUnrealized(days.slice(0, 2), 999)).toBe(-4);
+  });
+
+  it("keeps unrealized P&L when the latest session has no price", () => {
+    expect(dayPlOrUnrealized([{ date: "2026-10-06", pnl: null, status: "unavailable" }], 42)).toBe(42);
+  });
+
+  it("does not invent a number before the daily series has loaded", () => {
+    expect(dayPlOrUnrealized(undefined, 42)).toBeNull();
   });
 });

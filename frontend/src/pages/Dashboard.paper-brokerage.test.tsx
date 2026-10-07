@@ -222,5 +222,39 @@ describe("Dashboard paper vs brokerage isolation", () => {
     expect(html).toContain("-$4");
     expect(html).toContain("unavailable");
     expect(html).toContain('data-testid="book-daily-pnl"');
+    expect(html).toContain("100");
+  });
+
+  it("shows book dollars when at least one session is marked", () => {
+    const qc = createTestQueryClient();
+    qc.setQueryData(["brokerage", "accounts"], { connection_status: null, accounts: [] });
+    qc.setQueryData(["quote", "SPX"], { symbol: "SPX", name: "S&P 500", price: 5000 });
+    qc.setQueryData(["port"], { balance: 100000, buying_power: 100000, portfolio_value: 100000, day_pl: 500 });
+    qc.setQueryData(["pos"], {
+      positions: [{ id: "p1", symbol: "AAPL", qty: 10, avg_cost: 150, current: 160, market_value: 1600, unrealized_pl: 100, asset_class: "us_equity" }],
+    });
+    qc.setQueryData(["daily-pnl"], {
+      positions: [
+        {
+          id: "p1",
+          symbol: "AAPL",
+          days: [{ date: "2026-10-06", pnl: 18.5, status: "marked" }],
+        },
+      ],
+      book: [{ date: "2026-10-06", pnl: 18.5, status: "marked" }],
+    });
+
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <Dashboard />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(html).toContain('data-testid="day-pl-summary"');
+    expect(html).toContain("Day P&amp;L 18.5");
+    expect(html).toContain("+$18.5");
+    expect(html).not.toContain("Day P&amp;L unavailable");
   });
 });

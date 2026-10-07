@@ -26,3 +26,20 @@ export function daysForPosition(payload: DailyPnlResponse | undefined, id: strin
   if (!payload) return undefined;
   return payload.positions.find((row) => row.id === id)?.days ?? [];
 }
+
+/**
+ * Latest marked session when the series has one.
+ * When that session has no price, keep the position unrealized P&L the portfolio already returned.
+ */
+export function dayPlOrUnrealized(
+  days: DailyPnlDay[] | undefined,
+  unrealized: number | null | undefined,
+): number | null {
+  if (days === undefined) return null;
+  if (days.length > 0) {
+    const marked = markedPnl(days[days.length - 1]);
+    if (marked != null) return marked;
+  }
+  if (unrealized != null && Number.isFinite(unrealized)) return unrealized;
+  return null;
+}

@@ -18,7 +18,7 @@ import { useMarketSocket } from "../hooks/useMarketSocket";
 import { defaultAccountLabel, usePositionCertificate } from "../hooks/usePositionCertificate";
 import { refreshDeskQueries } from "../lib/deskRefresh";
 import { clearNewsRetry, isNewsRateLimitMessage, newsRetryDelay, noteNewsRateLimit, visibleNewsError } from "../lib/newsFeed";
-import { daysForPosition, markedPnl } from "../lib/dailyPnl";
+import { dayPlOrUnrealized, daysForPosition, markedPnl } from "../lib/dailyPnl";
 import { resolvePositionDayPl } from "../lib/positionDayPl";
 import { SEARCH_DEBOUNCE_MS, createDebouncedSymbolSearch } from "../lib/symbolSearch";
 import { useSession } from "../store";
@@ -559,10 +559,10 @@ export function Dashboard() {
                 ) : (
                   displayPositions.map((p) => {
                     const seriesDays = brokerage.usingBrokerage ? undefined : daysForPosition(dailyPnl.data, p.id);
-                    const latest = seriesDays?.[seriesDays.length - 1];
-                    const seriesValue = seriesDays ? markedPnl(latest) : null;
-                    const positionDayPl = seriesDays ? seriesValue : resolvePositionDayPl(p, quoteBySymbol.get(p.symbol));
-                    const dayCell = seriesDays && seriesValue == null ? "unavailable" : fmt(positionDayPl);
+                    const fromSeries = dayPlOrUnrealized(seriesDays, p.unrealized_pl);
+                    const positionDayPl =
+                      fromSeries != null ? fromSeries : resolvePositionDayPl(p, quoteBySymbol.get(p.symbol));
+                    const dayCell = fmt(positionDayPl);
                     return (
                     <Fragment key={p.id}>
                     <tr

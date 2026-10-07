@@ -309,22 +309,77 @@ class AlpacaAdapter:
             return ybars
         return await self.demo.bars(symbol, timeframe, limit)
 
+    async def option_snapshot_bars(self, symbols: list[str]) -> dict[str, list[dict]]:
+        """Previous and latest session closes for OCC symbols.
+
+        Option history bars need an OPRA agreement this account does not have.
+        The options snapshot feed still publishes ``prevDailyBar`` and ``dailyBar``.
+        A stock snapshot of the OCC symbol is not used — that path rejects the contract.
+        """
+        from app.services.daily_pnl import bars_from_option_snapshot
+        from app.services.occ_symbol import parse_occ
+
+        clean = [s.upper() for s in symbols if s and parse_occ(s)]
+        found: dict[str, list[dict]] = {}
+        if not clean or not self.settings.alpaca_keys_present:
+            return found
+        feeds: list[str] = []
+        for feed in (self.feed, "indicative", "opra"):
+            if feed not in feeds:
+                feeds.append(feed)
+        for feed in feeds:
+            missing = [s for s in clean if s not in found]
+            if not missing:
+                break
+            payload = await self._get(
+                self.settings.resolved_data_base_url,
+                "/v1beta1/options/snapshots",
+                {"symbols": ",".join(missing), "feed": feed},
+            )
+            snaps = payload.get("snapshots") if isinstance(payload, dict) else None
+            if not isinstance(snaps, dict):
+                continue
+            for sym, row in snaps.items():
+                bars = bars_from_option_snapshot({"snapshots": {str(sym).upper(): row}}, str(sym))
+                if bars:
+                    found[str(sym).upper()] = bars
+        return found
+
     async def vendor_daily_bars(self, symbol: str, *, start: str, end: str) -> list[dict]:
-        """Daily closes from Alpaca or Yahoo. Empty when the feed has no prices.
+        """Daily closes from Alpaca. Empty when the feed has no prices.
 
         The chart path may fall back to the demo generator. Daily P&L must not.
+        Equity bars use the IEX feed. Option contracts use the options snapshot,
+        then option bars. Yahoo is only a last resort for cash indexes.
         """
+        from app.services.live_quotes import _index_meta, yahoo_ohlc_bars
         from app.services.occ_symbol import parse_occ
 
         symbol = symbol.upper()
         if parse_occ(symbol):
-            return await self.option_bars(symbol, start=start, end=end, timeframe="1Day", limit=1000)
+            snapped = await self.option_snapshot_bars([symbol])
+            if snapped.get(symbol):
+                return snapped[symbol]
+            option_rows = await self.option_bars(symbol, start=start, end=end, timeframe="1Day", limit=1000)
+            if option_rows:
+                return option_rows
+            return []
+        mapped = await self._stock_daily_bars(symbol, start=start, end=end)
+        if mapped:
+            return mapped
+        if _index_meta(symbol):
+            return await yahoo_ohlc_bars(symbol, "1D", 1000)
+        return []
+
+    async def _stock_daily_bars(self, symbol: str, *, start: str, end: str) -> list[dict]:
+        """IEX daily closes. SIP recent bars are not entitled on this account."""
         params = {
             "timeframe": "1Day",
             "limit": 10000,
             "adjustment": "raw",
             "start": start,
             "end": end,
+            "feed": "iex",
         }
         data = await self._get(
             self.settings.resolved_data_base_url,
@@ -345,17 +400,13 @@ class AlpacaAdapter:
                 raw = packed.get(symbol) or packed.get(symbol.upper())
             else:
                 raw = packed
-        if raw:
-            mapped = [
-                {"t": b.get("t"), "c": b.get("c")}
-                for b in raw
-                if isinstance(b, dict) and b.get("c") is not None
-            ]
-            if mapped:
-                return mapped
-        from app.services.live_quotes import yahoo_ohlc_bars
-
-        return await yahoo_ohlc_bars(symbol, "1D", 1000)
+        if not raw:
+            return []
+        return [
+            {"t": b.get("t"), "c": b.get("c")}
+            for b in raw
+            if isinstance(b, dict) and b.get("c") is not None
+        ]
 
     async def _option_contracts(
         self,
