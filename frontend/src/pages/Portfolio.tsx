@@ -12,6 +12,7 @@ import { PnlChart } from "../components/PnlChart";
 import { useAccountOverallPnl } from "../hooks/useAccountOverallPnl";
 import { useBrokerage } from "../hooks/useBrokerage";
 import { defaultAccountLabel, usePositionCertificate } from "../hooks/usePositionCertificate";
+import { refreshDeskQueries } from "../lib/deskRefresh";
 import { filterPnlPoints, type PnlTimeframe } from "../lib/pnlTimeframe";
 import { assetLabel, fmtBalance, fmtMoney, fmtPlain, fmtTs } from "../lib/portfolioFormat";
 import { isRiskProfile, patchUserSettings, readUserSettings, type RiskProfile } from "../lib/userSettings";
@@ -130,11 +131,7 @@ export function Portfolio() {
           portfolio_value: res.portfolio_value,
         });
       }
-      void qc.invalidateQueries({ queryKey: ["port"] });
-      void qc.invalidateQueries({ queryKey: ["pos"] });
-      void qc.invalidateQueries({ queryKey: ["pnl-history"] });
-      void qc.invalidateQueries({ queryKey: ["overall-pnl"] });
-      void qc.invalidateQueries({ queryKey: ["orders"] });
+      refreshDeskQueries(qc);
     },
   });
 

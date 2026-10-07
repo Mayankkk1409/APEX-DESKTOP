@@ -1,6 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, getAccessToken } from "../api";
+import { refreshDeskQueries } from "../lib/deskRefresh";
 import { useMarketSocket } from "../hooks/useMarketSocket";
 import {
   expiryNoticeStorageKey,
@@ -35,16 +36,24 @@ export function ExpiryWatchNotice() {
   const [open, setOpen] = useState(false);
   const [closingId, setClosingId] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const restoreQuiet = useRef(false);
 
   useEffect(() => {
-    if (!token || expiryLoginPending) return;
+    if (!token) return;
+    if (expiryLoginPending) {
+      restoreQuiet.current = true;
+      return;
+    }
+    const skipBecauseRefresh = restoreQuiet.current;
+    restoreQuiet.current = false;
     let cancelled = false;
 
-    async function evaluate() {
+    async function evaluate(fromRefresh: boolean) {
       try {
         const data = await api.expiryWatch();
         if (cancelled) return;
         const justLoggedIn = useSession.getState().expiryNoticeOnLogin;
+        if (fromRefresh && !justLoggedIn) return;
         const show = shouldShowExpiryNotice({
           itemCount: data.items.length,
           justLoggedIn,
@@ -62,12 +71,12 @@ export function ExpiryWatchNotice() {
       }
     }
 
-    void evaluate();
+    void evaluate(skipBecauseRefresh);
     const onVisible = () => {
-      if (document.visibilityState === "visible") void evaluate();
+      if (document.visibilityState === "visible") void evaluate(false);
     };
     document.addEventListener("visibilitychange", onVisible);
-    const timer = window.setInterval(() => void evaluate(), 60 * 60 * 1000);
+    const timer = window.setInterval(() => void evaluate(false), 60 * 60 * 1000);
     return () => {
       cancelled = true;
       document.removeEventListener("visibilitychange", onVisible);
@@ -88,11 +97,7 @@ export function ExpiryWatchNotice() {
           portfolio_value: msg.portfolio_value,
         });
       }
-      void qc.invalidateQueries({ queryKey: ["port"] });
-      void qc.invalidateQueries({ queryKey: ["pos"] });
-      void qc.invalidateQueries({ queryKey: ["orders"] });
-      void qc.invalidateQueries({ queryKey: ["pnl-history"] });
-      void qc.invalidateQueries({ queryKey: ["overall-pnl"] });
+      refreshDeskQueries(qc);
       void api.expiryWatch().then((data) => {
         setPayload(data);
         if (data.items.length === 0) setOpen(false);
@@ -114,11 +119,7 @@ export function ExpiryWatchNotice() {
           portfolio_value: res.portfolio_value,
         });
       }
-      void qc.invalidateQueries({ queryKey: ["port"] });
-      void qc.invalidateQueries({ queryKey: ["pos"] });
-      void qc.invalidateQueries({ queryKey: ["orders"] });
-      void qc.invalidateQueries({ queryKey: ["pnl-history"] });
-      void qc.invalidateQueries({ queryKey: ["overall-pnl"] });
+      refreshDeskQueries(qc);
       const data = await api.expiryWatch();
       setPayload(data);
       if (data.items.length === 0) setOpen(false);

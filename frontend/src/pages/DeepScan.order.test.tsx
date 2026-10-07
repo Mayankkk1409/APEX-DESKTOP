@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { OrderSubmitProgress } from "../components/OrderSubmitProgress";
 import { RiskReviewLegs } from "../components/RiskReviewLegs";
 import { RiskReviewOrderActions, THESIS_ACCEPTANCE_TEXT } from "../components/RiskReviewOrderActions";
 import { optionReviewRows, optionsLegBlockReason, type OptionReviewRow } from "../lib/orderTicket";
@@ -243,13 +244,29 @@ describe("DeepScan risk review order panel", () => {
     expect(page).toContain("const userOverride = input.userOverride === true");
     expect(page).toContain("user_override: userOverride");
     expect(page).toContain("OrderRefusalDialog");
-    expect(page).toContain("onError: (e) => setOrderRefusal((e as Error).message)");
+    expect(page).toContain("setOrderRefusal((e as Error).message)");
+    expect(page).toContain("OrderSubmitProgress");
+    expect(page).toContain("order.isPending || progressComplete");
+    expect(page).toContain("orderConfirmation && !order.isPending && !progressComplete");
+    expect(page).toContain('toLowerCase() !== "filled"');
+    expect(page).toContain("refreshDeskQueries(qc)");
+    expect(page).toContain('nav("/app")');
     expect(page).toContain("if (orderRefusal !== null) return");
     expect(page).not.toContain("onError: (e) => setMsg");
     expect(page).not.toContain("Strategy layer is not tradeable");
     const actions = readFileSync(resolve(here, "../components/RiskReviewOrderActions.tsx"), "utf8");
     expect(actions).toContain("acknowledge-order");
     expect(actions).toContain("Acknowledge");
+    const progress = readFileSync(resolve(here, "../components/OrderSubmitProgress.tsx"), "utf8");
+    expect(progress).toContain('data-testid="order-progress"');
+    expect(progress).toContain("aria-valuenow={complete ? 100 : undefined}");
+    const pending = renderToStaticMarkup(<OrderSubmitProgress complete={false} />);
+    expect(pending).toContain('data-testid="order-progress"');
+    expect(pending).toContain('data-complete="false"');
+    expect(pending).not.toContain('aria-valuenow="100"');
+    const done = renderToStaticMarkup(<OrderSubmitProgress complete />);
+    expect(done).toContain('data-complete="true"');
+    expect(done).toContain('aria-valuenow="100"');
   });
 
   it("renders each option leg from the scan ticket and not the empty sentence", () => {

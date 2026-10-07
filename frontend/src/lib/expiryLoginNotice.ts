@@ -29,19 +29,21 @@ export function readExpiryLoginDays(
 }
 
 /**
- * True when this account has an option inside the window and the certificate
- * has not been painted on this New York market day. A notice key stored before
- * the dialog committed does not count as shown.
+ * Password or OTP verify shows the certificate whenever an open option is inside
+ * the window. The painted-day key does not suppress that next login.
+ * A page refresh or cookie restore passes credentialLogin false and stays quiet.
  */
 export function shouldShowExpiryLoginCertificate(input: {
   rowCount: number;
   marketDay: string;
   paintedMarketDay: string | null;
   legacyNoticeDay: string | null;
+  credentialLogin: boolean;
 }): boolean {
+  if (!input.credentialLogin) return false;
   if (input.rowCount <= 0) return false;
-  if (input.paintedMarketDay === input.marketDay) return false;
-  // legacyNoticeDay is the watch key. Matching today means it was stored before paint, which still shows.
+  void input.marketDay;
+  void input.paintedMarketDay;
   void input.legacyNoticeDay;
   return true;
 }

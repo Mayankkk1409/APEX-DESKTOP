@@ -102,7 +102,8 @@ def _news_tone_sentence(
 ) -> str:
     if not news_count or news_score is None:
         reason = (news_error or "").strip()
-        if reason:
+        # A rate limit is retried quietly. The desk must not print HTTP 429.
+        if reason and "429" not in reason:
             return f"News for {sym} is unavailable: {reason}."
         return no_recent_news_message(sym)
 
@@ -383,6 +384,13 @@ def _weighted_composite(parts: dict[str, float | None]) -> tuple[float | None, d
     return round(_clamp(score), 1), renorm
 
 
+_last_good_news: dict[str, list[dict]] = {}
+
+
+def _news_cache_key(symbol: str | None) -> str:
+    return (symbol or "").strip().upper()
+
+
 async def fetch_alpaca_news(
     settings: Settings,
     *,
@@ -407,6 +415,10 @@ async def fetch_alpaca_news(
             res = await client.get(url, headers=headers, params=params)
             if res.status_code >= 400:
                 logger.warning("Alpaca news {} -> {}", res.status_code, res.text[:180])
+                if res.status_code == 429:
+                    cached = _last_good_news.get(_news_cache_key(symbol))
+                    if cached:
+                        return list(cached), None
                 return [], f"News feed HTTP {res.status_code}"
             payload = res.json()
     except Exception as exc:  # noqa: BLE001
@@ -415,6 +427,8 @@ async def fetch_alpaca_news(
     news = payload.get("news") if isinstance(payload, dict) else None
     if not isinstance(news, list):
         return [], "News feed returned no articles"
+    if news:
+        _last_good_news[_news_cache_key(symbol)] = list(news)
     return news, None
 
 

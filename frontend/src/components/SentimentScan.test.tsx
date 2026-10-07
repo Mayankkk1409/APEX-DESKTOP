@@ -90,6 +90,38 @@ describe("SentimentScan news", () => {
     expect(html).not.toContain(FORBIDDEN);
   });
 
+  it("hides a news rate limit instead of printing HTTP 429", () => {
+    const html = render({ status: "unavailable", error: "News feed HTTP 429" });
+    expect(html).not.toContain("429");
+    expect(html).not.toContain("News feed HTTP");
+    expect(html).not.toContain('data-testid="sentiment-news-retry"');
+    expect(html).toContain("No recent news for AAPL from Alpaca News.");
+  });
+
+  it("keeps the last headlines when a later payload is rate limited", () => {
+    const html = render({
+      status: "live",
+      error: "News feed HTTP 429",
+      count: 1,
+      articles: [
+        {
+          headline: "Apple holds its product event",
+          summary: null,
+          source: "benzinga",
+          author: null,
+          url: "https://example.com/aapl",
+          published_at: "2026-10-06T15:00:00Z",
+          symbols: ["AAPL"],
+          nlp_score: 10,
+          nlp_method: "lexicon_v1",
+        },
+      ],
+    });
+    expect(html).toContain("Apple holds its product event");
+    expect(html).not.toContain("429");
+    expect(html).not.toContain('data-testid="sentiment-news-retry"');
+  });
+
   it("maps a provider article with source, timestamp, and link", () => {
     const html = render({
       status: "live",

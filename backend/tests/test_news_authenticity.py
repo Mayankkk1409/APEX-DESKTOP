@@ -309,3 +309,64 @@ async def test_sentiment_layer_empty_query_names_symbol(monkeypatch: pytest.Monk
     assert out["components"]["news"]["score"] is None
     assert "No recent news for AAPL from Alpaca News." in out["narrative"]
     assert FORBIDDEN_EMPTY not in out["narrative"]
+
+
+@pytest.mark.asyncio
+async def test_sentiment_narrative_omits_news_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def limited(symbol: str, settings: Settings, *, limit: int = 20):
+        return [], "News feed HTTP 429"
+
+    monkeypatch.setattr(sl, "_fetch_alpaca_news", limited)
+    out = await sl.build_sentiment_layer("AAPL", Settings(), chain=None, fundamentals=None)
+    assert "429" not in out["narrative"]
+    assert "HTTP 429" not in out["narrative"]
+    assert out["components"]["news"]["error"] == "News feed HTTP 429"
+
+
+@pytest.mark.asyncio
+async def test_news_429_reuses_last_good_headlines(monkeypatch: pytest.MonkeyPatch) -> None:
+    sl._last_good_news.pop("MSFT", None)
+    calls = {"n": 0}
+
+    class FakeResponse:
+        def __init__(self, status: int, payload: dict | None = None, text: str = ""):
+            self.status_code = status
+            self._payload = payload or {}
+            self.text = text
+
+        def json(self) -> dict:
+            return self._payload
+
+    class FakeClient:
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+        async def get(self, *_args: object, **_kwargs: object) -> FakeResponse:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return FakeResponse(
+                    200,
+                    {
+                        "news": [
+                            {
+                                "headline": "Microsoft raises dividend",
+                                "source": "benzinga",
+                                "created_at": "2026-10-01T14:30:00Z",
+                            }
+                        ]
+                    },
+                )
+            return FakeResponse(429, text="slow down")
+
+    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: FakeClient())
+    settings = Settings(alpaca_api_key_id="x", alpaca_api_secret_key="y", alpaca_data_base_url="https://data.example")
+    first, err = await sl.fetch_alpaca_news(settings, symbol="MSFT")
+    assert err is None
+    assert first[0]["headline"] == "Microsoft raises dividend"
+    second, err2 = await sl.fetch_alpaca_news(settings, symbol="MSFT")
+    assert err2 is None
+    assert second[0]["headline"] == "Microsoft raises dividend"
+    sl._last_good_news.pop("MSFT", None)

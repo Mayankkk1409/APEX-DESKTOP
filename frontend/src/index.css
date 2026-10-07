@@ -2943,6 +2943,49 @@ textarea::placeholder {
   filter: brightness(1.06);
 }
 
+.order-progress-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+}
+
+.order-progress-ring {
+  width: 7.5rem;
+  height: 7.5rem;
+  transform: rotate(-90deg);
+}
+
+.order-progress-track,
+.order-progress-value {
+  fill: none;
+  stroke-width: 3;
+}
+
+.order-progress-track {
+  stroke: rgba(196, 165, 106, 0.22);
+}
+
+.order-progress-value {
+  stroke: var(--apex-gold);
+  stroke-linecap: round;
+  stroke-dasharray: 326.73;
+  stroke-dashoffset: 326.73;
+  animation: order-progress-creep 1.6s ease-out forwards;
+}
+
+.order-progress-value.is-complete {
+  animation: none;
+  stroke-dashoffset: 0;
+  transition: stroke-dashoffset 0.2s ease;
+}
+
+@keyframes order-progress-creep {
+  to {
+    stroke-dashoffset: 91.5;
+  }
+}
+
 .order-cert-paper-banner {
   margin: 0 0 0.75rem;
   padding: 0.35rem 0.75rem;

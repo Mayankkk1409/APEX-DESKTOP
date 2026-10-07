@@ -62,14 +62,12 @@ export function useBrokerage() {
     queryKey: ["brokerage", "balance", activeId],
     queryFn: () => api.brokerageBalance(activeId!) as Promise<BrokerageBalance>,
     enabled: usingBrokerage && Boolean(activeId),
-    staleTime: 30_000,
   });
 
   const positionsQuery = useQuery({
     queryKey: ["brokerage", "positions", activeId],
     queryFn: () => api.brokeragePositions(activeId!),
     enabled: usingBrokerage && Boolean(activeId),
-    staleTime: 30_000,
   });
 
   const activeAccount = accounts.find((a) => a.id === activeId) ?? null;

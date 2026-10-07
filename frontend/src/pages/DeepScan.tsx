@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { ApexScoreScan } from "../components/ApexScoreScan";
@@ -8,6 +8,7 @@ import { FundamentalsScan } from "../components/FundamentalsScan";
 import { OptionsChainGreeks } from "../components/OptionsChainGreeks";
 import { OrderConfirmationCertificate } from "../components/OrderConfirmationCertificate";
 import { OrderRefusalDialog } from "../components/OrderRefusalDialog";
+import { OrderSubmitProgress } from "../components/OrderSubmitProgress";
 import { RiskReviewLegs } from "../components/RiskReviewLegs";
 import { RiskReviewOrderActions } from "../components/RiskReviewOrderActions";
 import { SentimentScan } from "../components/SentimentScan";
@@ -20,6 +21,7 @@ import { optionReviewRows, optionsLegBlockReason } from "../lib/orderTicket";
 import { orderPlacement, overrideReasonText, thesisCheckboxState } from "../lib/riskReview";
 import { normalizeStrategyName } from "../lib/strategyDisplay";
 import { readUserSettings } from "../lib/userSettings";
+import { applyReturnedFillBalances, applyReturnedOrderRows, refreshDeskQueries } from "../lib/deskRefresh";
 import { buildOrderConfirmationDetails } from "../lib/orderFormat";
 import type { OhlcBar } from "../lib/ta";
 import { useSession } from "../store";
@@ -64,6 +66,9 @@ export function DeepScan() {
   const [msg, setMsg] = useState("");
   const [orderRefusal, setOrderRefusal] = useState<string | null>(null);
   const [orderConfirmation, setOrderConfirmation] = useState<OrderConfirmationDetails | null>(null);
+  const [progressComplete, setProgressComplete] = useState(false);
+  const filledOutcome = useRef<OrderConfirmationDetails | null>(null);
+  const filledResult = useRef<OrderPlacementResult | null>(null);
 
   const locked = useMemo(() => {
     if (snapshot) return snapshot;
@@ -344,20 +349,53 @@ export function DeepScan() {
     },
     onSuccess: (r) => {
       const result = r as OrderPlacementResult;
+      if ((result.status || "").toLowerCase() !== "filled") {
+        filledOutcome.current = null;
+        filledResult.current = null;
+        setOrderConfirmation(null);
+        setOrderRefusal(result.status ? `Order status: ${result.status}` : "The order was not filled.");
+        setProgressComplete(true);
+        return;
+      }
+      filledResult.current = result;
+      filledOutcome.current = confirmationFromResult(result);
       setOrderRefusal(null);
-      setOrderConfirmation(confirmationFromResult(result));
-      void qc.invalidateQueries({ queryKey: ["port"] });
-      void qc.invalidateQueries({ queryKey: ["pos"] });
-      void qc.invalidateQueries({ queryKey: ["orders"] });
-      void qc.invalidateQueries({ queryKey: ["pnl-history"] });
-      void qc.invalidateQueries({ queryKey: ["overall-pnl"] });
+      setProgressComplete(true);
     },
     onMutate: () => {
       setMsg("");
       setOrderRefusal(null);
+      setOrderConfirmation(null);
+      setProgressComplete(false);
+      filledOutcome.current = null;
+      filledResult.current = null;
     },
-    onError: (e) => setOrderRefusal((e as Error).message),
+    onError: (e) => {
+      filledOutcome.current = null;
+      filledResult.current = null;
+      setOrderConfirmation(null);
+      setOrderRefusal((e as Error).message);
+      setProgressComplete(true);
+    },
   });
+
+  useEffect(() => {
+    if (!progressComplete) return;
+    const frame = window.requestAnimationFrame(() => {
+      const details = filledOutcome.current;
+      const result = filledResult.current;
+      if (details && result) {
+        setOrderConfirmation(details);
+        applyReturnedFillBalances(qc, result);
+        applyReturnedOrderRows(qc, result);
+        refreshDeskQueries(qc);
+      }
+      filledOutcome.current = null;
+      filledResult.current = null;
+      setProgressComplete(false);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [progressComplete, qc]);
 
   if (intro) {
     return <ScanIntro symbol={locked.symbol} />;
@@ -624,15 +662,20 @@ export function DeepScan() {
         </div>
       ) : null}
 
-      {orderRefusal !== null ? (
+      {order.isPending || progressComplete ? (
+        <OrderSubmitProgress complete={progressComplete && !order.isPending} />
+      ) : null}
+
+      {orderRefusal !== null && !order.isPending && !progressComplete ? (
         <OrderRefusalDialog reason={orderRefusal} onClose={() => setOrderRefusal(null)} />
       ) : null}
 
-      {orderConfirmation ? (
+      {orderConfirmation && !order.isPending && !progressComplete ? (
         <OrderConfirmationCertificate
           details={orderConfirmation}
           onDismiss={() => {
             setOrderConfirmation(null);
+            refreshDeskQueries(qc);
             nav("/app");
           }}
         />

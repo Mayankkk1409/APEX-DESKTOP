@@ -58,7 +58,15 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
   const afterExpiryPath = useRef("/app");
   flowRef.current = flow;
 
-  async function maybeShowExpiry(me: import("../types").User, isCancelled: () => boolean): Promise<ExpiryLoginCheck> {
+  async function maybeShowExpiry(
+    me: import("../types").User,
+    isCancelled: () => boolean,
+    credentialLogin: boolean,
+  ): Promise<ExpiryLoginCheck> {
+    if (!credentialLogin) {
+      setExpiryNoticeOnLogin(false);
+      return "skip";
+    }
     try {
       const watch = await api.expiryWatch();
       if (isCancelled()) return "cancelled";
@@ -79,6 +87,7 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
           marketDay: watch.market_day,
           paintedMarketDay,
           legacyNoticeDay,
+          credentialLogin: true,
         })
       ) {
         setExpiryNoticeOnLogin(false);
@@ -127,7 +136,7 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
           if (cancelled) return;
           setUser(me);
           afterExpiryPath.current = pathAfterSessionRestore(from);
-          const expiryCheck = await maybeShowExpiry(me, () => cancelled);
+          const expiryCheck = await maybeShowExpiry(me, () => cancelled, false);
           if (cancelled || !expiryLoginShouldNavigate(expiryCheck)) return;
           nav(afterExpiryPath.current, { replace: true });
           return;
@@ -264,7 +273,7 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
       setUser(me);
       setModal(true);
       afterExpiryPath.current = "/app";
-      const expiryCheck = await maybeShowExpiry(me, () => false);
+      const expiryCheck = await maybeShowExpiry(me, () => false, true);
       if (!expiryLoginShouldNavigate(expiryCheck)) return;
       nav("/app");
     } catch (ex) {

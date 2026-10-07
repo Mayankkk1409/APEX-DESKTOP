@@ -15,6 +15,8 @@ import { DEFAULT_SYMBOL, SNAPSHOT_STUDIES } from "../constants";
 import { useBrokerage } from "../hooks/useBrokerage";
 import { useMarketSocket } from "../hooks/useMarketSocket";
 import { defaultAccountLabel, usePositionCertificate } from "../hooks/usePositionCertificate";
+import { refreshDeskQueries } from "../lib/deskRefresh";
+import { clearNewsRetry, isNewsRateLimitMessage, newsRetryDelay, noteNewsRateLimit, visibleNewsError } from "../lib/newsFeed";
 import { resolvePositionDayPl } from "../lib/positionDayPl";
 import { SEARCH_DEBOUNCE_MS, createDebouncedSymbolSearch } from "../lib/symbolSearch";
 import { useSession } from "../store";
@@ -123,9 +125,29 @@ export function Dashboard() {
   const watch = useQuery({ queryKey: ["watch"], queryFn: () => api.watchlist() });
   const sentiment = useQuery({
     queryKey: ["sent", activeSymbol],
-    queryFn: () => api.sentiment(activeSymbol),
+    queryFn: async () => {
+      const next = await api.sentiment(activeSymbol);
+      const caveat = (next as { caveat?: string | null }).caveat;
+      if (!isNewsRateLimitMessage(caveat)) {
+        clearNewsRetry(`desk:${activeSymbol}`);
+        return next;
+      }
+      noteNewsRateLimit(`desk:${activeSymbol}`);
+      const previous = qc.getQueryData<typeof next>(["sent", activeSymbol]);
+      const previousItems = (previous as { items?: unknown[] } | undefined)?.items;
+      if (previousItems?.length) return previous as typeof next;
+      return { ...next, caveat: null, status: "empty" };
+    },
     enabled: Boolean(activeSymbol),
+    staleTime: 60_000,
+    retry: (failureCount, error) => !isNewsRateLimitMessage((error as Error)?.message) && failureCount < 1,
+    refetchInterval: () => newsRetryDelay(`desk:${activeSymbol}`),
   });
+  useEffect(() => {
+    const caveat = (sentiment.data as { caveat?: string | null } | undefined)?.caveat;
+    const message = (sentiment.error as Error | undefined)?.message;
+    if (isNewsRateLimitMessage(caveat) || isNewsRateLimitMessage(message)) noteNewsRateLimit(`desk:${activeSymbol}`);
+  }, [activeSymbol, sentiment.data, sentiment.error]);
   const brokerage = useBrokerage();
   const cert = usePositionCertificate({
     isPaper: !brokerage.usingBrokerage,
@@ -148,10 +170,12 @@ export function Dashboard() {
     symbols: [activeSymbol, DEFAULT_SYMBOL],
     onMessage: (msg) => {
       if (msg.type === "fill") {
-        setLive({ balance: msg.balance, buying_power: msg.buying_power, portfolio_value: msg.portfolio_value });
-        qc.invalidateQueries({ queryKey: ["port"] });
-        qc.invalidateQueries({ queryKey: ["pos"] });
-        qc.invalidateQueries({ queryKey: ["orders"] });
+        const livePatch: { balance?: number; buying_power?: number; portfolio_value?: number } = {};
+        if (typeof msg.balance === "number") livePatch.balance = msg.balance;
+        if (typeof msg.buying_power === "number") livePatch.buying_power = msg.buying_power;
+        if (typeof msg.portfolio_value === "number") livePatch.portfolio_value = msg.portfolio_value;
+        if (Object.keys(livePatch).length) setLive((prev) => ({ ...prev, ...livePatch }));
+        refreshDeskQueries(qc);
       }
       if (msg.type === "quotes") {
         for (const row of (msg.quotes as Quote[]) ?? []) {
@@ -207,7 +231,9 @@ export function Dashboard() {
     ? brokerage.stats?.day_pnl != null && brokerage.stats.portfolio_value
       ? (brokerage.stats.day_pnl / brokerage.stats.portfolio_value) * 100
       : null
-    : Number(portfolio.data?.day_pct ?? 0);
+    : typeof portfolio.data?.day_pct === "number"
+      ? portfolio.data.day_pct
+      : null;
 
   const later = useMutation({
     mutationFn: () => api.brokerage(true),
@@ -588,20 +614,21 @@ export function Dashboard() {
                   <li className="text-xs text-faint" data-testid="sentiment-empty">
                     Loading news for {activeSymbol}…
                   </li>
-                ) : sentiment.isError ? (
+                ) : sentiment.isError && !isNewsRateLimitMessage((sentiment.error as Error)?.message) ? (
                   <li className="text-xs text-faint" data-testid="sentiment-empty">
-                    Sentiment request failed: {(sentiment.error as Error)?.message || "unknown error"}.{" "}
+                    Sentiment request failed: {visibleNewsError((sentiment.error as Error)?.message) || "unknown error"}.{" "}
                     <button type="button" className="text-bronze underline" data-testid="sentiment-retry" onClick={() => sentiment.refetch()}>
                       Retry
                     </button>
                   </li>
                 ) : ((sentiment.data?.items as SentimentRow[]) ?? []).length === 0 ? (
                   <li className="text-xs text-faint" data-testid="sentiment-empty">
-                    {(sentiment.data as { caveat?: string | null } | undefined)?.caveat ||
+                    {visibleNewsError((sentiment.data as { caveat?: string | null } | undefined)?.caveat) ||
                       (activeSymbol
                         ? `No recent news for ${activeSymbol} from Alpaca News.`
                         : "No recent news from Alpaca News.")}{" "}
-                    {sentiment.data?.status === "unavailable" ? (
+                    {sentiment.data?.status === "unavailable" &&
+                    !isNewsRateLimitMessage((sentiment.data as { caveat?: string | null } | undefined)?.caveat) ? (
                       <button type="button" className="text-bronze underline" data-testid="sentiment-retry" onClick={() => sentiment.refetch()}>
                         Retry
                       </button>

@@ -31,9 +31,10 @@ function Guard({ children }: { children: JSX.Element }) {
   useEffect(() => {
     let cancelled = false;
     const hadToken = Boolean(getAccessToken());
+    if (!hadToken) useSession.getState().setExpiryLoginPending(true);
     resolveAuthGuard({ token: getAccessToken(), restore: restoreSession }).then((ok) => {
       if (cancelled) return;
-      if (ok && !hadToken) useSession.getState().setExpiryLoginPending(true);
+      if (!ok || hadToken) useSession.getState().setExpiryLoginPending(false);
       setAllowed(ok);
     });
     return () => {

@@ -148,13 +148,14 @@ describe("expiry login trigger", () => {
         marketDay,
         paintedMarketDay: days.paintedMarketDay,
         legacyNoticeDay: days.legacyNoticeDay,
+        credentialLogin: true,
       }),
     ).toBe(true);
     expect(expiryLoginShouldNavigate("show")).toBe(false);
     expect(expiryLoginShouldNavigate("cancelled")).toBe(false);
   });
 
-  it("stays quiet for the rest of the market day after the certificate paints", () => {
+  it("shows on every credential login even when the painted-day key is today", () => {
     const store = memoryStore();
     store.setItem(expiryNoticeStorageKey(userId), marketDay);
     markExpiryLoginCertificatePainted(store, userId, marketDay);
@@ -168,6 +169,29 @@ describe("expiry login trigger", () => {
         marketDay,
         paintedMarketDay: days.paintedMarketDay,
         legacyNoticeDay: days.legacyNoticeDay,
+        credentialLogin: true,
+      }),
+    ).toBe(true);
+    expect(expiryLoginShouldNavigate("show")).toBe(false);
+  });
+
+  it("stays quiet on a refresh or cookie restore even when rows exist", () => {
+    expect(
+      shouldShowExpiryLoginCertificate({
+        rowCount: 1,
+        marketDay,
+        paintedMarketDay: marketDay,
+        legacyNoticeDay: marketDay,
+        credentialLogin: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldShowExpiryLoginCertificate({
+        rowCount: 1,
+        marketDay,
+        paintedMarketDay: null,
+        legacyNoticeDay: null,
+        credentialLogin: false,
       }),
     ).toBe(false);
     expect(expiryLoginShouldNavigate("skip")).toBe(true);
@@ -180,6 +204,7 @@ describe("expiry login trigger", () => {
         marketDay,
         paintedMarketDay: null,
         legacyNoticeDay: null,
+        credentialLogin: true,
       }),
     ).toBe(false);
     expect(expiryLoginShouldNavigate("skip")).toBe(true);
