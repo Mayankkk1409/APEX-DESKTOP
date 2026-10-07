@@ -29,9 +29,28 @@ export function readExpiryLoginDays(
 }
 
 /**
- * Password or OTP verify shows the certificate whenever an open option is inside
- * the window. The painted-day key does not suppress that next login.
- * A page refresh or cookie restore passes credentialLogin false and stays quiet.
+ * In-memory only. A full reload starts false, so a fresh session restore shows again.
+ * Clicking around the already-open desk must not stack a second dialog.
+ * sessionStorage painted-day keys are not this latch.
+ */
+let expiryLoginArrivalShown = false;
+
+export function expiryLoginArrivalAlreadyShown(): boolean {
+  return expiryLoginArrivalShown;
+}
+
+export function markExpiryLoginArrivalShown(): void {
+  expiryLoginArrivalShown = true;
+}
+
+export function resetExpiryLoginArrival(): void {
+  expiryLoginArrivalShown = false;
+}
+
+/**
+ * Password, OTP, and cookie/session restore all show the certificate.
+ * An empty book still shows. The painted-day key and credentialLogin do not hide it.
+ * alreadyPresented is the in-memory desk latch, not sessionStorage.
  */
 export function shouldShowExpiryLoginCertificate(input: {
   rowCount: number;
@@ -39,16 +58,18 @@ export function shouldShowExpiryLoginCertificate(input: {
   paintedMarketDay: string | null;
   legacyNoticeDay: string | null;
   credentialLogin: boolean;
+  alreadyPresented?: boolean;
 }): boolean {
-  if (!input.credentialLogin) return false;
-  if (input.rowCount <= 0) return false;
+  if (input.alreadyPresented) return false;
+  void input.rowCount;
   void input.marketDay;
   void input.paintedMarketDay;
   void input.legacyNoticeDay;
+  void input.credentialLogin;
   return true;
 }
 
-/** Navigate only when there is nothing to show. A cancelled check must not leave the page. */
+/** Leave the page only on skip. A show or a cancelled check stays put so the certificate can paint. */
 export function expiryLoginShouldNavigate(result: ExpiryLoginCheck): boolean {
   return result === "skip";
 }
@@ -61,6 +82,10 @@ export function markExpiryLoginCertificatePainted(store: ExpiryLoginDayStore, us
 
 export const EXPIRY_LOGIN_AUTO_CLOSE =
   "These positions will be closed automatically at 16:00 America/New_York on the expiry day if still open.";
+
+/** Shown when the book has no open option inside the 7-day window. */
+export const EXPIRY_LOGIN_NONE =
+  "You have no open options expiring within the next 7 days.";
 
 /** Read-only brokerage books are listed but never traded by the desk. */
 export const EXPIRY_LOGIN_BROKER_SETTLES =

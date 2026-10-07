@@ -4,6 +4,7 @@ import { ExpiryLoginCertificate } from "./ExpiryLoginCertificate";
 import {
   EXPIRY_LOGIN_AUTO_CLOSE,
   EXPIRY_LOGIN_BROKER_SETTLES,
+  EXPIRY_LOGIN_NONE,
   type ExpiryLoginRow,
 } from "../lib/expiryLoginNotice";
 
@@ -33,15 +34,21 @@ const row: ExpiryLoginRow = {
 };
 
 describe("ExpiryLoginCertificate", () => {
-  it("shows nothing when no position expires inside the window", () => {
+  it("still shows the certificate when no position expires inside the window", () => {
     escape.mockClear();
     trap.mockClear();
     const html = renderToStaticMarkup(
       <ExpiryLoginCertificate items={[]} isPaper onDismiss={() => undefined} />,
     );
-    expect(html).toBe("");
-    expect(trap).toHaveBeenCalledWith(false);
-    expect(escape).toHaveBeenCalledWith(false, expect.any(Function));
+    expect(html).toContain('role="dialog"');
+    expect(html).toContain('aria-labelledby="expiry-login-title"');
+    expect(html).toContain("Expiring positions");
+    expect(html).toContain(EXPIRY_LOGIN_NONE);
+    expect(html).toContain('data-testid="expiry-login-empty"');
+    expect(html).not.toContain("AAPL");
+    expect(html).not.toContain('data-testid="expiry-login-list"');
+    expect(trap).toHaveBeenCalledWith(true);
+    expect(escape).toHaveBeenCalledWith(true, expect.any(Function));
   });
 
   it("renders one labelled dialog with the contract row and the 16:00 New York close", () => {

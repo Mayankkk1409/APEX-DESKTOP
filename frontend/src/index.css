@@ -2950,10 +2950,30 @@ textarea::placeholder {
   gap: 1rem;
 }
 
-.order-progress-ring {
+.order-progress-ring-wrap {
+  position: relative;
   width: 7.5rem;
   height: 7.5rem;
+}
+
+.order-progress-ring {
+  width: 100%;
+  height: 100%;
   transform: rotate(-90deg);
+}
+
+.order-progress-pct {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--apex-gold);
+  pointer-events: none;
 }
 
 .order-progress-track,
@@ -2971,19 +2991,11 @@ textarea::placeholder {
   stroke-linecap: round;
   stroke-dasharray: 326.73;
   stroke-dashoffset: 326.73;
-  animation: order-progress-creep 1.6s ease-out forwards;
+  transition: stroke-dashoffset 0.12s linear;
 }
 
 .order-progress-value.is-complete {
-  animation: none;
-  stroke-dashoffset: 0;
   transition: stroke-dashoffset 0.2s ease;
-}
-
-@keyframes order-progress-creep {
-  to {
-    stroke-dashoffset: 91.5;
-  }
 }
 
 .order-cert-paper-banner {

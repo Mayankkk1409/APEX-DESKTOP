@@ -1,5 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { api, setAccessToken } from "../api";
+import { resetExpiryLoginArrival } from "../lib/expiryLoginNotice";
 import { clearScanSession, useSession } from "../store";
 
 export function LogoutButton() {
@@ -14,6 +15,7 @@ export function LogoutButton() {
     }
     setAccessToken(null);
     clearScanSession();
+    resetExpiryLoginArrival();
     setUser(null);
     nav("/login");
   }

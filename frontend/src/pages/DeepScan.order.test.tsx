@@ -259,14 +259,19 @@ describe("DeepScan risk review order panel", () => {
     expect(actions).toContain("Acknowledge");
     const progress = readFileSync(resolve(here, "../components/OrderSubmitProgress.tsx"), "utf8");
     expect(progress).toContain('data-testid="order-progress"');
-    expect(progress).toContain("aria-valuenow={complete ? 100 : undefined}");
+    expect(progress).toContain('data-testid="order-progress-pct"');
+    expect(progress).toContain("aria-valuenow={pct}");
+    expect(progress).toContain("setPct(100)");
     const pending = renderToStaticMarkup(<OrderSubmitProgress complete={false} />);
     expect(pending).toContain('data-testid="order-progress"');
+    expect(pending).toContain('data-testid="order-progress-pct"');
     expect(pending).toContain('data-complete="false"');
+    expect(pending).toContain(">0%<");
     expect(pending).not.toContain('aria-valuenow="100"');
     const done = renderToStaticMarkup(<OrderSubmitProgress complete />);
     expect(done).toContain('data-complete="true"');
     expect(done).toContain('aria-valuenow="100"');
+    expect(done).toContain(">100%<");
   });
 
   it("renders each option leg from the scan ticket and not the empty sentence", () => {

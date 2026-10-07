@@ -3,12 +3,15 @@ import { expiryNoticeStorageKey, type ExpiryNoticeItem } from "./expiryNotice";
 import {
   EXPIRY_LOGIN_AUTO_CLOSE,
   EXPIRY_LOGIN_BROKER_SETTLES,
+  expiryLoginArrivalAlreadyShown,
   expiryLoginNotes,
   expiryLoginPaintedKey,
   expiryLoginRows,
   expiryLoginShouldNavigate,
+  markExpiryLoginArrivalShown,
   markExpiryLoginCertificatePainted,
   readExpiryLoginDays,
+  resetExpiryLoginArrival,
   shouldShowExpiryLoginCertificate,
   withinExpiryLoginWindow,
   type ExpiryLoginDayStore,
@@ -149,6 +152,7 @@ describe("expiry login trigger", () => {
         paintedMarketDay: days.paintedMarketDay,
         legacyNoticeDay: days.legacyNoticeDay,
         credentialLogin: true,
+        alreadyPresented: false,
       }),
     ).toBe(true);
     expect(expiryLoginShouldNavigate("show")).toBe(false);
@@ -170,43 +174,61 @@ describe("expiry login trigger", () => {
         paintedMarketDay: days.paintedMarketDay,
         legacyNoticeDay: days.legacyNoticeDay,
         credentialLogin: true,
+        alreadyPresented: false,
       }),
     ).toBe(true);
     expect(expiryLoginShouldNavigate("show")).toBe(false);
   });
 
-  it("stays quiet on a refresh or cookie restore even when rows exist", () => {
-    expect(
-      shouldShowExpiryLoginCertificate({
-        rowCount: 1,
-        marketDay,
-        paintedMarketDay: marketDay,
-        legacyNoticeDay: marketDay,
-        credentialLogin: false,
-      }),
-    ).toBe(false);
-    expect(
-      shouldShowExpiryLoginCertificate({
-        rowCount: 1,
-        marketDay,
-        paintedMarketDay: null,
-        legacyNoticeDay: null,
-        credentialLogin: false,
-      }),
-    ).toBe(false);
-    expect(expiryLoginShouldNavigate("skip")).toBe(true);
-  });
-
-  it("shows nothing when no open option is inside the window", () => {
+  it("shows on session restore even when the painted-day key is today and the book is empty", () => {
     expect(
       shouldShowExpiryLoginCertificate({
         rowCount: 0,
         marketDay,
+        paintedMarketDay: marketDay,
+        legacyNoticeDay: marketDay,
+        credentialLogin: false,
+        alreadyPresented: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldShowExpiryLoginCertificate({
+        rowCount: 1,
+        marketDay,
         paintedMarketDay: null,
         legacyNoticeDay: null,
-        credentialLogin: true,
+        credentialLogin: false,
+        alreadyPresented: false,
+      }),
+    ).toBe(true);
+    expect(expiryLoginShouldNavigate("show")).toBe(false);
+  });
+
+  it("does not stack a second certificate while this desk arrival is already on screen", () => {
+    resetExpiryLoginArrival();
+    markExpiryLoginArrivalShown();
+    expect(expiryLoginArrivalAlreadyShown()).toBe(true);
+    expect(
+      shouldShowExpiryLoginCertificate({
+        rowCount: 1,
+        marketDay,
+        paintedMarketDay: null,
+        legacyNoticeDay: null,
+        credentialLogin: false,
+        alreadyPresented: expiryLoginArrivalAlreadyShown(),
       }),
     ).toBe(false);
     expect(expiryLoginShouldNavigate("skip")).toBe(true);
+    resetExpiryLoginArrival();
+    expect(
+      shouldShowExpiryLoginCertificate({
+        rowCount: 0,
+        marketDay,
+        paintedMarketDay: marketDay,
+        legacyNoticeDay: marketDay,
+        credentialLogin: true,
+        alreadyPresented: expiryLoginArrivalAlreadyShown(),
+      }),
+    ).toBe(true);
   });
 });
