@@ -240,6 +240,12 @@ describe("DeepScan risk review order panel", () => {
     expect(page).toContain("thesis_accepted: input.thesisAccepted");
     expect(page).toContain("APEX could not verify this trade");
     expect(page).toContain("Proceed at my own risk");
+    expect(page).toContain("const userOverride = input.userOverride === true");
+    expect(page).toContain("user_override: userOverride");
+    expect(page).toContain("OrderRefusalDialog");
+    expect(page).toContain("onError: (e) => setOrderRefusal((e as Error).message)");
+    expect(page).toContain("if (orderRefusal !== null) return");
+    expect(page).not.toContain("onError: (e) => setMsg");
     expect(page).not.toContain("Strategy layer is not tradeable");
     const actions = readFileSync(resolve(here, "../components/RiskReviewOrderActions.tsx"), "utf8");
     expect(actions).toContain("acknowledge-order");

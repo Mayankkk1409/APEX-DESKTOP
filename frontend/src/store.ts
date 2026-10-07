@@ -83,6 +83,8 @@ interface SessionState {
   showConnectModal: boolean;
   /** Set on a fresh sign-in so the expiry notice shows even if this market day was already seen. */
   expiryNoticeOnLogin: boolean;
+  /** Cookie restore on a protected route, before the login certificate has been decided. */
+  expiryLoginPending: boolean;
   symbol: string;
   timeframe: string;
   /** Dashboard-selected option expiry — persisted for the whole scan session. */
@@ -106,6 +108,7 @@ interface SessionState {
   setPortfolioViewMode: (mode: PortfolioViewMode) => void;
   setConnectModal: (v: boolean) => void;
   setExpiryNoticeOnLogin: (v: boolean) => void;
+  setExpiryLoginPending: (v: boolean) => void;
   setSymbol: (s: string) => void;
   setTimeframe: (t: string) => void;
   setExpiry: (e: string) => void;
@@ -129,6 +132,7 @@ export const useSession = create<SessionState>((set) => ({
   portfolioViewMode: readPortfolioViewMode(),
   showConnectModal: false,
   expiryNoticeOnLogin: false,
+  expiryLoginPending: false,
   symbol: persistedScan.symbol ?? "SPX",
   timeframe: persistedScan.timeframe ?? "1D",
   expiry: persistedScan.expiry ?? "",
@@ -151,6 +155,7 @@ export const useSession = create<SessionState>((set) => ({
   },
   setConnectModal: (showConnectModal) => set({ showConnectModal }),
   setExpiryNoticeOnLogin: (expiryNoticeOnLogin) => set({ expiryNoticeOnLogin }),
+  setExpiryLoginPending: (expiryLoginPending) => set({ expiryLoginPending }),
   setSymbol: (symbol) => set({ symbol }),
   setTimeframe: (timeframe) => set({ timeframe }),
   setExpiry: (expiry) => set({ expiry }),

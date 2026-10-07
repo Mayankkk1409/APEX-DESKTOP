@@ -6,8 +6,15 @@ import { OtpBoxes } from "../components/OtpBoxes";
 import { LegalFooter } from "../components/LegalFooter";
 import { ExpiryLoginCertificate } from "../components/ExpiryLoginCertificate";
 import { api, AUTH_REDIRECT_KEY, getAccessToken, restoreSession, setAccessToken } from "../api";
-import { expiryNoticeStorageKey } from "../lib/expiryNotice";
-import { expiryLoginRows, type ExpiryLoginRow } from "../lib/expiryLoginNotice";
+import {
+  expiryLoginRows,
+  expiryLoginShouldNavigate,
+  markExpiryLoginCertificatePainted,
+  readExpiryLoginDays,
+  shouldShowExpiryLoginCertificate,
+  type ExpiryLoginCheck,
+  type ExpiryLoginRow,
+} from "../lib/expiryLoginNotice";
 import { resolveAutofillCode } from "../lib/otpAutofill";
 import { useSession } from "../store";
 
@@ -15,22 +22,6 @@ type Flow = "login" | "recovery";
 type Stage = "identify" | "code";
 
 const RESTORED_SCREENS = ["/app", "/scan", "/portfolio", "/settings"];
-
-function rememberExpiryNoticeShown(userId: string, marketDay: string) {
-  try {
-    sessionStorage.setItem(expiryNoticeStorageKey(userId), marketDay);
-  } catch {
-    /* private mode */
-  }
-}
-
-function expiryNoticeAlreadyShown(userId: string, marketDay: string): boolean {
-  try {
-    return sessionStorage.getItem(expiryNoticeStorageKey(userId)) === marketDay;
-  } catch {
-    return false;
-  }
-}
 
 /** After a reload, Guard sends the user to /login with the screen they were on. */
 export function pathAfterSessionRestore(from: unknown): string {
@@ -58,6 +49,8 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
   const [err, setErr] = useState("");
   const [expiryRows, setExpiryRows] = useState<ExpiryLoginRow[] | null>(null);
   const [expiryIsPaper, setExpiryIsPaper] = useState(false);
+  const [expiryUserId, setExpiryUserId] = useState<string | null>(null);
+  const [expiryMarketDay, setExpiryMarketDay] = useState<string | null>(null);
   const [flow, setFlow] = useState<Flow>("login");
   const [stage, setStage] = useState<Stage>("identify");
   const formRef = useRef<HTMLFormElement>(null);
@@ -65,25 +58,55 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
   const afterExpiryPath = useRef("/app");
   flowRef.current = flow;
 
-  async function maybeShowExpiry(me: import("../types").User): Promise<boolean> {
+  async function maybeShowExpiry(me: import("../types").User, isCancelled: () => boolean): Promise<ExpiryLoginCheck> {
     try {
       const watch = await api.expiryWatch();
+      if (isCancelled()) return "cancelled";
       const rows = expiryLoginRows(watch.items, watch.market_day);
-      if (rows.length === 0 || expiryNoticeAlreadyShown(me.id, watch.market_day)) {
-        setExpiryNoticeOnLogin(false);
-        return false;
+      let paintedMarketDay: string | null = null;
+      let legacyNoticeDay: string | null = null;
+      try {
+        const days = readExpiryLoginDays(sessionStorage, me.id);
+        paintedMarketDay = days.paintedMarketDay;
+        legacyNoticeDay = days.legacyNoticeDay;
+      } catch {
+        paintedMarketDay = null;
+        legacyNoticeDay = null;
       }
-      rememberExpiryNoticeShown(me.id, watch.market_day);
+      if (
+        !shouldShowExpiryLoginCertificate({
+          rowCount: rows.length,
+          marketDay: watch.market_day,
+          paintedMarketDay,
+          legacyNoticeDay,
+        })
+      ) {
+        setExpiryNoticeOnLogin(false);
+        return "skip";
+      }
+      if (isCancelled()) return "cancelled";
       setExpiryNoticeOnLogin(false);
+      setExpiryUserId(me.id);
+      setExpiryMarketDay(watch.market_day);
       setExpiryIsPaper(watch.is_paper);
       setExpiryRows(rows);
       setCheckingSession(false);
-      return true;
+      return "show";
     } catch {
+      if (isCancelled()) return "cancelled";
       setExpiryNoticeOnLogin(true);
-      return false;
+      return "skip";
     }
   }
+
+  useEffect(() => {
+    if (!expiryRows?.length || !expiryUserId || !expiryMarketDay) return;
+    try {
+      markExpiryLoginCertificatePainted(sessionStorage, expiryUserId, expiryMarketDay);
+    } catch {
+      /* private mode */
+    }
+  }, [expiryRows, expiryUserId, expiryMarketDay]);
 
   useEffect(() => {
     if (skipSessionRestore) return;
@@ -104,7 +127,8 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
           if (cancelled) return;
           setUser(me);
           afterExpiryPath.current = pathAfterSessionRestore(from);
-          if (await maybeShowExpiry(me)) return;
+          const expiryCheck = await maybeShowExpiry(me, () => cancelled);
+          if (cancelled || !expiryLoginShouldNavigate(expiryCheck)) return;
           nav(afterExpiryPath.current, { replace: true });
           return;
         } catch {
@@ -240,7 +264,8 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
       setUser(me);
       setModal(true);
       afterExpiryPath.current = "/app";
-      if (await maybeShowExpiry(me)) return;
+      const expiryCheck = await maybeShowExpiry(me, () => false);
+      if (!expiryLoginShouldNavigate(expiryCheck)) return;
       nav("/app");
     } catch (ex) {
       setErr((ex as Error).message);

@@ -7,6 +7,7 @@ import { ApexScoreScan } from "../components/ApexScoreScan";
 import { FundamentalsScan } from "../components/FundamentalsScan";
 import { OptionsChainGreeks } from "../components/OptionsChainGreeks";
 import { OrderConfirmationCertificate } from "../components/OrderConfirmationCertificate";
+import { OrderRefusalDialog } from "../components/OrderRefusalDialog";
 import { RiskReviewLegs } from "../components/RiskReviewLegs";
 import { RiskReviewOrderActions } from "../components/RiskReviewOrderActions";
 import { SentimentScan } from "../components/SentimentScan";
@@ -61,6 +62,7 @@ export function DeepScan() {
   const [spreadConfirmed, setSpreadConfirmed] = useState(false);
   const [contractsPerLeg, setContractsPerLeg] = useState(1);
   const [msg, setMsg] = useState("");
+  const [orderRefusal, setOrderRefusal] = useState<string | null>(null);
   const [orderConfirmation, setOrderConfirmation] = useState<OrderConfirmationDetails | null>(null);
 
   const locked = useMemo(() => {
@@ -292,11 +294,14 @@ export function DeepScan() {
       if (e.key === "ArrowLeft" || e.key === "ArrowUp") setIdx((i) => Math.max(i - 1, 0));
       if (e.key === "Home") setIdx(0);
       if (e.key === "End") setIdx(Math.max(layers.length - 1, 0));
-      if (e.key === "Escape") nav("/app");
+      if (e.key === "Escape") {
+        if (orderRefusal !== null) return;
+        nav("/app");
+      }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [layers.length, nav, ownsArrows]);
+  }, [layers.length, nav, ownsArrows, orderRefusal]);
 
   const overrideReasons = overrideReasonText([
     riskReview?.quote_not_current
@@ -339,6 +344,7 @@ export function DeepScan() {
     },
     onSuccess: (r) => {
       const result = r as OrderPlacementResult;
+      setOrderRefusal(null);
       setOrderConfirmation(confirmationFromResult(result));
       void qc.invalidateQueries({ queryKey: ["port"] });
       void qc.invalidateQueries({ queryKey: ["pos"] });
@@ -346,7 +352,11 @@ export function DeepScan() {
       void qc.invalidateQueries({ queryKey: ["pnl-history"] });
       void qc.invalidateQueries({ queryKey: ["overall-pnl"] });
     },
-    onError: (e) => setMsg((e as Error).message),
+    onMutate: () => {
+      setMsg("");
+      setOrderRefusal(null);
+    },
+    onError: (e) => setOrderRefusal((e as Error).message),
   });
 
   if (intro) {
@@ -544,6 +554,7 @@ export function DeepScan() {
                         setThesis(checked);
                         if (checked && thesisState.submitsOnAccept && !placement.overrideRequired && !order.isPending) {
                           setMsg("");
+                          setOrderRefusal(null);
                           order.mutate({ thesisAccepted: true });
                         }
                       }}
@@ -611,6 +622,10 @@ export function DeepScan() {
             </div>
           </div>
         </div>
+      ) : null}
+
+      {orderRefusal !== null ? (
+        <OrderRefusalDialog reason={orderRefusal} onClose={() => setOrderRefusal(null)} />
       ) : null}
 
       {orderConfirmation ? (

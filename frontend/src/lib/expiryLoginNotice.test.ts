@@ -1,12 +1,18 @@
 import { describe, expect, it } from "vitest";
+import { expiryNoticeStorageKey, type ExpiryNoticeItem } from "./expiryNotice";
 import {
   EXPIRY_LOGIN_AUTO_CLOSE,
   EXPIRY_LOGIN_BROKER_SETTLES,
   expiryLoginNotes,
+  expiryLoginPaintedKey,
   expiryLoginRows,
+  expiryLoginShouldNavigate,
+  markExpiryLoginCertificatePainted,
+  readExpiryLoginDays,
+  shouldShowExpiryLoginCertificate,
   withinExpiryLoginWindow,
+  type ExpiryLoginDayStore,
 } from "./expiryLoginNotice";
-import type { ExpiryNoticeItem } from "./expiryNotice";
 
 const MARKET_DAY = "2026-10-02";
 
@@ -114,5 +120,68 @@ describe("expiryLoginNotes", () => {
     ]);
     expect(expiryLoginNotes([paperRow], false)).toEqual([EXPIRY_LOGIN_BROKER_SETTLES]);
     expect(expiryLoginNotes([], true)).toEqual([]);
+  });
+});
+
+function memoryStore(): ExpiryLoginDayStore {
+  const data = new Map<string, string>();
+  return {
+    getItem: (key) => data.get(key) ?? null,
+    setItem: (key, value) => {
+      data.set(key, value);
+    },
+  };
+}
+
+describe("expiry login trigger", () => {
+  const marketDay = "2026-10-06";
+  const userId = "user-1";
+
+  it("shows when the notice key was stored before the certificate painted", () => {
+    const store = memoryStore();
+    store.setItem(expiryNoticeStorageKey(userId), marketDay);
+    const days = readExpiryLoginDays(store, userId);
+    expect(days.paintedMarketDay).toBeNull();
+    expect(
+      shouldShowExpiryLoginCertificate({
+        rowCount: 1,
+        marketDay,
+        paintedMarketDay: days.paintedMarketDay,
+        legacyNoticeDay: days.legacyNoticeDay,
+      }),
+    ).toBe(true);
+    expect(expiryLoginShouldNavigate("show")).toBe(false);
+    expect(expiryLoginShouldNavigate("cancelled")).toBe(false);
+  });
+
+  it("stays quiet for the rest of the market day after the certificate paints", () => {
+    const store = memoryStore();
+    store.setItem(expiryNoticeStorageKey(userId), marketDay);
+    markExpiryLoginCertificatePainted(store, userId, marketDay);
+    const days = readExpiryLoginDays(store, userId);
+    expect(days.paintedMarketDay).toBe(marketDay);
+    expect(store.getItem(expiryLoginPaintedKey(userId))).toBe(marketDay);
+    expect(store.getItem(expiryNoticeStorageKey(userId))).toBe(marketDay);
+    expect(
+      shouldShowExpiryLoginCertificate({
+        rowCount: 1,
+        marketDay,
+        paintedMarketDay: days.paintedMarketDay,
+        legacyNoticeDay: days.legacyNoticeDay,
+      }),
+    ).toBe(false);
+    expect(expiryLoginShouldNavigate("skip")).toBe(true);
+  });
+
+  it("shows nothing when no open option is inside the window", () => {
+    expect(
+      shouldShowExpiryLoginCertificate({
+        rowCount: 0,
+        marketDay,
+        paintedMarketDay: null,
+        legacyNoticeDay: null,
+      }),
+    ).toBe(false);
+    expect(expiryLoginShouldNavigate("skip")).toBe(true);
   });
 });

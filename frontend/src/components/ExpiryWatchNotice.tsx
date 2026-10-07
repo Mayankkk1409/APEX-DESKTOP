@@ -29,6 +29,7 @@ function writeLastShown(userId: string, marketDay: string) {
 export function ExpiryWatchNotice() {
   const qc = useQueryClient();
   const userId = useSession((s) => s.user?.id ?? "session");
+  const expiryLoginPending = useSession((s) => s.expiryLoginPending);
   const token = getAccessToken();
   const [payload, setPayload] = useState<ExpiryWatchResponse | null>(null);
   const [open, setOpen] = useState(false);
@@ -36,7 +37,7 @@ export function ExpiryWatchNotice() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    if (!token) return;
+    if (!token || expiryLoginPending) return;
     let cancelled = false;
 
     async function evaluate() {
@@ -72,7 +73,7 @@ export function ExpiryWatchNotice() {
       document.removeEventListener("visibilitychange", onVisible);
       window.clearInterval(timer);
     };
-  }, [token, userId]);
+  }, [token, userId, expiryLoginPending]);
 
   useMarketSocket({
     token,

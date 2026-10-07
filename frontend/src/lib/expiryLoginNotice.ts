@@ -1,8 +1,61 @@
 import { parseOccSymbol } from "./optionSymbolParse";
 import { normalizeStrategyName } from "./strategyDisplay";
-import { sortExpiryItems, type ExpiryNoticeItem } from "./expiryNotice";
+import { expiryNoticeStorageKey, sortExpiryItems, type ExpiryNoticeItem } from "./expiryNotice";
 
 export const EXPIRY_LOGIN_WINDOW_DAYS = 7;
+
+/** Written only after ExpiryLoginCertificate is committed. The watch-notice key is not this. */
+export const EXPIRY_LOGIN_PAINTED_PREFIX = "apex_expiry_login_painted:";
+
+export function expiryLoginPaintedKey(userId: string): string {
+  return `${EXPIRY_LOGIN_PAINTED_PREFIX}${userId}`;
+}
+
+export type ExpiryLoginDayStore = {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+};
+
+export type ExpiryLoginCheck = "show" | "skip" | "cancelled";
+
+export function readExpiryLoginDays(
+  store: ExpiryLoginDayStore,
+  userId: string,
+): { paintedMarketDay: string | null; legacyNoticeDay: string | null } {
+  return {
+    paintedMarketDay: store.getItem(expiryLoginPaintedKey(userId)),
+    legacyNoticeDay: store.getItem(expiryNoticeStorageKey(userId)),
+  };
+}
+
+/**
+ * True when this account has an option inside the window and the certificate
+ * has not been painted on this New York market day. A notice key stored before
+ * the dialog committed does not count as shown.
+ */
+export function shouldShowExpiryLoginCertificate(input: {
+  rowCount: number;
+  marketDay: string;
+  paintedMarketDay: string | null;
+  legacyNoticeDay: string | null;
+}): boolean {
+  if (input.rowCount <= 0) return false;
+  if (input.paintedMarketDay === input.marketDay) return false;
+  // legacyNoticeDay is the watch key. Matching today means it was stored before paint, which still shows.
+  void input.legacyNoticeDay;
+  return true;
+}
+
+/** Navigate only when there is nothing to show. A cancelled check must not leave the page. */
+export function expiryLoginShouldNavigate(result: ExpiryLoginCheck): boolean {
+  return result === "skip";
+}
+
+/** Call from the effect that runs after the certificate is on screen, not before it renders. */
+export function markExpiryLoginCertificatePainted(store: ExpiryLoginDayStore, userId: string, marketDay: string): void {
+  store.setItem(expiryLoginPaintedKey(userId), marketDay);
+  store.setItem(expiryNoticeStorageKey(userId), marketDay);
+}
 
 export const EXPIRY_LOGIN_AUTO_CLOSE =
   "These positions will be closed automatically at 16:00 America/New_York on the expiry day if still open.";

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
-import { getAccessToken, restoreSession } from "./api";
+import { getAccessToken, restoreSession, subscribeAccessToken } from "./api";
 import { Dashboard } from "./pages/Dashboard";
 import { DeepScan } from "./pages/DeepScan";
 import { Login } from "./pages/Login";
@@ -8,6 +8,7 @@ import { Portfolio } from "./pages/Portfolio";
 import { Settings } from "./pages/Settings";
 import { Signup } from "./pages/Signup";
 import { Splash } from "./pages/Splash";
+import { ExpiryLoginGate } from "./components/ExpiryLoginGate";
 import { ExpiryWatchNotice } from "./components/ExpiryWatchNotice";
 import { useSession } from "./store";
 
@@ -29,8 +30,11 @@ function Guard({ children }: { children: JSX.Element }) {
 
   useEffect(() => {
     let cancelled = false;
+    const hadToken = Boolean(getAccessToken());
     resolveAuthGuard({ token: getAccessToken(), restore: restoreSession }).then((ok) => {
-      if (!cancelled) setAllowed(ok);
+      if (cancelled) return;
+      if (ok && !hadToken) useSession.getState().setExpiryLoginPending(true);
+      setAllowed(ok);
     });
     return () => {
       cancelled = true;
@@ -63,6 +67,9 @@ export default function App() {
   const loc = useLocation();
   const splashSeen = useSession((s) => s.splashSeen);
   const markSplashSeen = useSession((s) => s.markSplashSeen);
+  const [accessToken, setAccessTokenState] = useState<string | null>(() => getAccessToken());
+
+  useEffect(() => subscribeAccessToken(setAccessTokenState), []);
 
   useEffect(() => {
     if (!splashSeen && loc.pathname !== SPLASH_ENTRY) {
@@ -86,10 +93,11 @@ export default function App() {
   }
 
   const showExpiryNotice =
-    Boolean(getAccessToken()) && loc.pathname !== "/login" && loc.pathname !== "/signup";
+    Boolean(accessToken) && loc.pathname !== "/login" && loc.pathname !== "/signup";
 
   return (
     <>
+      {showExpiryNotice ? <ExpiryLoginGate /> : null}
       {showExpiryNotice ? <ExpiryWatchNotice /> : null}
       <Routes location={loc}>
       <Route path="/" element={<Navigate to="/login" replace />} />
