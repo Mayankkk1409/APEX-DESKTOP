@@ -309,6 +309,54 @@ class AlpacaAdapter:
             return ybars
         return await self.demo.bars(symbol, timeframe, limit)
 
+    async def vendor_daily_bars(self, symbol: str, *, start: str, end: str) -> list[dict]:
+        """Daily closes from Alpaca or Yahoo. Empty when the feed has no prices.
+
+        The chart path may fall back to the demo generator. Daily P&L must not.
+        """
+        from app.services.occ_symbol import parse_occ
+
+        symbol = symbol.upper()
+        if parse_occ(symbol):
+            return await self.option_bars(symbol, start=start, end=end, timeframe="1Day", limit=1000)
+        params = {
+            "timeframe": "1Day",
+            "limit": 10000,
+            "adjustment": "raw",
+            "start": start,
+            "end": end,
+        }
+        data = await self._get(
+            self.settings.resolved_data_base_url,
+            f"/v2/stocks/{symbol}/bars",
+            params,
+        )
+        raw = (data or {}).get("bars") if isinstance(data, dict) else None
+        if not raw:
+            multi = dict(params)
+            multi["symbols"] = symbol
+            data = await self._get(
+                self.settings.resolved_data_base_url,
+                "/v2/stocks/bars",
+                multi,
+            )
+            packed = (data or {}).get("bars") if isinstance(data, dict) else None
+            if isinstance(packed, dict):
+                raw = packed.get(symbol) or packed.get(symbol.upper())
+            else:
+                raw = packed
+        if raw:
+            mapped = [
+                {"t": b.get("t"), "c": b.get("c")}
+                for b in raw
+                if isinstance(b, dict) and b.get("c") is not None
+            ]
+            if mapped:
+                return mapped
+        from app.services.live_quotes import yahoo_ohlc_bars
+
+        return await yahoo_ohlc_bars(symbol, "1D", 1000)
+
     async def _option_contracts(
         self,
         symbol: str,

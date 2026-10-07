@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { ApexLogo } from "../components/ApexLogo";
@@ -7,11 +7,13 @@ import { LegalFooter } from "../components/LegalFooter";
 import { LogoutButton } from "../components/LogoutButton";
 import { PositionCertificateModal } from "../components/PositionCertificateModal";
 import { SettingsGearLink } from "../components/SettingsGearLink";
+import { DailyPnlList, PositionDailyPnl } from "../components/DailyPnlList";
 import { OverallPnlTotal } from "../components/OverallPnlTotal";
 import { PnlChart } from "../components/PnlChart";
 import { useAccountOverallPnl } from "../hooks/useAccountOverallPnl";
 import { useBrokerage } from "../hooks/useBrokerage";
 import { defaultAccountLabel, usePositionCertificate } from "../hooks/usePositionCertificate";
+import { daysForPosition } from "../lib/dailyPnl";
 import { refreshDeskQueries } from "../lib/deskRefresh";
 import { filterPnlPoints, type PnlTimeframe } from "../lib/pnlTimeframe";
 import { assetLabel, fmtBalance, fmtMoney, fmtPlain, fmtTs } from "../lib/portfolioFormat";
@@ -94,6 +96,12 @@ export function Portfolio() {
   const paperPnlHistory = useQuery({
     queryKey: ["pnl-history"],
     queryFn: () => api.pnlHistory(),
+    enabled: !usingBrokerage,
+    retry: 2,
+  });
+  const dailyPnl = useQuery({
+    queryKey: ["daily-pnl"],
+    queryFn: () => api.dailyPnl(),
     enabled: !usingBrokerage,
     retry: 2,
   });
@@ -221,6 +229,17 @@ export function Portfolio() {
             pending={historyQuery.isFetching && !historyQuery.data}
             overallTotal={totalPnl}
           />
+          {!usingBrokerage && dailyPnl.data && dailyPnl.data.book.length > 0 && (
+            <div className="mt-3 rounded-xl border border-line bg-panel px-4 py-3" data-testid="book-daily-pnl">
+              <p className="text-[10px] uppercase tracking-wider text-bronze">Book daily P&L</p>
+              <DailyPnlList days={dailyPnl.data.book} testId="book-daily-pnl-list" />
+            </div>
+          )}
+          {!usingBrokerage && dailyPnl.isError && (
+            <p className="mt-2 text-xs text-faint" data-testid="daily-pnl-error">
+              Daily P&L unavailable
+            </p>
+          )}
         </section>
 
         <Collapsible title="Current Portfolio" testId="portfolio-positions-section">
@@ -249,9 +268,11 @@ export function Portfolio() {
                 </tr>
               </thead>
               <tbody>
-                {openPositions.map((p) => (
+                {openPositions.map((p) => {
+                  const seriesDays = usingBrokerage ? undefined : daysForPosition(dailyPnl.data, p.id);
+                  return (
+                  <Fragment key={p.id}>
                   <tr
-                    key={p.id}
                     className="cursor-pointer"
                     data-testid={`position-row-${p.id}`}
                     tabIndex={0}
@@ -289,7 +310,16 @@ export function Portfolio() {
                       </td>
                     )}
                   </tr>
-                ))}
+                  {seriesDays && seriesDays.length > 0 && (
+                    <tr data-testid={`position-daily-row-${p.id}`}>
+                      <td colSpan={usingBrokerage ? 7 : 8} className="px-2 pb-3">
+                        <PositionDailyPnl symbol={p.symbol} days={seriesDays} />
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
+                  );
+                })}
               </tbody>
             </table>
             </div>

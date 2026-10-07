@@ -12,6 +12,7 @@ from app.models.user import User
 from app.services.fills import execute_market_fill, execute_strategy_legs
 from app.strategies.validator import validate_strategy_output
 from app.services.orders import account_impact, estimate_order_cost
+from app.services.daily_pnl import assemble_daily_pnl
 from app.services.portfolio_pnl import account_baseline, pnl_history_points, symbol_pnl_rows
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
@@ -137,6 +138,17 @@ async def portfolio_pnl_history(
         "account_mode": user.account_mode,
         "points": points,
     }
+
+
+@router.get("/portfolio/daily-pnl")
+async def portfolio_daily_pnl(
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+    adapter=Depends(get_adapter),
+) -> dict:
+    """Per-position and book daily P&L. Missing feed prices stay unavailable."""
+    positions = (await db.scalars(select(Position).where(Position.user_id == user.id))).all()
+    return await assemble_daily_pnl(list(positions), adapter)
 
 
 @router.get("/portfolio/overall-pnl")

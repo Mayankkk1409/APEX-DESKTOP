@@ -314,6 +314,7 @@ export const api = {
   },
   portfolio: () => req<import("./types").PortfolioSummary>("/api/portfolio"),
   pnlHistory: () => req<import("./types").PnlHistory>("/api/portfolio/pnl-history"),
+  dailyPnl: () => req<import("./lib/dailyPnl").DailyPnlResponse>("/api/portfolio/daily-pnl"),
   overallPnl: () => req<{ rows: import("./types").OverallPnlRow[] }>("/api/portfolio/overall-pnl"),
   positions: () => req<{ positions: import("./types").PositionRow[] }>("/api/positions"),
   expiryWatch: () => req<import("./lib/expiryNotice").ExpiryWatchResponse>("/api/expiry-watch"),

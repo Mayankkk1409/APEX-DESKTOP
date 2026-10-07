@@ -220,6 +220,11 @@ class DemoAdapter:
             out.append({"t": t.isoformat(), "o": round(o, 2), "h": round(h, 2), "l": round(l, 2), "c": round(c, 2), "v": v})
         return out
 
+    async def vendor_daily_bars(self, symbol: str, *, start: str, end: str) -> list[dict]:
+        """Synthetic demo prices are not marks. Daily P&L stays unavailable."""
+        _ = (symbol, start, end)
+        return []
+
     async def expirations(self, symbol: str) -> list[Expiration]:
         today = _server_today()
         dates: list[date] = []

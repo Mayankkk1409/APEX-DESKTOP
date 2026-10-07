@@ -1,9 +1,10 @@
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, getAccessToken } from "../api";
 import { BrokerageConnectionPanel } from "../components/BrokerageConnectionPanel";
 import { LogoutButton } from "../components/LogoutButton";
+import { DailyPnlList, PositionDailyPnl } from "../components/DailyPnlList";
 import { PositionCertificateModal } from "../components/PositionCertificateModal";
 import { SettingsGearLink } from "../components/SettingsGearLink";
 import { TradingViewChart } from "../components/TradingViewChart";
@@ -17,6 +18,7 @@ import { useMarketSocket } from "../hooks/useMarketSocket";
 import { defaultAccountLabel, usePositionCertificate } from "../hooks/usePositionCertificate";
 import { refreshDeskQueries } from "../lib/deskRefresh";
 import { clearNewsRetry, isNewsRateLimitMessage, newsRetryDelay, noteNewsRateLimit, visibleNewsError } from "../lib/newsFeed";
+import { daysForPosition, markedPnl } from "../lib/dailyPnl";
 import { resolvePositionDayPl } from "../lib/positionDayPl";
 import { SEARCH_DEBOUNCE_MS, createDebouncedSymbolSearch } from "../lib/symbolSearch";
 import { useSession } from "../store";
@@ -155,6 +157,11 @@ export function Dashboard() {
   });
   const portfolio = useQuery({ queryKey: ["port"], queryFn: () => api.portfolio(), enabled: !brokerage.usingBrokerage });
   const positions = useQuery({ queryKey: ["pos"], queryFn: () => api.positions(), enabled: !brokerage.usingBrokerage });
+  const dailyPnl = useQuery({
+    queryKey: ["daily-pnl"],
+    queryFn: () => api.dailyPnl(),
+    enabled: !brokerage.usingBrokerage,
+  });
   // Keep the picker on a live expiry for the current underlying. On symbol change
   // applyTicker clears expiry; once the refetch lands, default to the nearest date.
   useEffect(() => {
@@ -224,16 +231,26 @@ export function Dashboard() {
     });
     return map;
   }, [positionSymbols, positionQuoteQueries]);
+  const dailyBook = !brokerage.usingBrokerage ? (dailyPnl.data?.book ?? null) : null;
+  const latestBook = dailyBook && dailyBook.length > 0 ? dailyBook[dailyBook.length - 1] : undefined;
+  const seriesReady = dailyBook != null;
   const dayPl = brokerage.usingBrokerage
     ? (brokerage.stats?.day_pnl ?? null)
-    : (portfolio.data?.day_pl as number | null | undefined);
+    : seriesReady
+      ? markedPnl(latestBook)
+      : (portfolio.data?.day_pl as number | null | undefined);
+  const dayPlLabel = seriesReady && markedPnl(latestBook) == null ? "unavailable" : fmt(dayPl);
   const dayPct = brokerage.usingBrokerage
     ? brokerage.stats?.day_pnl != null && brokerage.stats.portfolio_value
       ? (brokerage.stats.day_pnl / brokerage.stats.portfolio_value) * 100
       : null
-    : typeof portfolio.data?.day_pct === "number"
-      ? portfolio.data.day_pct
-      : null;
+    : seriesReady
+      ? dayPl != null && stats.portfolio_value
+        ? (dayPl / stats.portfolio_value) * 100
+        : null
+      : typeof portfolio.data?.day_pct === "number"
+        ? portfolio.data.day_pct
+        : null;
 
   const later = useMutation({
     mutationFn: () => api.brokerage(true),
@@ -476,8 +493,19 @@ export function Dashboard() {
             <div>
               <p className="text-xs uppercase tracking-wider text-bronze">Daily portfolio summary</p>
               <p className="font-mono" data-testid="day-pl-summary">
-                Day P&L {fmt(dayPl)} · {dayPl == null || dayPct == null ? "—" : `${dayPct.toFixed(2)}%`}
+                Day P&L {dayPlLabel} · {dayPl == null || dayPct == null ? "—" : `${dayPct.toFixed(2)}%`}
               </p>
+              {dailyBook && dailyBook.length > 0 && (
+                <div className="mt-2" data-testid="book-daily-pnl">
+                  <p className="text-[10px] uppercase tracking-wider text-bronze">Book daily P&L</p>
+                  <DailyPnlList days={dailyBook} testId="book-daily-pnl-list" />
+                </div>
+              )}
+              {!brokerage.usingBrokerage && dailyPnl.isError && (
+                <p className="text-xs text-faint" data-testid="daily-pnl-error">
+                  Daily P&L unavailable
+                </p>
+              )}
               <p className="text-xs text-faint">
                 Top movers: {((portfolio.data?.top_movers as { symbol: string }[]) ?? []).map((m) => m.symbol).join(", ") || "—"}
               </p>
@@ -530,10 +558,14 @@ export function Dashboard() {
                   </tr>
                 ) : (
                   displayPositions.map((p) => {
-                    const positionDayPl = resolvePositionDayPl(p, quoteBySymbol.get(p.symbol));
+                    const seriesDays = brokerage.usingBrokerage ? undefined : daysForPosition(dailyPnl.data, p.id);
+                    const latest = seriesDays?.[seriesDays.length - 1];
+                    const seriesValue = seriesDays ? markedPnl(latest) : null;
+                    const positionDayPl = seriesDays ? seriesValue : resolvePositionDayPl(p, quoteBySymbol.get(p.symbol));
+                    const dayCell = seriesDays && seriesValue == null ? "unavailable" : fmt(positionDayPl);
                     return (
+                    <Fragment key={p.id}>
                     <tr
-                      key={p.id}
                       className="cursor-pointer"
                       data-testid={`position-row-${p.id}`}
                       tabIndex={0}
@@ -552,11 +584,19 @@ export function Dashboard() {
                       <td className="apex-num">{fmt(p.avg_cost)}</td>
                       <td className="apex-num">{fmt(p.current)}</td>
                       <td className={`apex-num ${positionDayPl == null ? "text-faint" : positionDayPl >= 0 ? "num-up" : "num-down"}`}>
-                        {fmt(positionDayPl)}
+                        {dayCell}
                       </td>
                       <td className={`apex-num ${p.unrealized_pl >= 0 ? "num-up" : "num-down"}`}>{fmt(p.unrealized_pl)}</td>
                       <td className="apex-num px-4">{fmt(p.market_value)}</td>
                     </tr>
+                    {seriesDays && seriesDays.length > 0 && (
+                      <tr data-testid={`position-daily-row-${p.id}`}>
+                        <td colSpan={7} className="px-4 pb-3">
+                          <PositionDailyPnl symbol={p.symbol} days={seriesDays} />
+                        </td>
+                      </tr>
+                    )}
+                    </Fragment>
                     );
                   })
                 )}

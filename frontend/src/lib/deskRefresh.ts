@@ -12,7 +12,7 @@ type PortfolioSnapshot = {
 type OrderList = { orders?: OrderHistoryRow[] };
 
 /**
- * Pull portfolio, positions, orders, P&L, and the equity graph immediately.
+ * Pull portfolio, positions, orders, P&L, daily P&L, and the equity graph immediately.
  * Inactive portfolio queries are fetched too, so a fill is not waiting on a poll.
  * Missing responses are left untouched — this does not invent bars or P&L.
  */
@@ -21,6 +21,7 @@ export function refreshDeskQueries(qc: QueryClient): void {
   void qc.fetchQuery({ queryKey: ["pos"], queryFn: () => api.positions() });
   void qc.fetchQuery({ queryKey: ["orders"], queryFn: () => api.orderHistory() });
   void qc.fetchQuery({ queryKey: ["pnl-history"], queryFn: () => api.pnlHistory() });
+  void qc.fetchQuery({ queryKey: ["daily-pnl"], queryFn: () => api.dailyPnl() });
   void qc.fetchQuery({ queryKey: ["overall-pnl"], queryFn: () => api.overallPnl() });
   void qc.invalidateQueries({ queryKey: ["brokerage"], refetchType: "all" });
 }
