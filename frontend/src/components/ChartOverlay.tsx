@@ -3,15 +3,17 @@ import { OVERLAY_EMA, overlayLayout, type PlotLayout, type PlotSeries } from "..
 import type { OhlcBar } from "../lib/ta";
 import type { ChartChrome } from "../lib/tv";
 
-/** Broken polyline — NaN gaps start a new M (no join across flips). */
-function poly(xs: number[], ys: number[]) {
+/** Contiguous finite points are M then L. A non-finite gap lifts the pen. */
+export function poly(xs: number[], ys: number[]) {
   let d = "";
+  let open = false;
   for (let i = 0; i < xs.length; i++) {
-    if (!Number.isFinite(ys[i])) {
-      d += " ";
+    if (!Number.isFinite(xs[i]) || !Number.isFinite(ys[i])) {
+      open = false;
       continue;
     }
-    d += `${d.endsWith(" ") || !d ? "M" : "L"}${xs[i].toFixed(1)} ${ys[i].toFixed(1)} `;
+    d += `${open ? "L" : "M"}${xs[i].toFixed(1)} ${ys[i].toFixed(1)} `;
+    open = true;
   }
   return d.trim();
 }

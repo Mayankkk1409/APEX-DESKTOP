@@ -140,6 +140,24 @@ async def create_scan(
     }
 
 
+@router.get("/recent")
+async def recent_scans(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> dict:
+    rows = (
+        await db.scalars(select(Scan).where(Scan.user_id == user.id).order_by(Scan.created_at.desc()).limit(8))
+    ).all()
+    return {
+        "scans": [
+            {
+                "id": row.id,
+                "symbol": row.symbol,
+                "composite_score": row.composite_score,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+            for row in rows
+        ]
+    }
+
+
 @router.get("/{scan_id}")
 async def get_scan(scan_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> dict:
     scan = await db.get(Scan, scan_id)

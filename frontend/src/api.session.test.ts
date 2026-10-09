@@ -3,7 +3,7 @@ import { getAccessToken, refreshDelayMs, restoreSession, setAccessToken } from "
 import { pathAfterSessionRestore } from "./pages/Login";
 import { useSession } from "./store";
 
-const SCREENS = ["/app", "/scan", "/portfolio", "/settings"] as const;
+const SCREENS = ["/dashboard", "/app", "/scan", "/portfolio", "/settings"] as const;
 const ACCESS_TTL_SEC = 900;
 const REFRESH_IN_SEC = 840;
 

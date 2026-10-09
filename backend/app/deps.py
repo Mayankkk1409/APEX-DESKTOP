@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +11,7 @@ from app.config import Settings, get_settings
 from app.database import get_db
 from app.models.user import User
 from app.security import decode_token
+from app.services.login_verification import VERIFICATION_EXPIRED, access_verification_current
 
 bearer = HTTPBearer(auto_error=False)
 
@@ -26,6 +29,8 @@ async def current_user(
         payload = decode_token(settings, token, expected_type="access")
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid access token") from exc
+    if not access_verification_current(payload, datetime.now(timezone.utc)):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, VERIFICATION_EXPIRED)
     user = await db.get(User, payload["sub"])
     if not user:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User not found")

@@ -1,6 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { api, setAccessToken } from "../api";
 import { resetExpiryLoginArrival } from "../lib/expiryLoginNotice";
+import { queryClient } from "../queryClient";
 import { clearScanSession, useSession } from "../store";
 
 export function LogoutButton() {
@@ -13,6 +14,7 @@ export function LogoutButton() {
     } catch {
       /* clear local session even if cookie revoke fails */
     }
+    queryClient.clear();
     setAccessToken(null);
     clearScanSession();
     resetExpiryLoginArrival();

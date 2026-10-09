@@ -39,6 +39,11 @@ from app.security import (
     password_strength,
     verify_password,
 )
+from app.services.login_verification import (
+    VERIFICATION_EXPIRED,
+    login_skips_otp,
+    verification_current,
+)
 from app.services.otp import claim_login_code, invalidate_login_code, issue_otp, verify_otp
 from app.services.password_reset import consume_pending_reset, store_pending_reset
 from app.services.signup_email import send_login_code, send_signup_confirmation
@@ -48,7 +53,6 @@ REFRESH_COOKIE = "apex_refresh"
 DEVICE_COOKIE = "apex_device"
 DEVICE_COOKIE_MAX_AGE = 60 * 60 * 24 * 400
 LOGIN_CODE_TTL_SECONDS = 600
-OTP_SKIP_WINDOW = timedelta(hours=24)
 NO_SIGNIN_EMAIL = "This account has no email for a sign-in code."
 SIGNIN_CODE_NOT_SENT = "The sign-in code could not be sent."
 
@@ -133,19 +137,12 @@ def _bind_device(request: Request, response: Response, settings: Settings) -> st
 
 
 def otp_skip_active(verified_at: datetime, now: datetime) -> bool:
-    """True while this device's last successful code is less than 24 hours old.
-
-    The window is only ``otp_verified_at``. It does not end at 9:30 and it does
-    not change on weekends, holidays, or any other market session.
-    """
-    return now < _aware(verified_at) + OTP_SKIP_WINDOW
+    """Fresh-login skip. Weekends and full-day holidays still require a code."""
+    return login_skips_otp(verified_at, now)
 
 
-async def _verified_for_device(db: AsyncSession, user_id: str, device_id: str, now: datetime) -> bool:
-    row = await db.scalar(select(OtpDevice).where(OtpDevice.user_id == user_id, OtpDevice.device_id == device_id))
-    if row is None or row.otp_verified_at is None:
-        return False
-    return otp_skip_active(row.otp_verified_at, now)
+async def _device_row(db: AsyncSession, user_id: str, device_id: str) -> OtpDevice | None:
+    return await db.scalar(select(OtpDevice).where(OtpDevice.user_id == user_id, OtpDevice.device_id == device_id))
 
 
 async def _remember_otp_verification(db: AsyncSession, user_id: str, device_id: str, now: datetime) -> None:
@@ -229,12 +226,17 @@ async def _issue_session(
     settings: Settings,
     *,
     secure: bool,
+    verified_at: datetime,
 ) -> TokenResponse:
     jti = secrets.token_hex(16)
     expires = datetime.now(timezone.utc) + timedelta(seconds=settings.refresh_token_ttl_seconds)
     db.add(RefreshToken(user_id=user.id, jti=jti, expires_at=expires))
     await db.commit()
-    access = create_access_token(settings, UUID(user.id), {"mode": user.account_mode})
+    access = create_access_token(
+        settings,
+        UUID(user.id),
+        {"mode": user.account_mode, "vfy": int(_aware(verified_at).timestamp())},
+    )
     refresh = create_refresh_token(settings, UUID(user.id), jti)
     _set_refresh(response, refresh, settings, secure=secure)
     return _token_response(user, access, settings, show_connect_modal=True)
@@ -327,9 +329,15 @@ async def login(
     settings = get_settings()
     now = datetime.now(timezone.utc)
     device_id = _bind_device(request, response, settings)
-    if await _verified_for_device(db, user.id, device_id, now):
+    device = await _device_row(db, user.id, device_id)
+    if device is not None and device.otp_verified_at is not None and otp_skip_active(device.otp_verified_at, now):
         token = await _issue_session(
-            user, response, db, settings, secure=cookie_secure_for_request(request, settings)
+            user,
+            response,
+            db,
+            settings,
+            secure=cookie_secure_for_request(request, settings),
+            verified_at=device.otp_verified_at,
         )
         payload = token.model_dump()
         payload["otp_required"] = False
@@ -387,7 +395,12 @@ async def otp_verify(
     device_id = _bind_device(request, response, settings)
     await _remember_otp_verification(db, user.id, device_id, now)
     return await _issue_session(
-        user, response, db, settings, secure=cookie_secure_for_request(request, settings)
+        user,
+        response,
+        db,
+        settings,
+        secure=cookie_secure_for_request(request, settings),
+        verified_at=now,
     )
 
 
@@ -422,10 +435,18 @@ async def forgot_password_verify(
     if not pending_hash:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Password reset expired — request a new code")
     user.password_hash = pending_hash
+    now = datetime.now(timezone.utc)
+    device_id = _bind_device(request, response, settings)
+    await _remember_otp_verification(db, user.id, device_id, now)
     await db.commit()
     await db.refresh(user)
     return await _issue_session(
-        user, response, db, settings, secure=cookie_secure_for_request(request, settings)
+        user,
+        response,
+        db,
+        settings,
+        secure=cookie_secure_for_request(request, settings),
+        verified_at=now,
     )
 
 
@@ -456,10 +477,20 @@ async def refresh(
     if not user:
         _clear_refresh(response, settings, secure=cookie_secure_for_request(request, settings))
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User not found")
+    now = datetime.now(timezone.utc)
+    device_id = _read_device_cookie(settings, request.cookies.get(DEVICE_COOKIE))
+    device = await _device_row(db, user.id, device_id) if device_id else None
+    if device is None or device.otp_verified_at is None or not verification_current(device.otp_verified_at, now):
+        # Do not email. The next explicit login sends at most one code.
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, VERIFICATION_EXPIRED)
     # Keep this refresh cookie until logout or its own exp. Rotating it on every
     # silent refresh lets a second in-flight call present the old cookie, get
     # 401, and clear the cookie the first call just set — a forced logout.
-    access = create_access_token(settings, UUID(user.id), {"mode": user.account_mode})
+    access = create_access_token(
+        settings,
+        UUID(user.id),
+        {"mode": user.account_mode, "vfy": int(_aware(device.otp_verified_at).timestamp())},
+    )
     return _token_response(user, access, settings, show_connect_modal=not user.first_login_completed)
 
 

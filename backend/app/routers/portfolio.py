@@ -475,7 +475,17 @@ async def place_order(
         )
     except ValueError as exc:
         raise HTTPException(503, str(exc)) from exc
-    impact = account_impact(body.side, cost)
+    if order.fill_price is not None and order.status in {"filled", "partial"}:
+        filled_qty = float(order.filled_qty or order.qty)
+        actual = estimate_order_cost(
+            filled_qty,
+            order.fill_price,
+            asset_class=order.asset_class,  # type: ignore[arg-type]
+            multiplier=order.multiplier,
+        )
+        impact = account_impact(order.side, actual)
+    else:
+        impact = 0.0
     return {
         "id": order.id,
         "status": order.status,

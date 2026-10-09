@@ -3693,6 +3693,13 @@ html[data-theme="light"] .apex-draw-stroke {
   color: var(--apex-text);
 }
 
+.ticker-suggestions [role="option"] {
+  display: block;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+}
+
 .ticker-hit {
   display: block;
   width: 100%;
@@ -3713,6 +3720,7 @@ html[data-theme="light"] .apex-draw-stroke {
     opacity 140ms ease;
 }
 
+.ticker-suggestions [role="option"]:hover .ticker-hit,
 .ticker-hit:hover,
 .ticker-hit:focus,
 .ticker-hit:focus-visible,

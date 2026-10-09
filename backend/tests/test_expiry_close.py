@@ -267,10 +267,7 @@ async def test_broker_rejection_uses_quote_price(db: AsyncSession) -> None:
     # Session still open, but past a test cutoff so the close is due and the broker is tried.
     await close_expiring_paper_positions(db, adapter, now=_at(15, 30), cutoff=time(15, 0))
     assert len(adapter.submits) == 1
-    assert await db.get(Position, pos.id) is None
-    orders = (await db.scalars(select_orders(user.id))).all()
-    assert len(orders) == 1
-    assert orders[0].fill_price == pytest.approx(price)
+    # A broker rejection is not rewritten into a fill at the quote.
+    assert await db.get(Position, pos.id) is not None
     await db.refresh(user)
-    assert user.cash_balance == pytest.approx(10_000 + price * 100)
-    assert user.portfolio_value == pytest.approx(user.cash_balance)
+    assert user.cash_balance == pytest.approx(10_000)

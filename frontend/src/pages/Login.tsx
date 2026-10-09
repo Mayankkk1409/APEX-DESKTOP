@@ -28,14 +28,14 @@ import { useSession } from "../store";
 type Flow = "login" | "recovery";
 type Stage = "identify" | "code";
 
-const RESTORED_SCREENS = ["/app", "/scan", "/portfolio", "/settings"];
+const RESTORED_SCREENS = ["/dashboard", "/app", "/scan", "/portfolio", "/settings"];
 
 /** After a reload, Guard sends the user to /login with the screen they were on. */
 export function pathAfterSessionRestore(from: unknown): string {
-  if (typeof from !== "string" || !from.startsWith("/")) return "/app";
+  if (typeof from !== "string" || !from.startsWith("/")) return "/dashboard";
   const path = from.split("?")[0]?.split("#")[0] ?? "";
   if (RESTORED_SCREENS.some((screen) => path === screen || path.startsWith(`${screen}/`))) return path;
-  return "/app";
+  return "/dashboard";
 }
 
 export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boolean } = {}) {
@@ -66,7 +66,7 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
   const formRef = useRef<HTMLFormElement>(null);
   const verifyBusy = useRef(false);
   const flowRef = useRef<Flow>("login");
-  const afterExpiryPath = useRef("/app");
+  const afterExpiryPath = useRef("/dashboard");
   flowRef.current = flow;
 
   async function maybeShowExpiry(
@@ -252,11 +252,13 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
     const me = (await api.me()) as import("../types").User;
     setUser(me);
     setModal(true);
-    afterExpiryPath.current = "/app";
+    const from = (loc.state as { from?: unknown } | null)?.from;
+    const next = pathAfterSessionRestore(from);
+    afterExpiryPath.current = next;
     resetExpiryLoginArrival();
     const expiryCheck = await maybeShowExpiry(me, () => false, true);
     if (!expiryLoginShouldNavigate(expiryCheck)) return;
-    nav("/app");
+    nav(next);
   }
 
   async function onLogin(e: FormEvent) {

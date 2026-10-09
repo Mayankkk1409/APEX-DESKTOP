@@ -247,15 +247,17 @@ class AlpacaAdapter:
         from app.services.live_quotes import get_live_quote
 
         live = await get_live_quote(symbol, self.settings)
-        if live.price is not None:
+        if live.price is not None and str(live.source or "").lower() not in {"demo", "unavailable"}:
             return live
-        # Paper orders / scan still need a number when every live feed is dark.
-        # The dashboard ticker panel does NOT use this path — it hits /market/quote.
-        fallback = await self.demo.quote(symbol)
-        fallback.status = "unavailable"
-        fallback.source = "unavailable"
-        fallback.secondary_source = "internal demo (live quote unavailable)"
-        return fallback
+        # A missing live quote is not a usable demo price.
+        return Quote(
+            symbol=symbol.upper(),
+            name=symbol.upper(),
+            price=None,
+            source="unavailable",
+            status="unavailable",
+            secondary_source=None,
+        )
 
     async def bars(self, symbol: str, timeframe: str, limit: int = 400) -> list[dict]:
         tf_map = {"1m": "1Min", "5m": "5Min", "15m": "15Min", "30m": "30Min", "1H": "1Hour", "4H": "4Hour", "1D": "1Day", "1W": "1Week"}
@@ -790,11 +792,36 @@ class AlpacaAdapter:
             )
         return out
 
+    def _broker_venue(self) -> str:
+        return "live" if self.settings.alpaca_trading_mode == "live" else "paper"
+
+    def _missing_credentials(self) -> dict | None:
+        if self.settings.alpaca_keys_present:
+            return None
+        if self.settings.allow_options_simulator:
+            return None
+        return {
+            "status": "rejected",
+            "rejected": True,
+            "reason": "Broker credentials are not configured",
+            "venue": "live",
+        }
+
+    async def _labeled_simulation(self, kwargs: dict) -> dict:
+        result = await self.demo.submit_order(**kwargs)
+        if isinstance(result, dict):
+            result["venue"] = "simulation"
+            result["broker"] = "demo_paper"
+        return result
+
     async def _submit_combo(self, kwargs: dict, *, strict: bool) -> dict:
         """One multi-leg limit. A rejection is returned as-is and is not split into single-leg orders."""
         _ = strict
+        missing = self._missing_credentials()
+        if missing is not None:
+            return missing
         if not self.settings.alpaca_keys_present:
-            return await self.demo.submit_order(**kwargs)
+            return await self._labeled_simulation(kwargs)
         legs = kwargs.get("legs") or []
         payload = {
             "order_class": "mleg",
@@ -827,19 +854,25 @@ class AlpacaAdapter:
                         fallback=(res.text or "").strip()[:300] or f"Broker rejected the order ({res.status_code})",
                     )
                     logger.warning("Alpaca combo order failed {}", reason)
-                    return {"status": "rejected", "rejected": True, "reason": reason}
-                return res.json()
+                    return {"status": "rejected", "rejected": True, "reason": reason, "venue": self._broker_venue()}
+                body = res.json()
+                if isinstance(body, dict):
+                    body.setdefault("venue", self._broker_venue())
+                return body
         except Exception as exc:  # noqa: BLE001
             logger.warning("Alpaca combo order error {}", exc)
             reason = str(exc).strip() or "Broker order failed"
-            return {"status": "rejected", "rejected": True, "reason": reason}
+            return {"status": "rejected", "rejected": True, "reason": reason, "venue": self._broker_venue()}
 
     async def submit_order(self, **kwargs) -> dict:
         strict = bool(kwargs.pop("strict", False))
         if kwargs.get("order_class") == "mleg":
             return await self._submit_combo(kwargs, strict=strict)
+        missing = self._missing_credentials()
+        if missing is not None:
+            return missing
         if not self.settings.alpaca_keys_present:
-            return await self.demo.submit_order(**kwargs)
+            return await self._labeled_simulation(kwargs)
         payload = {
             "symbol": kwargs["symbol"],
             "qty": _whole_order_qty(kwargs["qty"]),
@@ -862,13 +895,14 @@ class AlpacaAdapter:
                         fallback=(res.text or "").strip()[:300] or f"Broker rejected the order ({res.status_code})",
                     )
                     logger.warning("Alpaca order failed {}", reason)
-                    if strict:
-                        return {"status": "rejected", "rejected": True, "reason": reason}
-                    return await self.demo.submit_order(**kwargs)
-                return res.json()
+                    _ = strict
+                    return {"status": "rejected", "rejected": True, "reason": reason, "venue": self._broker_venue()}
+                body = res.json()
+                if isinstance(body, dict):
+                    body.setdefault("venue", self._broker_venue())
+                return body
         except Exception as exc:  # noqa: BLE001
             logger.warning("Alpaca order error {}", exc)
             reason = str(exc).strip() or "Broker order failed"
-            if strict:
-                return {"status": "rejected", "rejected": True, "reason": reason}
-            return await self.demo.submit_order(**kwargs)
+            _ = strict
+            return {"status": "rejected", "rejected": True, "reason": reason, "venue": self._broker_venue()}

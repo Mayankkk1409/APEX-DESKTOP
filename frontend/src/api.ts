@@ -7,6 +7,7 @@ import type {
   NewsArticleContent,
   Quote,
   RecommendedContract,
+  ScanResult,
   SentimentLayer,
   VolatilityEvents,
   VolatilitySeries,
@@ -219,6 +220,11 @@ async function req<T>(path: string, init: RequestInit = {}, retried = false): Pr
       detail = "Brokerage service error. Try Refresh — if it persists, restart the backend.";
     }
     if (res.status === 401 && !ANONYMOUS_AUTH.has(path)) {
+      const expired = typeof detail === "string" && detail.includes("Sign-in verification expired");
+      if (expired) {
+        endSession(detail);
+        throw new Error(detail);
+      }
       if (!retried) {
         const next = await refreshAccessToken();
         if (next) return req<T>(path, init, true);
@@ -378,6 +384,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ snapshot, expiry }),
     }),
+  recentScans: () =>
+    req<{ scans: { id: string; symbol: string; composite_score: number | null; created_at: string | null }[] }>("/scan/recent"),
+  scanById: (scanId: string) => req<ScanResult>(`/scan/${encodeURIComponent(scanId)}`),
+  marketSession: () =>
+    req<{ phase: string; trading_day: boolean; as_of: string; last_open: string; timezone: string }>("/market/session"),
   layers: () => req<{ layers: string[] }>("/scan/layers"),
   volatility: (symbol: string, expiry?: string, recommended?: RecommendedContract | null) => {
     const params = new URLSearchParams();

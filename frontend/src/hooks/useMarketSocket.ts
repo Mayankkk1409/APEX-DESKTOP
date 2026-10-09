@@ -19,6 +19,7 @@ export function useMarketSocket(opts: {
   const sendRef = useRef<(data: string) => boolean>(() => false);
   const symbolKey = (opts.symbols ?? []).filter(Boolean).join(",");
   const [liveToken, setLiveToken] = useState<string | null>(opts.token);
+  const [connected, setConnected] = useState(false);
 
   useEffect(() => {
     setLiveToken(opts.token);
@@ -35,6 +36,7 @@ export function useMarketSocket(opts: {
       urlForToken: (next) => marketSocketUrl(WS_BASE, next),
       getSymbols: () => symbolsRef.current ?? [],
       onMessage: (msg) => onMessageRef.current(msg),
+      onState: setConnected,
     });
     sendRef.current = conn.send;
     return () => {
@@ -47,4 +49,6 @@ export function useMarketSocket(opts: {
     if (!symbolKey) return;
     sendRef.current(JSON.stringify({ type: "subscribe", symbols: symbolKey.split(",") }));
   }, [liveToken, symbolKey]);
+
+  return { connected };
 }
