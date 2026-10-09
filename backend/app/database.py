@@ -46,6 +46,7 @@ def _run_alembic_migrations() -> None:
 
 async def init_db() -> None:
     from app.models import brokerage as _brokerage  # noqa: F401
+    from app.models import otp_device as _otp_device  # noqa: F401
     from app.models import trading as _trading  # noqa: F401
     from app.models import user as _user  # noqa: F401
     from app.models import user_settings as _user_settings  # noqa: F401

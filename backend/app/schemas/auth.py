@@ -97,6 +97,12 @@ class UserOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class SignupOut(UserOut):
+    """Signup account plus whether this request's confirmation reached its own address."""
+
+    confirmation_sent: bool = False
+
+
 class ConnectBrokerageRequest(BaseModel):
     later: bool = False
 
