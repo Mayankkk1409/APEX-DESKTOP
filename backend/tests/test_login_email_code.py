@@ -436,12 +436,17 @@ def test_login_letter_is_addressed_to_the_given_recipient(monkeypatch: pytest.Mo
             assert "<svg" not in html_body.lower()
             assert "<style" not in html_body.lower()
             assert "gradient" not in html_body.lower()
-            raw = message.as_string().lower()  # type: ignore[attr-defined]
-            assert "multipart/related" in raw
-            assert "content-id:" in raw
-            assert "content-disposition: inline" in raw
-            assert "image/png" in raw
-            assert "content-disposition: attachment" not in raw
+            raw = message.as_string()  # type: ignore[attr-defined]
+            head = raw.split("\n\n", 1)[0]
+            assert "MIME-Version: 1.0" in head
+            assert 'type="multipart/alternative"' in head
+            assert head.lower().count("mime-version:") == 1
+            lowered = raw.lower()
+            assert "multipart/related" in lowered
+            assert "content-id:" in lowered
+            assert "content-disposition: inline" in lowered
+            assert "image/png" in lowered
+            assert "content-disposition: attachment" not in lowered
             images = [part for part in message.walk() if part.get_content_maintype() == "image"]  # type: ignore[attr-defined]
             assert len(images) == 1
             image = images[0]
