@@ -16,9 +16,9 @@ import { DEFAULT_SYMBOL, SNAPSHOT_STUDIES } from "../constants";
 import { useBrokerage } from "../hooks/useBrokerage";
 import { useMarketSocket } from "../hooks/useMarketSocket";
 import { defaultAccountLabel, usePositionCertificate } from "../hooks/usePositionCertificate";
-import { refreshDeskQueries } from "../lib/deskRefresh";
+import { DESK_STALE_MS, refreshDeskQueries } from "../lib/deskRefresh";
 import { clearNewsRetry, isNewsRateLimitMessage, newsRetryDelay, noteNewsRateLimit, visibleNewsError } from "../lib/newsFeed";
-import { dayPlOrUnrealized, daysForPosition, markedPnl } from "../lib/dailyPnl";
+import { dayPlOrUnrealized, daysForPosition, displaySessionDay, formatSessionDate, markedPnl } from "../lib/dailyPnl";
 import { resolvePositionDayPl } from "../lib/positionDayPl";
 import { SEARCH_DEBOUNCE_MS, createDebouncedSymbolSearch } from "../lib/symbolSearch";
 import { useSession } from "../store";
@@ -95,6 +95,13 @@ export function Dashboard() {
     if (hitsFor.trim().toUpperCase() === typed && hits[0]) return hits[0].symbol;
     return typed;
   }
+  const [chartFull, setChartFull] = useState(false);
+  const [chartAnimating, setChartAnimating] = useState(false);
+  const deskRef = useRef<HTMLDivElement>(null);
+  const motionRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef(0);
+  const restoreScroll = useRef(false);
+  const motionDone = useRef(true);
   const [watchOpen, setWatchOpen] = useState(true);
   const [sentOpen, setSentOpen] = useState(true);
   const [posOpen, setPosOpen] = useState(true);
@@ -105,8 +112,6 @@ export function Dashboard() {
     queryKey: ["quote", activeSymbol],
     queryFn: () => api.quote(activeSymbol),
     staleTime: 5_000,
-    refetchOnMount: "always",
-    refetchOnWindowFocus: true,
     refetchInterval: 10_000,
     enabled: Boolean(activeSymbol),
   });
@@ -114,8 +119,6 @@ export function Dashboard() {
     queryKey: ["fundamentals", activeSymbol],
     queryFn: () => api.fundamentals(activeSymbol),
     staleTime: 15_000,
-    refetchOnMount: "always",
-    refetchOnWindowFocus: true,
     refetchInterval: 30_000,
     enabled: Boolean(activeSymbol),
   });
@@ -155,12 +158,37 @@ export function Dashboard() {
     isPaper: !brokerage.usingBrokerage,
     accountLabel: defaultAccountLabel(user, !brokerage.usingBrokerage),
   });
-  const portfolio = useQuery({ queryKey: ["port"], queryFn: () => api.portfolio(), enabled: !brokerage.usingBrokerage });
-  const positions = useQuery({ queryKey: ["pos"], queryFn: () => api.positions(), enabled: !brokerage.usingBrokerage });
+  const paperBook = !brokerage.usingBrokerage;
+  const portfolio = useQuery({
+    queryKey: ["port"],
+    queryFn: () => api.portfolio(),
+    enabled: paperBook,
+    staleTime: DESK_STALE_MS,
+  });
+  const positions = useQuery({
+    queryKey: ["pos"],
+    queryFn: () => api.positions(),
+    enabled: paperBook,
+    staleTime: DESK_STALE_MS,
+  });
   const dailyPnl = useQuery({
     queryKey: ["daily-pnl"],
     queryFn: () => api.dailyPnl(),
-    enabled: !brokerage.usingBrokerage,
+    enabled: paperBook,
+    staleTime: DESK_STALE_MS,
+  });
+  // Equity graph and account P&L start with the book so the portfolio page is not a second round trip.
+  useQuery({
+    queryKey: ["pnl-history"],
+    queryFn: () => api.pnlHistory(),
+    enabled: paperBook,
+    staleTime: DESK_STALE_MS,
+  });
+  useQuery({
+    queryKey: ["overall-pnl"],
+    queryFn: () => api.overallPnl(),
+    enabled: paperBook,
+    staleTime: DESK_STALE_MS,
   });
   // Keep the picker on a live expiry for the current underlying. On symbol change
   // applyTicker clears expiry; once the refetch lands, default to the nearest date.
@@ -171,6 +199,56 @@ export function Dashboard() {
       setExpiry(list[0].date);
     }
   }, [expiries.data, expiry, setExpiry]);
+
+  function finishChartMotion() {
+    if (motionDone.current) return;
+    motionDone.current = true;
+    setChartAnimating(false);
+    if (restoreScroll.current) {
+      restoreScroll.current = false;
+      window.scrollTo(0, scrollRef.current);
+    }
+  }
+
+  function requestChartFullscreen(next: boolean) {
+    if (chartAnimating || next === chartFull) return;
+    motionDone.current = false;
+    if (next) {
+      scrollRef.current = window.scrollY;
+      restoreScroll.current = false;
+      window.scrollTo(0, 0);
+    } else {
+      restoreScroll.current = true;
+    }
+    setChartAnimating(true);
+    setChartFull(next);
+  }
+
+  useEffect(() => {
+    const root = deskRef.current;
+    if (!root) return;
+    root.querySelectorAll<HTMLElement>("[data-desk-hide]").forEach((el) => {
+      (el as HTMLElement & { inert: boolean }).inert = chartFull;
+    });
+  }, [chartFull]);
+
+  useEffect(() => {
+    if (!chartAnimating) return;
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const ms = (reduce ? 140 : 520) + 80;
+    const id = window.setTimeout(() => finishChartMotion(), ms);
+    return () => window.clearTimeout(id);
+  }, [chartAnimating, chartFull]);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Escape" || !chartFull || chartAnimating || suggestionsOpen) return;
+      if (cert.selected || showConnectModal) return;
+      requestChartFullscreen(false);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [chartFull, chartAnimating, suggestionsOpen, cert.selected, showConnectModal]);
 
   useMarketSocket({
     token: getAccessToken(),
@@ -219,7 +297,7 @@ export function Dashboard() {
     queries: positionSymbols.map((sym) => ({
       queryKey: ["quote", sym],
       queryFn: () => api.quote(sym),
-      staleTime: 5_000,
+      staleTime: DESK_STALE_MS,
       enabled: displayPositions.length > 0,
     })),
   });
@@ -232,7 +310,7 @@ export function Dashboard() {
     return map;
   }, [positionSymbols, positionQuoteQueries]);
   const dailyBook = !brokerage.usingBrokerage ? (dailyPnl.data?.book ?? null) : null;
-  const latestBook = dailyBook && dailyBook.length > 0 ? dailyBook[dailyBook.length - 1] : undefined;
+  const latestBook = displaySessionDay(dailyBook);
   const seriesReady = dailyBook != null;
   const dayPl = brokerage.usingBrokerage
     ? (brokerage.stats?.day_pnl ?? null)
@@ -240,6 +318,7 @@ export function Dashboard() {
       ? markedPnl(latestBook)
       : (portfolio.data?.day_pl as number | null | undefined);
   const dayPlLabel = seriesReady && markedPnl(latestBook) == null ? "unavailable" : fmt(dayPl);
+  const sessionLabel = latestBook ? formatSessionDate(latestBook.date) : "";
   const dayPct = brokerage.usingBrokerage
     ? brokerage.stats?.day_pnl != null && brokerage.stats.portfolio_value
       ? (brokerage.stats.day_pnl / brokerage.stats.portfolio_value) * 100
@@ -317,19 +396,43 @@ export function Dashboard() {
   const beta5y = f?.beta_5y ?? q?.beta_5y;
 
   return (
-    <div className="min-h-screen" data-testid="dashboard">
+    <div
+      ref={deskRef}
+      className={`desk min-h-screen${chartFull ? " desk--chart-full" : ""}`}
+      data-testid="dashboard"
+      data-chart-fullscreen={chartFull ? "true" : "false"}
+      data-chart-animating={chartAnimating ? "true" : "false"}
+    >
+      <div
+        ref={motionRef}
+        data-desk-motion=""
+        className={`desk-motion-sentinel${chartFull ? " is-full" : ""}`}
+        aria-hidden="true"
+        onTransitionEnd={(e) => {
+          if (e.target !== e.currentTarget || e.propertyName !== "opacity") return;
+          finishChartMotion();
+        }}
+      />
       {user?.connect_later_banner && (
-        <div className="flex items-center justify-between border-b border-line bg-gold/10 px-4 py-2 text-sm" data-testid="connect-banner">
-          <span>Brokerage not connected — paper/demo data is active. Connect anytime.</span>
-          <button className="text-gold" onClick={() => api.dismissBanner().then((u) => setUser(u as typeof user))}>
-            Dismiss
-          </button>
+        <div className="desk-fold-y" data-desk-hide="banner">
+          <div className="desk-fold-clip">
+            <div className="flex items-center justify-between border-b border-line bg-gold/10 px-4 py-2 text-sm" data-testid="connect-banner">
+              <span>Brokerage not connected — paper/demo data is active. Connect anytime.</span>
+              <button className="text-gold" onClick={() => api.dismissBanner().then((u) => setUser(u as typeof user))}>
+                Dismiss
+              </button>
+            </div>
+          </div>
         </div>
       )}
-      <header className="flex items-center justify-between gap-3 border-b border-line px-4 py-3">
+      <header className="desk-header flex items-center border-b border-line px-4 py-3">
+        <div className="desk-fold-x" data-desk-hide="brand">
+          <Link to="/portfolio" className="desk-brand" aria-label="Apex" data-testid="apex-brand">
+            <ApexLogo size={36} className="shrink-0" />
+            <span className="font-display text-xl tracking-[0.2em]">APEX</span>
+          </Link>
+        </div>
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-3">
-        <ApexLogo size={36} className="shrink-0" />
-        <p className="font-display text-xl tracking-[0.2em]">APEX</p>
         <div className="relative">
           <input
             ref={searchInputRef}
@@ -377,12 +480,12 @@ export function Dashboard() {
             onBlur={() => closeSuggestions()}
           />
           {suggestionsOpen && hits.length > 0 && (
-            <ul id="ticker-suggestions" className="absolute z-20 mt-1 max-h-72 w-80 overflow-y-auto rounded-md border border-line bg-panel text-sm" role="listbox">
+            <ul id="ticker-suggestions" className="ticker-suggestions absolute z-20 mt-1 max-h-72 w-80 overflow-y-auto rounded-md border border-line text-sm" role="listbox">
               {hits.map((h, i) => (
                 <li key={h.symbol} id={`ticker-hit-${i}`} role="option" aria-selected={i === highlightIdx}>
                   <button
                     type="button"
-                    className={`w-full px-3 py-1 text-left ${i === highlightIdx ? "bg-gold/20" : "hover:bg-gold/10"}`}
+                    className="ticker-hit"
                     onMouseDown={(e) => {
                       e.preventDefault();
                       applyTicker(h.symbol);
@@ -416,28 +519,34 @@ export function Dashboard() {
           ))}
         </select>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <Link
-            to="/portfolio"
-            className="rounded-md border border-line bg-panel px-3 py-1.5 text-sm text-gold hover:bg-gold/10"
-            data-testid="portfolio-btn"
-          >
-            Portfolio
-          </Link>
-          <SettingsGearLink />
-          <LogoutButton />
+        <div className="desk-fold-x" data-desk-hide="header-tools">
+          <div className="flex shrink-0 items-center gap-2">
+            <Link
+              to="/portfolio"
+              className="rounded-md border border-line bg-panel px-3 py-1.5 text-sm text-gold hover:bg-gold/10"
+              data-testid="portfolio-btn"
+            >
+              Portfolio
+            </Link>
+            <SettingsGearLink />
+            <LogoutButton />
+          </div>
         </div>
       </header>
 
-      <section className="grid grid-cols-3 gap-3 px-4 py-3">
-        <Stat label="Balance" value={stats.balance} testid="stat-balance" />
-        <Stat label="Buying Power" value={stats.buying_power} testid="stat-bp" />
-        <Stat label="Portfolio Value" value={stats.portfolio_value} testid="stat-pv" />
-      </section>
+      <div className="desk-fold-y" data-desk-hide="stats">
+        <div className="desk-fold-clip">
+          <section className="grid grid-cols-3 gap-3 px-4 py-3">
+            <Stat label="Balance" value={stats.balance} testid="stat-balance" />
+            <Stat label="Buying Power" value={stats.buying_power} testid="stat-bp" />
+            <Stat label="Portfolio Value" value={stats.portfolio_value} testid="stat-pv" />
+          </section>
+        </div>
+      </div>
 
-      <div className="grid grid-cols-12 items-stretch gap-3 px-4 pb-3">
+      <div className="desk-stage grid grid-cols-12 items-stretch gap-3 px-4 pb-3">
         <aside
-          className="col-span-12 h-[calc(100dvh-10.75rem)] min-h-[36rem] overflow-auto rounded-xl border border-line bg-panel p-4 lg:col-span-2"
+          className="desk-ticker col-span-12 h-[calc(100dvh-10.75rem)] min-h-[36rem] overflow-auto rounded-xl border border-line bg-panel p-4 lg:col-span-2"
           data-testid="ticker-panel"
         >
           <p className="font-display text-2xl">{activeSymbol}</p>
@@ -485,15 +594,24 @@ export function Dashboard() {
           )}
         </aside>
 
-        <section className="col-span-12 flex flex-col gap-3 lg:col-span-10">
-          <div className="h-[calc(100dvh-9.5rem)] min-h-[42rem]">
-            <TradingViewChart symbol={symbol} timeframe={timeframe} onTimeframeChange={setTimeframe} />
+        <section className="desk-stage-chart col-span-12 flex flex-col gap-3 lg:col-span-10">
+          <div className="desk-chart-slot h-[calc(100dvh-9.5rem)] min-h-[42rem]">
+            <TradingViewChart
+              symbol={symbol}
+              timeframe={timeframe}
+              onTimeframeChange={setTimeframe}
+              fullscreen={chartFull}
+              fullscreenBusy={chartAnimating}
+              onFullscreenToggle={() => requestChartFullscreen(!chartFull)}
+            />
           </div>
+          <div className="desk-fold-y" data-desk-hide="summary">
+            <div className="desk-fold-clip">
           <div className="flex items-center justify-between rounded-xl border border-line bg-panel px-4 py-2.5">
             <div>
               <p className="text-xs uppercase tracking-wider text-bronze">Daily portfolio summary</p>
               <p className="font-mono" data-testid="day-pl-summary">
-                Day P&L {dayPlLabel} · {dayPl == null || dayPct == null ? "—" : `${dayPct.toFixed(2)}%`}
+                {`Day P&L ${dayPlLabel}${sessionLabel ? ` · ${sessionLabel}` : ""} · ${dayPl == null || dayPct == null ? "—" : `${dayPct.toFixed(2)}%`}`}
               </p>
               {dailyBook && dailyBook.length > 0 && (
                 <div className="mt-2" data-testid="book-daily-pnl">
@@ -514,9 +632,13 @@ export function Dashboard() {
               Scan {activeSymbol}
             </button>
           </div>
+            </div>
+          </div>
         </section>
       </div>
 
+      <div className="desk-fold-y" data-desk-hide="drawer">
+        <div className="desk-fold-clip">
       <section className="space-y-3 px-4 pb-10" data-testid="desk-drawer">
         <BrokerageConnectionPanel />
         <div className="rounded-xl border border-line bg-panel">
@@ -697,6 +819,8 @@ export function Dashboard() {
           </div>
         </div>
       </section>
+        </div>
+      </div>
 
       {cert.selected ? (
         <PositionCertificateModal details={cert.selected} onDismiss={cert.dismiss} />
@@ -719,7 +843,11 @@ export function Dashboard() {
         </div>
       )}
 
-      <LegalFooter className="px-4 pb-6" />
+      <div className="desk-fold-y" data-desk-hide="footer">
+        <div className="desk-fold-clip">
+          <LegalFooter className="px-4 pb-6" />
+        </div>
+      </div>
     </div>
   );
 }

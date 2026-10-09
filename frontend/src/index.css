@@ -2804,86 +2804,182 @@ textarea::placeholder {
   background:
     radial-gradient(circle at 50% 0%, rgba(196, 165, 106, 0.1), transparent 55%),
     var(--apex-panel);
-  padding: 1.75rem 1.75rem 1.5rem;
+  padding: 1.75rem;
+}
+
+/* Centered vertical stack shared by every certificate dialog. */
+.order-cert-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  text-align: center;
+  gap: 1.1rem;
+}
+
+.order-cert-stack > .order-cert-header,
+.order-cert-stack > .order-cert-grid,
+.order-cert-stack > .order-cert-legs,
+.order-cert-stack > .order-cert-paper-banner,
+.order-cert-stack > .order-cert-copy,
+.order-cert-stack > .order-cert-lines,
+.order-cert-stack > .order-cert-copy-group,
+.order-cert-stack .sf-panel-note {
+  margin: 0;
 }
 
 .order-cert-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   text-align: center;
-  margin-bottom: 1.25rem;
+  margin-bottom: 0;
+  gap: 0.35rem;
+  width: 100%;
 }
 
 .order-cert-logo {
-  margin: 0 auto 0.5rem;
+  display: block;
+  margin: 0 auto;
 }
 
 .order-cert-eyebrow {
+  display: block;
   margin: 0;
+  width: 100%;
+  text-align: center;
   font-size: 0.65rem;
   letter-spacing: 0.28em;
+  padding-left: 0.28em;
   text-transform: uppercase;
   color: #a78d5d;
 }
 
 .order-cert-title {
-  margin: 0.35rem 0 0;
+  margin: 0;
+  width: 100%;
+  text-align: center;
   font-family: Newsreader, Georgia, serif;
   font-size: 1.75rem;
   font-weight: 500;
+  line-height: 1.2;
   color: var(--apex-text);
 }
 
 .order-cert-status {
-  margin: 0.35rem 0 0;
+  margin: 0;
+  width: 100%;
+  text-align: center;
   font-size: 0.72rem;
   letter-spacing: 0.12em;
+  padding-left: 0.12em;
   text-transform: uppercase;
   color: #c4a56a;
 }
 
+.order-cert-copy,
+.order-cert-lines {
+  width: 100%;
+  margin: 0;
+  text-align: center;
+  font-size: 0.875rem;
+  line-height: 1.65;
+  color: color-mix(in srgb, var(--apex-text) 80%, transparent);
+}
+
+.order-cert-copy.sf-panel-note {
+  color: rgba(206, 191, 156, 0.55);
+  font-size: 0.72rem;
+  line-height: 1.6;
+}
+
+.order-cert-copy-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.45rem;
+  width: 100%;
+  text-align: center;
+}
+
+.order-cert-lines {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.order-cert-lines > li {
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  text-align: center;
+  line-height: 1.65;
+}
+
 .order-cert-grid {
   display: grid;
-  gap: 0.55rem;
-  margin: 0 0 1rem;
+  gap: 0.7rem;
+  width: 100%;
+  margin: 0;
   padding: 0.85rem 1rem;
   border-radius: 0.75rem;
   border: 1px solid var(--apex-line);
   background: var(--apex-cert-grid-bg);
+  text-align: center;
 }
 
 .order-cert-row {
   display: flex;
-  justify-content: space-between;
-  gap: 1rem;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.15rem;
+  width: 100%;
+  text-align: center;
   font-size: 0.82rem;
 }
 
 .order-cert-row dt {
+  width: 100%;
+  text-align: center;
   color: var(--apex-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.08em;
+  padding-left: 0.08em;
   font-size: 0.68rem;
 }
 
 .order-cert-row dd {
+  width: 100%;
   margin: 0;
-  text-align: right;
+  text-align: center;
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   color: var(--apex-text);
 }
 
 .order-cert-ids {
-  max-width: 14rem;
+  max-width: 18rem;
+  margin-inline: auto;
+  text-align: center;
   word-break: break-all;
 }
 
 .order-cert-legs {
-  margin-bottom: 1.1rem;
+  width: 100%;
+  margin: 0;
+  text-align: center;
 }
 
 .order-cert-legs-label {
   margin: 0 0 0.45rem;
+  width: 100%;
+  text-align: center;
   font-size: 0.68rem;
   letter-spacing: 0.12em;
+  padding-left: 0.12em;
   text-transform: uppercase;
   color: #a78d5d;
 }
@@ -2893,31 +2989,60 @@ textarea::placeholder {
   padding: 0;
   list-style: none;
   display: grid;
-  gap: 0.35rem;
+  gap: 0.55rem;
+  width: 100%;
+  justify-items: stretch;
+}
+
+.order-cert-legs li {
+  width: 100%;
+  margin: 0;
+  text-align: center;
 }
 
 .order-cert-leg {
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.35rem 0.5rem;
-  padding: 0.45rem 0.65rem;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.2rem;
+  width: 100%;
+  padding: 0.55rem 0.75rem;
   border-radius: 0.5rem;
   border: 1px solid var(--apex-line);
   background: var(--apex-cert-leg-bg);
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 0.74rem;
+  line-height: 1.45;
+  text-align: center;
   color: var(--apex-text);
 }
 
 .order-cert-leg-side {
   color: #c4a56a;
   font-weight: 600;
+  letter-spacing: 0.08em;
+  padding-left: 0.08em;
 }
 
 .order-cert-leg-fill {
-  margin-left: auto;
+  margin: 0;
+  text-align: center;
   color: rgba(206, 191, 156, 0.65);
+}
+
+.order-cert-actions {
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+  align-items: stretch;
+  gap: 0.5rem;
+  width: 100%;
+}
+
+.order-cert-actions > .order-cert-dismiss {
+  flex: 1 1 0;
+  width: auto;
 }
 
 .order-cert-dismiss {
@@ -2929,6 +3054,7 @@ textarea::placeholder {
   color: var(--apex-btn-on-gold);
   font-size: 0.85rem;
   font-weight: 600;
+  text-align: center;
   cursor: pointer;
   transition: filter 0.15s ease;
 }
@@ -2999,8 +3125,8 @@ textarea::placeholder {
 }
 
 .order-cert-paper-banner {
-  margin: 0 0 0.75rem;
-  padding: 0.35rem 0.75rem;
+  margin: 0;
+  padding: 0.35rem 0.75rem 0.35rem calc(0.75rem + 0.2em);
   border-radius: 0.35rem;
   border: 1px solid rgba(196, 165, 106, 0.45);
   background: rgba(196, 165, 106, 0.12);
@@ -3012,9 +3138,16 @@ textarea::placeholder {
 }
 
 .order-cert-leg-expiry {
-  width: 100%;
+  width: auto;
+  max-width: 100%;
+  margin: 0;
+  text-align: center;
   font-size: 0.68rem;
   color: rgba(206, 191, 156, 0.55);
+}
+
+.order-cert-legs .order-cert-dismiss {
+  margin-top: 0.65rem;
 }
 
 html[data-theme="light"] .order-cert-inner {
@@ -3366,7 +3499,7 @@ html[data-theme="light"] .apex-draw-stroke {
 
 @media (max-width: 720px) {
   .order-cert-inner {
-    padding: 1.25rem 1.15rem 1.1rem;
+    padding: 1.25rem;
   }
 
   .apex-table {
@@ -3387,6 +3520,219 @@ html[data-theme="light"] .apex-draw-stroke {
 
   .order-cert-dismiss {
     display: none;
+  }
+}
+
+/* Options terminal: ticker search rows and chart fullscreen. */
+.desk {
+  position: relative;
+  --desk-dur: 520ms;
+}
+
+.desk-motion-sentinel {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity var(--desk-dur) ease-in-out;
+}
+
+.desk-motion-sentinel.is-full {
+  opacity: 0;
+}
+
+.desk-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding-right: 0.75rem;
+  color: inherit;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.desk-brand:focus-visible {
+  outline: 2px solid var(--apex-focus-ring);
+  outline-offset: 3px;
+  border-radius: 0.25rem;
+}
+
+.desk-fold-x {
+  flex: 0 0 auto;
+  max-width: 28rem;
+  overflow: hidden;
+  opacity: 1;
+  transition:
+    max-width var(--desk-dur) ease-in-out,
+    opacity var(--desk-dur) ease-in-out,
+    margin var(--desk-dur) ease-in-out;
+}
+
+.desk-fold-x[data-desk-hide="header-tools"] {
+  margin-left: 0.75rem;
+}
+
+.desk-fold-y {
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transition:
+    grid-template-rows var(--desk-dur) ease-in-out,
+    opacity var(--desk-dur) ease-in-out;
+}
+
+.desk-fold-clip {
+  overflow: hidden;
+}
+
+.desk-ticker,
+.desk-chart-slot {
+  transition:
+    height var(--desk-dur) ease-in-out,
+    min-height var(--desk-dur) ease-in-out;
+}
+
+.desk--chart-full {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  max-height: 100dvh;
+  overflow: hidden;
+}
+
+.desk--chart-full .desk-fold-x {
+  min-width: 0;
+  max-width: 0;
+  margin-left: 0;
+  margin-right: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.desk--chart-full .desk-fold-y {
+  grid-template-rows: 0fr;
+  min-height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.desk--chart-full .desk-fold-clip {
+  min-height: 0;
+}
+
+.desk--chart-full .desk-stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.desk--chart-full .desk-ticker,
+.desk--chart-full .desk-stage-chart,
+.desk--chart-full .desk-chart-slot,
+.desk--chart-full .apex-chart {
+  height: 100%;
+  min-height: 0;
+}
+
+.desk--chart-full .desk-stage-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.desk--chart-full .desk-chart-slot {
+  flex: 1 1 auto;
+}
+
+.ticker-suggestions {
+  background: var(--apex-panel);
+  color: var(--apex-text);
+}
+
+.ticker-hit {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0.4rem 0.75rem;
+  border: 0;
+  border-left: 2px solid transparent;
+  background: transparent;
+  color: var(--apex-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  opacity: 0.82;
+  transition:
+    background-color 140ms ease,
+    color 140ms ease,
+    border-left-color 140ms ease,
+    opacity 140ms ease;
+}
+
+.ticker-hit:hover,
+.ticker-hit:focus,
+.ticker-hit:focus-visible,
+.ticker-suggestions [role="option"][aria-selected="true"] .ticker-hit {
+  background: var(--apex-row-hover);
+  color: var(--apex-text);
+  border-left-color: var(--apex-gold);
+  opacity: 1;
+  outline: none;
+}
+
+.apex-chart-fullscreen {
+  position: absolute;
+  z-index: 9;
+  top: 0.4rem;
+  right: 0.45rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.85rem;
+  height: 1.85rem;
+  padding: 0;
+  border: 1px solid var(--apex-chart-border);
+  border-radius: 0.4rem;
+  background: var(--apex-panel);
+  color: var(--apex-text);
+  font-size: 1.15rem;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background-color 140ms ease,
+    color 140ms ease,
+    border-color 140ms ease;
+}
+
+.apex-chart-fullscreen:hover,
+.apex-chart-fullscreen:focus-visible {
+  background: var(--apex-row-hover);
+  color: var(--apex-text);
+  border-color: var(--apex-gold);
+  outline: none;
+}
+
+.apex-chart:has(.apex-chart-fullscreen) .apex-chart-toolbar {
+  padding-right: 2.75rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desk {
+    --desk-dur: 140ms;
+  }
+
+  .desk-fold-y,
+  .desk-fold-x,
+  .desk-ticker,
+  .desk-chart-slot,
+  .desk-stage-chart {
+    transition-property: opacity;
+    transition-duration: 140ms;
+    transition-timing-function: ease;
   }
 }
 

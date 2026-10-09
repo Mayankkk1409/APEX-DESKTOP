@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
+import { DESK_STALE_MS } from "../lib/deskRefresh";
 import { displayedOverallTotal } from "../lib/overallPnl";
 import type { OverallPnlRow, PositionRow } from "../types";
 import { useBrokerage } from "./useBrokerage";
@@ -29,6 +30,7 @@ export function useAccountOverallPnl() {
     queryKey: ["overall-pnl"],
     queryFn: () => api.overallPnl(),
     enabled: !usingBrokerage,
+    staleTime: DESK_STALE_MS,
   });
 
   const rows: OverallPnlRow[] = usingBrokerage

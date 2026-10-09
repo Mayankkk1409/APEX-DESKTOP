@@ -22,24 +22,51 @@ export function markedPnl(day: DailyPnlDay | undefined): number | null {
   return day.pnl;
 }
 
+/** Short session label such as Oct 6. Date-only strings stay on that calendar day. */
+export function formatSessionDate(iso: string): string {
+  const [year, month, day] = iso.split("-").map(Number);
+  if (!year || !month || !day) return iso;
+  return new Date(Date.UTC(year, month - 1, day)).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+/**
+ * The one session to show. Prefer the latest day with a numeric P&L.
+ * When every day is unmarked, keep the latest date so the row can say unavailable.
+ */
+export function displaySessionDay(days: DailyPnlDay[] | null | undefined): DailyPnlDay | undefined {
+  if (!days || days.length === 0) return undefined;
+  let latestAny: DailyPnlDay | undefined;
+  let latestMarked: DailyPnlDay | undefined;
+  for (const day of days) {
+    if (!day?.date) continue;
+    if (!latestAny || day.date > latestAny.date) latestAny = day;
+    if (markedPnl(day) != null && (!latestMarked || day.date > latestMarked.date)) {
+      latestMarked = day;
+    }
+  }
+  return latestMarked ?? latestAny;
+}
+
 export function daysForPosition(payload: DailyPnlResponse | undefined, id: string): DailyPnlDay[] | undefined {
   if (!payload) return undefined;
   return payload.positions.find((row) => row.id === id)?.days ?? [];
 }
 
 /**
- * Latest marked session when the series has one.
- * When that session has no price, keep the position unrealized P&L the portfolio already returned.
+ * Dollar P&L for the session {@link displaySessionDay} selects.
+ * When that day has no price, keep the position unrealized P&L the portfolio already returned.
  */
 export function dayPlOrUnrealized(
   days: DailyPnlDay[] | undefined,
   unrealized: number | null | undefined,
 ): number | null {
   if (days === undefined) return null;
-  if (days.length > 0) {
-    const marked = markedPnl(days[days.length - 1]);
-    if (marked != null) return marked;
-  }
+  const marked = markedPnl(displaySessionDay(days));
+  if (marked != null) return marked;
   if (unrealized != null && Number.isFinite(unrealized)) return unrealized;
   return null;
 }

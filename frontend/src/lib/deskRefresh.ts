@@ -11,18 +11,23 @@ type PortfolioSnapshot = {
 
 type OrderList = { orders?: OrderHistoryRow[] };
 
+/** Skip a remount refetch while a fill still forces a fresh read. */
+export const DESK_STALE_MS = 20_000;
+
 /**
  * Pull portfolio, positions, orders, P&L, daily P&L, and the equity graph immediately.
+ * The book, daily P&L, and graph start together — none waits on the others.
  * Inactive portfolio queries are fetched too, so a fill is not waiting on a poll.
  * Missing responses are left untouched — this does not invent bars or P&L.
  */
 export function refreshDeskQueries(qc: QueryClient): void {
-  void qc.fetchQuery({ queryKey: ["port"], queryFn: () => api.portfolio() });
-  void qc.fetchQuery({ queryKey: ["pos"], queryFn: () => api.positions() });
-  void qc.fetchQuery({ queryKey: ["orders"], queryFn: () => api.orderHistory() });
-  void qc.fetchQuery({ queryKey: ["pnl-history"], queryFn: () => api.pnlHistory() });
-  void qc.fetchQuery({ queryKey: ["daily-pnl"], queryFn: () => api.dailyPnl() });
-  void qc.fetchQuery({ queryKey: ["overall-pnl"], queryFn: () => api.overallPnl() });
+  const fresh = { staleTime: 0 };
+  void qc.fetchQuery({ queryKey: ["port"], queryFn: () => api.portfolio(), ...fresh });
+  void qc.fetchQuery({ queryKey: ["pos"], queryFn: () => api.positions(), ...fresh });
+  void qc.fetchQuery({ queryKey: ["orders"], queryFn: () => api.orderHistory(), ...fresh });
+  void qc.fetchQuery({ queryKey: ["pnl-history"], queryFn: () => api.pnlHistory(), ...fresh });
+  void qc.fetchQuery({ queryKey: ["daily-pnl"], queryFn: () => api.dailyPnl(), ...fresh });
+  void qc.fetchQuery({ queryKey: ["overall-pnl"], queryFn: () => api.overallPnl(), ...fresh });
   void qc.invalidateQueries({ queryKey: ["brokerage"], refetchType: "all" });
 }
 

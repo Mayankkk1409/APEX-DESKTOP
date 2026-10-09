@@ -179,7 +179,7 @@ describe("Dashboard paper vs brokerage isolation", () => {
     expect(html).not.toContain("AAPL");
   });
 
-  it("shows every daily P&L point for an open position, including an unavailable day", () => {
+  it("shows only the latest marked daily P&L for an open position", () => {
     const qc = createTestQueryClient();
     qc.setQueryData(["brokerage", "accounts"], { connection_status: null, accounts: [] });
     qc.setQueryData(["quote", "SPX"], { symbol: "SPX", name: "S&P 500", price: 5000 });
@@ -215,13 +215,16 @@ describe("Dashboard paper vs brokerage isolation", () => {
     );
 
     expect(html).toContain('data-testid="position-daily-row-p1"');
-    expect(html).toContain('data-date="2026-10-01"');
     expect(html).toContain('data-date="2026-10-02"');
-    expect(html).toContain('data-date="2026-10-05"');
-    expect(html).toContain("+$12.5");
+    expect(html).toContain("Oct 2");
     expect(html).toContain("-$4");
-    expect(html).toContain("unavailable");
+    expect(html).not.toContain('data-date="2026-10-01"');
+    expect(html).not.toContain('data-date="2026-10-05"');
+    expect(html).not.toContain("+$12.5");
+    expect(html).not.toContain("unavailable");
     expect(html).toContain('data-testid="book-daily-pnl"');
+    expect(html).toContain("Day P&amp;L -4 · Oct 2");
+    expect(html.match(/data-date=/g)).toHaveLength(2);
     expect(html).toContain("100");
   });
 

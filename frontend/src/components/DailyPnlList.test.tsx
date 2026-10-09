@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { DailyPnlList, PositionDailyPnl } from "./DailyPnlList";
-import { dayPlOrUnrealized, type DailyPnlDay } from "../lib/dailyPnl";
+import { dayPlOrUnrealized, displaySessionDay, type DailyPnlDay } from "../lib/dailyPnl";
 
 const days: DailyPnlDay[] = [
   { date: "2026-10-01", pnl: 12.5, status: "marked" },
@@ -10,21 +10,38 @@ const days: DailyPnlDay[] = [
 ];
 
 describe("PositionDailyPnl", () => {
-  it("renders each daily value and labels a missing day unavailable", () => {
+  it("renders only the latest day that has a dollar P&L", () => {
     const html = renderToStaticMarkup(<PositionDailyPnl symbol="AAPL" days={days} />);
     expect(html).toContain("AAPL daily P/L");
-    expect(html).toContain('data-date="2026-10-01"');
     expect(html).toContain('data-date="2026-10-02"');
-    expect(html).toContain('data-date="2026-10-05"');
-    expect(html).toContain("+$12.5");
+    expect(html).toContain("Oct 2");
     expect(html).toContain("-$4");
-    const missing = html.match(/data-date="2026-10-05"[\s\S]*?<\/li>/);
-    expect(missing?.[0]).toContain("unavailable");
-    expect(missing?.[0]).toContain('data-status="unavailable"');
-    expect(missing?.[0]).not.toMatch(/\$/);
+    expect(html).not.toContain('data-date="2026-10-01"');
+    expect(html).not.toContain('data-date="2026-10-05"');
+    expect(html).not.toContain("+$12.5");
+    expect(html).not.toContain("unavailable");
+    expect(html.match(/data-date=/g)).toHaveLength(1);
   });
 
-  it("does not drop a day or replace a missing mark with zero", () => {
+  it("shows the latest date as unavailable when no day has a price", () => {
+    const html = renderToStaticMarkup(
+      <DailyPnlList
+        days={[
+          { date: "2026-10-05", pnl: null, status: "unavailable" },
+          { date: "2026-10-06", pnl: null, status: "unavailable" },
+        ]}
+      />,
+    );
+    expect(html).toContain('data-date="2026-10-06"');
+    expect(html).toContain("Oct 6");
+    expect(html).not.toContain('data-date="2026-10-05"');
+    expect(html).toContain("unavailable");
+    expect(html).not.toContain("$0");
+    expect(html).not.toContain("+$0");
+    expect(html.match(/data-date=/g)).toHaveLength(1);
+  });
+
+  it("does not replace a single missing mark with zero", () => {
     const html = renderToStaticMarkup(<DailyPnlList days={[{ date: "2026-10-06", pnl: null, status: "unavailable" }]} />);
     expect(html).toContain('data-date="2026-10-06"');
     expect(html).toContain("unavailable");
@@ -33,9 +50,21 @@ describe("PositionDailyPnl", () => {
   });
 });
 
+describe("displaySessionDay", () => {
+  it("picks the latest numeric day and otherwise the latest date", () => {
+    expect(displaySessionDay(days)?.date).toBe("2026-10-02");
+    expect(
+      displaySessionDay([
+        { date: "2026-10-05", pnl: null, status: "unavailable" },
+        { date: "2026-10-06", pnl: null, status: "unavailable" },
+      ])?.date,
+    ).toBe("2026-10-06");
+  });
+});
+
 describe("dayPlOrUnrealized", () => {
-  it("uses the latest marked session", () => {
-    expect(dayPlOrUnrealized(days.slice(0, 2), 999)).toBe(-4);
+  it("uses the latest day that has a dollar P&L", () => {
+    expect(dayPlOrUnrealized(days, 999)).toBe(-4);
   });
 
   it("keeps unrealized P&L when the latest session has no price", () => {
