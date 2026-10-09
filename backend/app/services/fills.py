@@ -184,11 +184,13 @@ async def _submit_for_fill(
 
 
 async def refresh_portfolio_value(user: User, db: AsyncSession, adapter: Any) -> float:
+    from app.services.daily_pnl import quotes_for_positions
+
     positions = (await db.scalars(select(Position).where(Position.user_id == user.id))).all()
+    quotes = await quotes_for_positions(list(positions), adapter)
     live_value = user.cash_balance
-    for pos in positions:
-        q = await adapter.quote(pos.symbol)
-        if q.price is not None and not _option_quote_is_equity_fallback(pos.symbol, q):
+    for pos, q in zip(positions, quotes):
+        if q is not None and q.price is not None and not _option_quote_is_equity_fallback(pos.symbol, q):
             pos.current_price = q.price
         mult = position_multiplier(pos.asset_class)
         live_value += pos.qty * pos.current_price * mult
@@ -256,7 +258,7 @@ async def execute_market_fill(
     cost = estimate_order_cost(qty, px, asset_class=asset_class, multiplier=mult)  # type: ignore[arg-type]
     impact = account_impact(side, cost)
     if side == "buy" and cost > user.buying_power and not closing:
-        raise ValueError("Insufficient buying power")
+        raise ValueError("Insufficient buying power. The account cannot cover the order.")
 
     order = Order(
         user_id=user.id,
@@ -817,7 +819,9 @@ async def _execute_combo(
     mult = position_multiplier("us_option")
     cost = estimate_order_cost(qty, limit, asset_class="us_option", multiplier=mult)
     if side == "buy" and cost > user.buying_power:
-        raise ComboHeldBack("Insufficient buying power. No short leg was submitted.")
+        raise ComboHeldBack(
+            "Insufficient buying power. The account cannot cover the order. No short leg was submitted."
+        )
 
     payload = {
         "symbol": combo_symbol,

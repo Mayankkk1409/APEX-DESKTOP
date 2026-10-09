@@ -145,7 +145,7 @@ export function OrderConfirmationCertificate(props: Props) {
         className="order-cert-card w-full max-w-lg"
       >
         <div className="order-cert-frame">
-          <div className="order-cert-inner">
+          <div className="order-cert-inner order-cert-stack">
             {isPaper ? (
               <p
                 className="order-cert-paper-banner"
@@ -176,7 +176,7 @@ export function OrderConfirmationCertificate(props: Props) {
 
             {isExpiry ? (
               <>
-                <p className="sf-panel-note" data-testid="expiry-notice-copy">
+                <p className="order-cert-copy sf-panel-note" data-testid="expiry-notice-copy">
                   {EXPIRY_AUTO_CLOSE_NOTICE}
                 </p>
                 <div className="order-cert-legs" data-testid="expiry-notice-list">
@@ -323,13 +323,13 @@ export function OrderConfirmationCertificate(props: Props) {
             />
 
             {breakevenNote ? (
-              <p className="sf-panel-note mt-2" data-testid="position-cert-breakeven-iv-note">
+              <p className="order-cert-copy sf-panel-note" data-testid="position-cert-breakeven-iv-note">
                 {breakevenNote}
               </p>
             ) : null}
 
             {isPosition && props.variant === "position" && props.onClosePosition ? (
-              <div className="flex gap-2">
+              <div className="order-cert-actions">
                 <button
                   type="button"
                   className="order-cert-dismiss order-cert-dismiss-secondary flex-1"

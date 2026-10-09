@@ -8,8 +8,11 @@ position that does have a mark.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
+from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -18,6 +21,11 @@ from app.services.occ_symbol import parse_occ
 
 _NY = ZoneInfo("America/New_York")
 _CENT = Decimal("0.01")
+# Daily closes do not tick. A short process cache keeps a desk refresh from
+# repeating the Yahoo/Alpaca history round trip for every position.
+_CLOSE_TTL_SECONDS = 60.0
+_close_cache: dict[str, tuple[float, dict[date, float]]] = {}
+_close_inflight: dict[str, asyncio.Task[dict[date, float]]] = {}
 
 
 def _money(amount: Decimal) -> float:
@@ -360,6 +368,143 @@ def _carry_last_close(closes: dict[date, float], today: date) -> None:
         closes[today] = last
 
 
+def clear_daily_mark_cache() -> None:
+    """Drop in-process session closes. Tests use this so one case cannot feed the next."""
+    _close_cache.clear()
+    _close_inflight.clear()
+
+
+def _cache_key(symbol: str, today: date) -> str:
+    return f"{symbol.upper()}|{today.isoformat()}"
+
+
+def _cached_closes(symbol: str, today: date) -> dict[date, float] | None:
+    key = _cache_key(symbol, today)
+    hit = _close_cache.get(key)
+    if hit is None:
+        return None
+    stored_at, closes = hit
+    if time.monotonic() - stored_at > _CLOSE_TTL_SECONDS:
+        _close_cache.pop(key, None)
+        return None
+    return dict(closes)
+
+
+def _remember_closes(symbol: str, today: date, closes: dict[date, float]) -> None:
+    if not closes:
+        return
+    _close_cache[_cache_key(symbol, today)] = (time.monotonic(), dict(closes))
+
+
+def cached_mark(symbol: str, *, as_of: date | None = None) -> float | None:
+    """Today's cached session close, when a recent daily P&L build stored one."""
+    today = as_of or datetime.now(_NY).date()
+    closes = _cached_closes(symbol, today)
+    if not closes:
+        return None
+    price = closes.get(today)
+    if price is None or price <= 0:
+        return None
+    return price
+
+
+def _cached_quote(symbol: str, price: float) -> SimpleNamespace:
+    option = parse_occ(symbol) is not None
+    return SimpleNamespace(
+        price=price,
+        change=None,
+        change_pct=None,
+        status="live",
+        source="session close",
+        asset_class="us_option" if option else "us_equity",
+    )
+
+
+async def quotes_for_positions(positions: list[Any], adapter: Any) -> list[Any]:
+    """One quote per position. A fresh cached close skips another vendor round trip.
+
+    Symbols without a cached close are requested together.
+    """
+    if not positions:
+        return []
+    needed: list[tuple[int, Any]] = []
+    out: list[Any] = [None] * len(positions)
+    for index, pos in enumerate(positions):
+        mark = cached_mark(getattr(pos, "symbol", ""))
+        if mark is not None:
+            out[index] = _cached_quote(str(pos.symbol), mark)
+        else:
+            needed.append((index, pos))
+    if needed:
+        live = await asyncio.gather(*(adapter.quote(pos.symbol) for _, pos in needed))
+        for (index, _), quote in zip(needed, live):
+            out[index] = quote
+    return out
+
+
+async def _fetch_closes(
+    *,
+    symbol: str,
+    opened: date,
+    today: date,
+    stored_mark: float | None,
+    adapter: Any,
+    prefetched: dict[str, list[dict]],
+) -> dict[date, float]:
+    bars = prefetched.get(symbol)
+    if not bars:
+        bars = await _vendor_bars(adapter, symbol, opened, today)
+    closes = closes_by_session(bars)
+    need_today = closes.get(today) is None
+    need_prior = opened < today and _previous_weekday(today) not in closes
+    if need_today or need_prior:
+        quote = await _live_quote(adapter, symbol)
+        live = _usable_live_mark(symbol, quote)
+        previous = _quote_previous_close(live, quote) if live is not None and quote is not None else None
+        _fill_gaps(closes, today=today, price=live, previous=previous if need_prior else None)
+    if closes.get(today) is None:
+        _fill_gaps(closes, today=today, price=stored_mark, previous=None)
+    if opened < today:
+        _carry_last_close(closes, today)
+    if closes:
+        _remember_closes(symbol, today, closes)
+    return closes
+
+
+async def _closes_for_symbol(
+    *,
+    symbol: str,
+    opened: date,
+    today: date,
+    stored_mark: float | None,
+    adapter: Any,
+    prefetched: dict[str, list[dict]],
+) -> dict[date, float]:
+    key = _cache_key(symbol, today)
+    cached = _cached_closes(symbol, today)
+    if cached is not None:
+        return cached
+    inflight = _close_inflight.get(key)
+    if inflight is not None:
+        return dict(await inflight)
+    task = asyncio.create_task(
+        _fetch_closes(
+            symbol=symbol,
+            opened=opened,
+            today=today,
+            stored_mark=stored_mark,
+            adapter=adapter,
+            prefetched=prefetched,
+        )
+    )
+    _close_inflight[key] = task
+    try:
+        return dict(await task)
+    finally:
+        if _close_inflight.get(key) is task:
+            _close_inflight.pop(key, None)
+
+
 async def assemble_daily_pnl(
     positions: list[Position],
     adapter: Any,
@@ -369,33 +514,49 @@ async def assemble_daily_pnl(
     """Daily series for each open position and the book. No synthetic prices."""
     today = as_of or datetime.now(_NY).date()
     open_positions = [pos for pos in positions if pos.qty != 0]
-    option_symbols = [pos.symbol for pos in open_positions if parse_occ(pos.symbol) is not None]
-    prefetched = await _prefetch_option_bars(adapter, option_symbols)
+    prepared = [
+        {
+            "id": pos.id,
+            "symbol": pos.symbol,
+            "key": pos.symbol.upper(),
+            "opened": _opened_session(pos.created_at, today),
+            "qty": float(pos.qty),
+            "multiplier": int(pos.multiplier),
+            "avg_cost": entry_basis(pos),
+            "stored": position_stored_mark(pos),
+            "option": parse_occ(pos.symbol) is not None,
+        }
+        for pos in open_positions
+    ]
+    missing_options = [
+        item["symbol"] for item in prepared if item["option"] and _cached_closes(item["key"], today) is None
+    ]
+    prefetch = asyncio.create_task(_prefetch_option_bars(adapter, missing_options)) if missing_options else None
+
+    async def one(item: dict) -> dict[date, float]:
+        if _cached_closes(item["key"], today) is not None:
+            snaps: dict[str, list[dict]] = {}
+        else:
+            snaps = await prefetch if prefetch is not None and item["option"] else {}
+        return await _closes_for_symbol(
+            symbol=item["key"],
+            opened=item["opened"],
+            today=today,
+            stored_mark=item["stored"],
+            adapter=adapter,
+            prefetched=snaps,
+        )
+
+    closes_list = await asyncio.gather(*(one(item) for item in prepared))
     rows: list[dict] = []
-    for pos in open_positions:
-        opened = _opened_session(pos.created_at, today)
-        symbol = pos.symbol.upper()
-        cached = prefetched.get(symbol)
-        bars = cached if cached else await _vendor_bars(adapter, pos.symbol, opened, today)
-        closes = closes_by_session(bars)
-        need_today = closes.get(today) is None
-        need_prior = opened < today and _previous_weekday(today) not in closes
-        if need_today or need_prior:
-            quote = await _live_quote(adapter, pos.symbol)
-            live = _usable_live_mark(pos.symbol, quote)
-            previous = _quote_previous_close(live, quote) if live is not None and quote is not None else None
-            _fill_gaps(closes, today=today, price=live, previous=previous if need_prior else None)
-        if closes.get(today) is None:
-            _fill_gaps(closes, today=today, price=position_stored_mark(pos), previous=None)
-        if opened < today:
-            _carry_last_close(closes, today)
+    for item, closes in zip(prepared, closes_list):
         days = position_daily_pnl(
-            opened_on=opened,
+            opened_on=item["opened"],
             as_of=today,
-            avg_cost=entry_basis(pos),
-            qty=float(pos.qty),
-            multiplier=int(pos.multiplier),
+            avg_cost=item["avg_cost"],
+            qty=item["qty"],
+            multiplier=item["multiplier"],
             closes=closes,
         )
-        rows.append({"id": pos.id, "symbol": pos.symbol, "days": days})
+        rows.append({"id": item["id"], "symbol": item["symbol"], "days": days})
     return {"positions": rows, "book": book_daily_pnl([row["days"] for row in rows])}
