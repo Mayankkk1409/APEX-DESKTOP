@@ -111,8 +111,8 @@ export function ChartOverlay({
             textAnchor="end"
             fill="#131722"
             fontSize={9}
-            fontFamily="Trebuchet MS, IBM Plex Sans, system-ui, sans-serif"
-            fontWeight={600}
+            fontFamily="IBM Plex Mono, ui-monospace, monospace"
+            fontWeight={400}
           >
             {t.v.toFixed(2)}
           </text>
