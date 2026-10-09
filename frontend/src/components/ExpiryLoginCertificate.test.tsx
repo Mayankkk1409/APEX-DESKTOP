@@ -9,7 +9,6 @@ import {
 } from "../lib/expiryLoginNotice";
 
 const escape = vi.fn((_active: boolean, _onClose: () => void) => undefined);
-const trap = vi.fn((_active: boolean) => ({ current: null }));
 
 vi.mock("framer-motion", () => ({
   motion: {
@@ -27,7 +26,7 @@ vi.mock("framer-motion", () => ({
 }));
 
 vi.mock("../hooks/useFocusTrap", () => ({
-  useFocusTrap: (active: boolean) => trap(active),
+  useFocusTrap: () => ({ current: null }),
   useEscapeKey: (active: boolean, onClose: () => void) => escape(active, onClose),
 }));
 
@@ -45,27 +44,30 @@ const row: ExpiryLoginRow = {
 describe("ExpiryLoginCertificate", () => {
   it("still shows the certificate when no position expires inside the window", () => {
     escape.mockClear();
-    trap.mockClear();
     const html = renderToStaticMarkup(
       <ExpiryLoginCertificate items={[]} isPaper onDismiss={() => undefined} />,
     );
     expect(html).toContain('role="dialog"');
     expect(html).toContain('aria-labelledby="expiry-login-title"');
+    expect(html).toContain('aria-modal="false"');
     expect(html).toContain("expiry-login-card");
+    expect(html).toContain("pointer-events-none");
+    expect(html).toContain("pointer-events-auto");
     expect(html).toContain("expiry-login-body");
     expect(html).not.toMatch(/min-h-screen|h-screen|100vh|flex-grow|flex-1/);
     expect(html).toContain("Expiring positions");
     expect(html).toContain(EXPIRY_LOGIN_NONE);
     expect(html).toContain('data-testid="expiry-login-empty"');
+    expect(html).toContain('data-testid="expiry-login-close"');
+    expect(html).toContain(">Close<");
     expect(html).not.toContain("AAPL");
     expect(html).not.toContain('data-testid="expiry-login-list"');
-    expect(trap).toHaveBeenCalledWith(true);
+    expect(html).not.toContain("expiry-login-hold");
     expect(escape).toHaveBeenCalledWith(true, expect.any(Function));
   });
 
   it("renders one labelled dialog with the contract row and the 16:00 New York close", () => {
     escape.mockClear();
-    trap.mockClear();
     const onDismiss = () => undefined;
     const html = renderToStaticMarkup(
       <ExpiryLoginCertificate items={[row]} isPaper onDismiss={onDismiss} />,
@@ -83,7 +85,6 @@ describe("ExpiryLoginCertificate", () => {
     expect(html).toContain('data-testid="expiry-login-direction-pos-1">Long<');
     expect(html).toContain('data-testid="expiry-login-settles-pos-1">APEX auto-close<');
     expect(html).not.toContain(EXPIRY_LOGIN_BROKER_SETTLES);
-    expect(trap).toHaveBeenCalledWith(true);
     expect(escape).toHaveBeenCalledWith(true, onDismiss);
   });
 

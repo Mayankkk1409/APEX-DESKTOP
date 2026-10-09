@@ -2791,11 +2791,15 @@ textarea::placeholder {
   filter: drop-shadow(0 0 40px rgba(196, 165, 106, 0.14));
 }
 
-/* Sign-in reminder: a compact centered dialog. The backdrop covers the page;
-   the card does not grow to the viewport. Long copy scrolls in the body. */
+/* Sign-in reminder: a compact centered dialog. Clicks pass through the
+   backdrop so Logout and the rest of the desk stay usable. The card does not
+   grow to the viewport. Long copy scrolls in the body. */
 .expiry-login-backdrop {
   align-items: center;
   justify-content: center;
+  pointer-events: none;
+  background: transparent;
+  backdrop-filter: none;
 }
 
 .expiry-login-card {
@@ -2805,6 +2809,7 @@ textarea::placeholder {
   height: auto;
   min-height: 0;
   max-height: calc(100dvh - 2rem);
+  pointer-events: auto;
 }
 
 .expiry-login-frame,

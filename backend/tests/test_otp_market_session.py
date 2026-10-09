@@ -311,8 +311,20 @@ async def test_second_login_on_loopback_skips_the_code(
         assert len(sent) == 1
         jar = _cookie_jar(login)
         assert DEVICE_COOKIE in jar
+        device_headers = [
+            header for header in login.headers.get_list("set-cookie") if header.startswith(f"{DEVICE_COOKIE}=")
+        ]
+        assert len(device_headers) == 1
+        device_header = device_headers[0].lower()
+        assert "secure" not in device_header
+        assert "httponly" in device_header
+        assert "samesite=strict" in device_header
+        assert "path=/" in device_header
         assert not jar[DEVICE_COOKIE]["secure"]
         assert jar[DEVICE_COOKIE]["httponly"]
+        stored = jar[DEVICE_COOKIE].value
+        client.cookies.clear()
+        client.cookies.set(DEVICE_COOKIE, stored)
         verify = await client.post("/auth/otp/verify", json={"username": "loopback", "code": sent[0]["code"]})
         assert verify.status_code == 200, verify.text
         again = await client.post("/auth/login", json={"username": "loopback", "password": _PASSWORD})

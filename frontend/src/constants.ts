@@ -29,8 +29,10 @@ export const API_BASE =
     ? browserApiBase(import.meta.env.VITE_API_BASE_URL, location.origin)
     : (import.meta.env.VITE_API_BASE_URL ?? "");
 export const WS_BASE =
-  import.meta.env.VITE_WS_BASE_URL ??
-  `${typeof location !== "undefined" && location.protocol === "https:" ? "wss" : "ws"}://${typeof location !== "undefined" ? location.host : "localhost:5173"}`;
+  typeof location !== "undefined"
+    ? browserApiBase(import.meta.env.VITE_WS_BASE_URL, location.origin) ||
+      `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`
+    : (import.meta.env.VITE_WS_BASE_URL ?? "");
 export const DEFAULT_SYMBOL = "SPX";
 
 // TODO(legal-review): disclaimer text pending legal review

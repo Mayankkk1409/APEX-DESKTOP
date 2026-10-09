@@ -1,5 +1,5 @@
 import { motion, useReducedMotion } from "framer-motion";
-import { useEscapeKey, useFocusTrap } from "../hooks/useFocusTrap";
+import { useEscapeKey } from "../hooks/useFocusTrap";
 import {
   EXPIRY_LOGIN_NONE,
   expiryLoginNotes,
@@ -17,25 +17,23 @@ type Props = {
 };
 
 export function ExpiryLoginCertificate({ items, isPaper, onDismiss }: Props) {
-  const trapRef = useFocusTrap(true);
   useEscapeKey(true, onDismiss);
   const reduceMotion = useReducedMotion();
   const notes = expiryLoginNotes(items, isPaper);
 
   return (
     <div
-      ref={trapRef}
-      className="order-cert-backdrop expiry-login-backdrop fixed inset-0 z-[60] flex items-center justify-center p-4"
+      className="expiry-login-backdrop pointer-events-none fixed inset-0 z-[60] flex items-center justify-center p-4"
       data-testid="expiry-login-certificate"
       role="dialog"
       aria-labelledby="expiry-login-title"
-      aria-modal="true"
+      aria-modal="false"
     >
       <motion.div
         initial={reduceMotion ? false : { opacity: 0, scale: 0.96, y: 12 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         transition={reduceMotion ? { duration: 0 } : { duration: 0.35, ease: [0.22, 0.82, 0.2, 1] }}
-        className="order-cert-card expiry-login-card"
+        className="order-cert-card expiry-login-card pointer-events-auto"
       >
         <div className="order-cert-frame expiry-login-frame">
           <div className="order-cert-inner order-cert-stack expiry-login-inner">
@@ -122,8 +120,8 @@ export function ExpiryLoginCertificate({ items, isPaper, onDismiss }: Props) {
               )}
             </div>
 
-            <button type="button" className="order-cert-dismiss" data-testid="expiry-login-dismiss" onClick={onDismiss}>
-              Dismiss
+            <button type="button" className="order-cert-dismiss" data-testid="expiry-login-close" onClick={onDismiss}>
+              Close
             </button>
           </div>
         </div>
