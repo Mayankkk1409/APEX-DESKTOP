@@ -17,7 +17,7 @@ import re
 import smtplib
 import tempfile
 from email.message import EmailMessage
-from email.utils import parseaddr
+from email.utils import formatdate, parseaddr
 from pathlib import Path
 
 from loguru import logger
@@ -146,10 +146,10 @@ def render_transactional_email(*, title: str, preheader: str, rows_html: str) ->
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="{safe_preheader}">
 <title>{safe_title}</title>
 </head>
 <body style="margin:0;padding:24px 12px;background:#f4f2ee;">
-<div style="display:none;max-height:0;overflow:hidden;font-size:1px;line-height:1px;color:#f4f2ee;">{safe_preheader}</div>
 <table role="presentation" align="center" width="600" cellpadding="0" cellspacing="0" style="width:100%;max-width:600px;border-collapse:collapse;background:#ffffff;border:1px solid #e3dfd6;">
 <tr>
 <td colspan="2" align="center" style="padding:28px 32px;background:#111111;text-align:center;">{logo}</td>
@@ -358,9 +358,13 @@ def _compose(subject: str, recipient: str, settings: Settings, plain: str, html_
     message["Subject"] = subject
     message["From"] = settings.smtp_from.strip()
     message["To"] = recipient
+    message["Date"] = formatdate(localtime=False)
     message.set_content(plain)
     message.add_alternative(html_body, subtype="html")
-    _attach_inline_logo(message)
+    try:
+        _attach_inline_logo(message)
+    except Exception as exc:
+        logger.warning("logo attach skipped class={}", type(exc).__name__)
     return message
 
 
@@ -487,15 +491,12 @@ def _deliver_login_code(settings: Settings, *, full_name: str, email: str, code:
 async def send_login_code(settings: Settings, *, full_name: str, email: str, code: str) -> bool:
     """Email a sign-in code with the same SMTP settings as the signup letter."""
     try:
-        return await asyncio.wait_for(
-            asyncio.to_thread(
-                _deliver_login_code,
-                settings,
-                full_name=full_name,
-                email=email,
-                code=code,
-            ),
-            timeout=30,
+        return await asyncio.to_thread(
+            _deliver_login_code,
+            settings,
+            full_name=full_name,
+            email=email,
+            code=code,
         )
     except Exception:
         logger.warning(_LOGIN_NOT_SENT)
