@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
@@ -8,6 +9,7 @@ from starlette.websockets import WebSocketState
 from app.config import get_settings
 from app.security import decode_token
 from app.services.live_quotes import get_live_quote
+from app.services.login_verification import access_verification_current
 from app.ws.hub import hub
 
 router = APIRouter()
@@ -42,6 +44,8 @@ async def market_ws(ws: WebSocket) -> None:
     if token:
         try:
             payload = decode_token(settings, token)
+            if not access_verification_current(payload, datetime.now(timezone.utc)):
+                raise ValueError("verification expired")
             user_id = str(payload.get("sub") or "anon")
         except Exception:
             # Accept first so the Vite proxy gets a close frame instead of a reset (EPIPE).

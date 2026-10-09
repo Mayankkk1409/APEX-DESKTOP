@@ -43,6 +43,7 @@ export function connectMarketSocket(opts: {
   url: string;
   getSymbols?: () => string[];
   onMessage: (msg: MarketSocketMessage) => void;
+  onState?: (connected: boolean) => void;
   /** In-memory access token. A 4401 reconnects only when this has changed. */
   getToken?: () => string | null;
   urlForToken?: (token: string) => string;
@@ -86,6 +87,7 @@ export function connectMarketSocket(opts: {
     ws.onopen = () => {
       if (stopped || socket !== ws) return;
       attempt = 0;
+      opts.onState?.(true);
       const symbols = (opts.getSymbols?.() ?? []).filter(Boolean);
       if (symbols.length) send(JSON.stringify({ type: "subscribe", symbols }));
     };
@@ -110,7 +112,10 @@ export function connectMarketSocket(opts: {
     };
 
     ws.onclose = (ev) => {
-      if (socket === ws) socket = null;
+      if (socket === ws) {
+        socket = null;
+        opts.onState?.(false);
+      }
       const code = ev?.code ?? 1006;
       const nextToken = opts.getToken?.() ?? null;
       if (

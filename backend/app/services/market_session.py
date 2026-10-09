@@ -82,6 +82,11 @@ def _session_day(day: date) -> bool:
     return day.weekday() < 5 and day not in NYSE_HOLIDAYS
 
 
+def is_trading_day(day: date) -> bool:
+    """Weekday that is not on the NYSE full-day holiday list. Early closes still count."""
+    return _session_day(day)
+
+
 def getLastMarketOpen(now: datetime) -> datetime:
     """Return the latest regular NYSE open at or before ``now``.
 

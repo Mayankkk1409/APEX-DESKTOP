@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime, time, timezone
+
 from fastapi import APIRouter, Depends, Query
+
+from app.services.market_session import NY, OPEN, getLastMarketOpen, is_trading_day
 
 from app.services.live_quotes import get_live_fundamentals, get_live_quote
 from app.services.article_reader import fetch_article_content
@@ -12,6 +16,30 @@ from app.deps import get_adapter
 from app.analysis.indicators import compute_all, historical_vol
 
 router = APIRouter(prefix="/market", tags=["market"])
+_REGULAR_CLOSE = time(16, 0)
+
+
+@router.get("/session")
+async def market_session() -> dict:
+    """NYSE regular-session status from the server clock and the holiday list."""
+    now = datetime.now(timezone.utc)
+    last_open = getLastMarketOpen(now)
+    local = now.astimezone(NY)
+    trading_day = is_trading_day(local.date())
+    clock = local.time()
+    if trading_day and OPEN <= clock < _REGULAR_CLOSE:
+        phase = "open"
+    elif trading_day and clock < OPEN:
+        phase = "pre-open"
+    else:
+        phase = "closed"
+    return {
+        "phase": phase,
+        "trading_day": trading_day,
+        "as_of": now.isoformat(),
+        "last_open": last_open.isoformat(),
+        "timezone": "America/New_York",
+    }
 
 
 @router.get("/search")

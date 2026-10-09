@@ -17,7 +17,7 @@ import re
 import smtplib
 import tempfile
 from email.message import EmailMessage
-from email.utils import formatdate, parseaddr
+from email.utils import formatdate, make_msgid, parseaddr
 from pathlib import Path
 
 from loguru import logger
@@ -360,11 +360,19 @@ def _attach_inline_logo(message: EmailMessage) -> None:
     )
 
 
+def _drop_mime_version(part: EmailMessage) -> None:
+    """MIME-Version belongs on the root only. A copy on a subpart hides the body."""
+    if "MIME-Version" in part:
+        del part["MIME-Version"]
+
+
 def _compose(subject: str, recipient: str, settings: Settings, plain: str, html_body: str) -> EmailMessage:
     """Related root, alternative inside it, logo inline on that related part.
 
-    Nesting the image under the HTML alternative makes some clients offer the
-    PNG as a download and skip the HTML, so the sign-in code never appears.
+    The root names the alternative as its body (``type=multipart/alternative``).
+    Without that, clients show the PNG as a download and skip the HTML, so the
+    sign-in code never appears. Nesting the image under the HTML alternative
+    does the same thing. MIME-Version stays on the root only.
     """
     alternative = EmailMessage()
     alternative.set_content(plain, cte=_transfer_encoding(plain))
@@ -374,12 +382,20 @@ def _compose(subject: str, recipient: str, settings: Settings, plain: str, html_
     message["From"] = settings.smtp_from.strip()
     message["To"] = recipient
     message["Date"] = formatdate(localtime=False)
+    message["Message-ID"] = make_msgid(domain="gmail.com")
+    message["MIME-Version"] = "1.0"
     message.make_related()
+    message.set_param("type", "multipart/alternative")
     message.attach(alternative)
     try:
         _attach_inline_logo(message)
     except Exception as exc:
         logger.warning("logo attach skipped class={}", type(exc).__name__)
+    for part in message.iter_parts():
+        _drop_mime_version(part)
+        if part.is_multipart():
+            for child in part.iter_parts():
+                _drop_mime_version(child)
     return message
 
 

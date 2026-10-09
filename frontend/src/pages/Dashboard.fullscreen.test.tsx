@@ -59,7 +59,7 @@ describe("Options terminal chrome", () => {
   it("sends the logo and the Apex word to the portfolio route", () => {
     const html = renderDesk();
     expect(html).toContain('data-testid="apex-brand"');
-    expect(html).toContain('href="/portfolio"');
+    expect(html).toContain('href="/dashboard"');
     expect(html).toContain('aria-label="Apex"');
     expect(html).toContain('src="/brand/apex-logo.png"');
     expect(html).toContain(">APEX<");

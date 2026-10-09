@@ -406,7 +406,8 @@ class _InflatedQuote:
 
     async def submit_order(self, **kwargs) -> dict:
         self.symbols.append(str(kwargs["symbol"]))
-        return {"status": "filled"}
+        limit = kwargs.get("limit_price")
+        return {"status": "filled", "filled_avg_price": abs(float(limit)), "venue": "simulation"}
 
 
 class _MarketHours:

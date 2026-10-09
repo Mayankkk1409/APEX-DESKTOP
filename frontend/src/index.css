@@ -1,3 +1,28 @@
+/* Telegraf ships 200 / 400 / 800 only. It has no tabular figures, so prices and P&L stay on IBM Plex Mono. */
+@font-face {
+  font-family: Telegraf;
+  src: url("/fonts/Telegraf-UltraLight-200.otf") format("opentype");
+  font-weight: 200;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: Telegraf;
+  src: url("/fonts/Telegraf-Regular-400.otf") format("opentype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: Telegraf;
+  src: url("/fonts/Telegraf-UltraBold-800.otf") format("opentype");
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -121,7 +146,19 @@ body,
 
 body {
   margin: 0;
-  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  font-family: Telegraf, system-ui, sans-serif;
+  font-weight: 400;
+  font-synthesis: none;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+.font-display {
+  font-weight: 800;
 }
 
 .apex-assemble {
@@ -230,7 +267,8 @@ body {
 }
 
 .splash-wordmark {
-  font-family: Newsreader, Georgia, serif;
+  font-family: Telegraf, Georgia, serif;
+  font-weight: 800;
   font-size: 1.85rem;
   letter-spacing: 0.35em;
   color: #f0e6d2;
@@ -238,6 +276,7 @@ body {
 
 .splash-tagline {
   margin-top: 0.35rem;
+  font-weight: 200;
   font-size: 0.75rem;
   letter-spacing: 0.28em;
   text-transform: uppercase;
@@ -365,7 +404,7 @@ textarea::placeholder {
   border: 1px solid var(--apex-line);
   padding: 0.2rem 0.55rem;
   font-size: 0.68rem;
-  font-weight: 600;
+  font-weight: 400;
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
@@ -445,7 +484,7 @@ textarea::placeholder {
 .apex-table th {
   padding: 0.5rem 0.65rem;
   text-align: left;
-  font-weight: 500;
+  font-weight: 400;
   color: var(--apex-bronze);
   white-space: nowrap;
 }
@@ -752,6 +791,7 @@ textarea::placeholder {
 }
 
 .ta-card-kicker {
+  font-weight: 200;
   font-size: 0.7rem;
   letter-spacing: 0.18em;
   text-transform: uppercase;
@@ -760,7 +800,8 @@ textarea::placeholder {
 
 .ta-card-title {
   margin-top: 0.35rem;
-  font-family: Newsreader, Georgia, serif;
+  font-family: Telegraf, Georgia, serif;
+  font-weight: 800;
   font-size: 1.45rem;
 }
 
@@ -1001,9 +1042,9 @@ textarea::placeholder {
 
 .scan-ticker {
   margin-top: 1.85rem;
-  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  font-family: Telegraf, system-ui, sans-serif;
   font-size: clamp(2.4rem, 6vw, 3.35rem);
-  font-weight: 700;
+  font-weight: 800;
   letter-spacing: 0.04em;
   line-height: 1;
   color: var(--apex-text);
@@ -1065,7 +1106,8 @@ textarea::placeholder {
 }
 
 .chain-title {
-  font-family: Newsreader, Georgia, serif;
+  font-family: Telegraf, Georgia, serif;
+  font-weight: 800;
   font-size: 1.6rem;
   line-height: 1.2;
 }
@@ -1329,7 +1371,7 @@ textarea::placeholder {
   border-left: 1px solid #2a2418;
   border-right: 1px solid #2a2418;
   text-align: center;
-  font-weight: 600;
+  font-weight: 500;
   color: #e6d5aa;
   white-space: nowrap;
 }
@@ -1424,7 +1466,7 @@ textarea::placeholder {
 
 .chain-legend b {
   color: #c4a56a;
-  font-weight: 600;
+  font-weight: 400;
 }
 
 .chain-carousel {
@@ -1448,7 +1490,8 @@ textarea::placeholder {
 }
 
 .sf-title {
-  font-family: Newsreader, Georgia, serif;
+  font-family: Telegraf, Georgia, serif;
+  font-weight: 800;
   font-size: 1.7rem;
   line-height: 1.15;
 }
@@ -1563,7 +1606,8 @@ textarea::placeholder {
 
 .sf-gauge-value {
   margin-top: -0.35rem;
-  font-family: Newsreader, Georgia, serif;
+  font-family: Telegraf, Georgia, serif;
+  font-weight: 800;
   font-size: 1.05rem;
   line-height: 1.15;
   text-align: center;
@@ -1693,15 +1737,16 @@ textarea::placeholder {
 }
 
 .sf-panel h2 {
-  font-family: Newsreader, Georgia, serif;
+  font-family: Telegraf, Georgia, serif;
+  font-weight: 800;
   font-size: 1.15rem;
-  font-weight: 500;
 }
 
 .sf-panel h2 span {
   margin-left: 0.4rem;
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 0.7rem;
+  font-weight: 400;
   color: #a78d5d;
 }
 
@@ -1877,7 +1922,8 @@ textarea::placeholder {
 }
 
 .sf-modal-head h2 {
-  font-family: Newsreader, Georgia, serif;
+  font-family: Telegraf, Georgia, serif;
+  font-weight: 800;
   font-size: 1.15rem;
   line-height: 1.25;
   color: #e8dcc0;
@@ -2079,7 +2125,8 @@ textarea::placeholder {
 
 .as-composite-value {
   margin-top: -0.35rem;
-  font-family: Newsreader, Georgia, serif;
+  font-family: Telegraf, Georgia, serif;
+  font-weight: 800;
   font-size: 2.4rem;
   line-height: 1;
   color: #e2d0a8;
@@ -2164,7 +2211,8 @@ textarea::placeholder {
 }
 
 .as-section-title {
-  font-family: Newsreader, Georgia, serif;
+  font-family: Telegraf, Georgia, serif;
+  font-weight: 800;
   font-size: 1.05rem;
 }
 
@@ -2247,7 +2295,8 @@ textarea::placeholder {
 
 .st-name {
   margin-top: 0.35rem;
-  font-family: Newsreader, Georgia, serif;
+  font-family: Telegraf, Georgia, serif;
+  font-weight: 800;
   font-size: 1.85rem;
   line-height: 1.15;
   color: #e2d0a8;
@@ -2571,7 +2620,8 @@ textarea::placeholder {
 }
 
 .as-composite-value {
-  font-family: Newsreader, Georgia, serif;
+  font-family: Telegraf, Georgia, serif;
+  font-weight: 800;
   font-size: 2.4rem;
   line-height: 1;
   color: var(--apex-text);
@@ -2651,7 +2701,7 @@ textarea::placeholder {
 }
 
 .as-section-title {
-  font-weight: 600;
+  font-weight: 800;
   color: var(--apex-text);
 }
 
@@ -2731,7 +2781,8 @@ textarea::placeholder {
 
 .st-name {
   margin-top: 0.35rem;
-  font-family: Newsreader, Georgia, serif;
+  font-family: Telegraf, Georgia, serif;
+  font-weight: 800;
   font-size: 1.65rem;
   color: var(--apex-text);
 }
@@ -2888,6 +2939,7 @@ textarea::placeholder {
   margin: 0;
   width: 100%;
   text-align: center;
+  font-weight: 200;
   font-size: 0.65rem;
   letter-spacing: 0.28em;
   padding-left: 0.28em;
@@ -2899,9 +2951,9 @@ textarea::placeholder {
   margin: 0;
   width: 100%;
   text-align: center;
-  font-family: Newsreader, Georgia, serif;
+  font-family: Telegraf, Georgia, serif;
+  font-weight: 800;
   font-size: 1.75rem;
-  font-weight: 500;
   line-height: 1.2;
   color: var(--apex-text);
 }
@@ -3060,7 +3112,7 @@ textarea::placeholder {
 
 .order-cert-leg-side {
   color: #c4a56a;
-  font-weight: 600;
+  font-weight: 500;
   letter-spacing: 0.08em;
   padding-left: 0.08em;
 }
@@ -3093,7 +3145,7 @@ textarea::placeholder {
   background: var(--apex-gold);
   color: var(--apex-btn-on-gold);
   font-size: 0.85rem;
-  font-weight: 600;
+  font-weight: 400;
   text-align: center;
   cursor: pointer;
   transition: filter 0.15s ease;
@@ -3135,8 +3187,9 @@ textarea::placeholder {
   align-items: center;
   justify-content: center;
   margin: 0;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 1.35rem;
-  font-weight: 600;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
   color: var(--apex-gold);
   pointer-events: none;
@@ -3172,7 +3225,7 @@ textarea::placeholder {
   background: rgba(196, 165, 106, 0.12);
   text-align: center;
   font-size: 0.68rem;
-  font-weight: 700;
+  font-weight: 800;
   letter-spacing: 0.2em;
   color: #c4a56a;
 }
@@ -3693,6 +3746,13 @@ html[data-theme="light"] .apex-draw-stroke {
   color: var(--apex-text);
 }
 
+.ticker-suggestions [role="option"] {
+  display: block;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+}
+
 .ticker-hit {
   display: block;
   width: 100%;
@@ -3713,6 +3773,7 @@ html[data-theme="light"] .apex-draw-stroke {
     opacity 140ms ease;
 }
 
+.ticker-suggestions [role="option"]:hover .ticker-hit,
 .ticker-hit:hover,
 .ticker-hit:focus,
 .ticker-hit:focus-visible,

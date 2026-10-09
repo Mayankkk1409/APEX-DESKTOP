@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { ApexScoreScan } from "../components/ApexScoreScan";
 import { FundamentalsScan } from "../components/FundamentalsScan";
@@ -71,6 +71,8 @@ function slideLayers(reported: readonly string[] | undefined): string[] {
 
 export function DeepScan() {
   const nav = useNavigate();
+  const loc = useLocation();
+  const reopenScanId = (loc.state as { reopenScanId?: string } | null)?.reopenScanId ?? "";
   const qc = useQueryClient();
   const hooked = useSession();
   // Static markup reads getState(); the browser hook snapshot is the initial store
@@ -121,11 +123,17 @@ export function DeepScan() {
   }, [captureSnapshot, capturedBars, capturedContext, capturedDaily, chartImage, chartImageFrozen, snapshot, symbol, timeframe]);
 
   const scanExpiry = expiry || undefined;
-  const scanKey = ["scan", locked.captured_at, locked.symbol, locked.timeframe, expiry] as const;
-  const scanQueryFn = () => api.scan(locked, scanExpiry) as Promise<ScanResult>;
+  const scanKey = reopenScanId
+    ? (["scan-reopen", reopenScanId] as const)
+    : (["scan", locked.captured_at, locked.symbol, locked.timeframe, expiry] as const);
+  const scanQueryFn = () =>
+    (reopenScanId ? api.scanById(reopenScanId) : api.scan(locked, scanExpiry)) as Promise<ScanResult>;
   const scan = useQuery({
     queryKey: scanKey,
     queryFn: scanQueryFn,
+    staleTime: Infinity,
+    refetchOnMount: false,
+    refetchOnReconnect: false,
   });
   const scanInvoked = useRef(false);
   if (testBoot.invokeScan && !scanInvoked.current) {

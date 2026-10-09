@@ -378,7 +378,18 @@ class DemoAdapter:
         )
 
     async def submit_order(self, **kwargs) -> dict:
-        result = {"status": "filled", "broker": "demo_paper", **kwargs}
+        """Local simulation. A combo limit is the execution price. A single leg does not invent one."""
+        result = {"status": "accepted", "broker": "demo_paper", "venue": "simulation", **kwargs}
         if kwargs.get("order_class") == "mleg" and kwargs.get("limit_price") is not None:
-            result["filled_avg_price"] = abs(float(kwargs["limit_price"]))
+            try:
+                price = abs(float(kwargs["limit_price"]))
+            except (TypeError, ValueError):
+                price = 0.0
+            if price > 0:
+                result["status"] = "filled"
+                result["filled_avg_price"] = price
+                if kwargs.get("qty") is not None:
+                    result["filled_qty"] = kwargs.get("qty")
+        else:
+            result.pop("filled_avg_price", None)
         return result

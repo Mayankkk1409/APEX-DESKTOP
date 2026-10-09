@@ -25,11 +25,12 @@ describe("Login", () => {
   });
 
   it("sends a reload back to every signed-in screen", () => {
+    expect(pathAfterSessionRestore("/dashboard")).toBe("/dashboard");
     expect(pathAfterSessionRestore("/app")).toBe("/app");
     expect(pathAfterSessionRestore("/scan")).toBe("/scan");
     expect(pathAfterSessionRestore("/portfolio")).toBe("/portfolio");
     expect(pathAfterSessionRestore("/settings")).toBe("/settings");
-    expect(pathAfterSessionRestore("/login")).toBe("/app");
-    expect(pathAfterSessionRestore(undefined)).toBe("/app");
+    expect(pathAfterSessionRestore("/login")).toBe("/dashboard");
+    expect(pathAfterSessionRestore(undefined)).toBe("/dashboard");
   });
 });

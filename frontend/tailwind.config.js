@@ -20,8 +20,8 @@ export default {
         bear: "var(--apex-bear)",
       },
       fontFamily: {
-        display: ["Newsreader", "Georgia", "serif"],
-        sans: ["IBM Plex Sans", "system-ui", "sans-serif"],
+        display: ["Telegraf", "Georgia", "serif"],
+        sans: ["Telegraf", "system-ui", "sans-serif"],
         mono: ["IBM Plex Mono", "ui-monospace", "monospace"],
       },
       boxShadow: {

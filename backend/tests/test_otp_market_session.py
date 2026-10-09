@@ -1,7 +1,8 @@
-"""A verified device skips the sign-in code for 24 hours from otp_verified_at.
+"""Sign-in verification follows the most recent NYSE regular open.
 
-The skip does not follow the exchange calendar. The getLastMarketOpen cases
-below still describe that calendar helper; they are not the sign-in rule.
+A fresh login skips the code only on a trading day when the device was verified
+since that open. Weekends and full-day holidays still require a code. An existing
+session stays valid until the next regular open and does not send mail.
 Holiday used below: Thanksgiving Day, Thursday 2026-11-26 (NYSE full close).
 Christmas Day, Friday 2026-12-25, covers a Saturday whose Friday is closed.
 """
@@ -24,6 +25,7 @@ from app.main import create_app
 from app.models.otp_device import OtpDevice
 from app.redis_client import reset_redis_for_tests
 from app.routers.auth import DEVICE_COOKIE, cookie_secure_for_request, otp_skip_active
+from app.services.login_verification import verification_current
 from app.services.market_session import NYSE_HOLIDAYS, getLastMarketOpen
 
 _PASSWORD = "ApexDesk!23"
@@ -99,14 +101,16 @@ def test_naive_clock_is_rejected() -> None:
         getLastMarketOpen(datetime(2026, 10, 7, 11, 0))
 
 
-def test_skip_lasts_twenty_four_hours_including_weekends() -> None:
-    verified = _at(2026, 10, 9, 16, 0)  # Friday
-    assert otp_skip_active(verified, _at(2026, 10, 10, 15, 59)) is True  # Saturday, still inside 24h
-    assert otp_skip_active(verified, verified + timedelta(hours=24)) is False
-    assert otp_skip_active(verified, _at(2026, 10, 10, 16, 1)) is False
-    # A Monday morning code does not expire at 9:30.
-    monday = _at(2026, 10, 12, 8, 0)
-    assert otp_skip_active(monday, _at(2026, 10, 12, 15, 0)) is True
+def test_fresh_login_follows_the_regular_open_not_a_rolling_day() -> None:
+    verified = _at(2026, 10, 9, 16, 0)  # Friday after the close
+    assert otp_skip_active(verified, _at(2026, 10, 9, 18, 0)) is True
+    assert otp_skip_active(verified, _at(2026, 10, 12, 8, 0)) is True  # Monday pre-open
+    assert otp_skip_active(verified, _at(2026, 10, 10, 12, 0)) is False  # Saturday fresh login
+    assert otp_skip_active(verified, _at(2026, 10, 12, 9, 30)) is False  # next regular open
+    assert date(2026, 11, 26) in NYSE_HOLIDAYS
+    assert otp_skip_active(_at(2026, 11, 25, 15, 0), _at(2026, 11, 26, 12, 0)) is False
+    assert verification_current(verified, _at(2026, 10, 10, 12, 0)) is True
+    assert verification_current(verified, _at(2026, 10, 12, 9, 30)) is False
 
 
 def _cookie_jar(response) -> http.cookies.SimpleCookie:
@@ -180,11 +184,26 @@ async def api() -> AsyncIterator[tuple[AsyncClient, async_sessionmaker[AsyncSess
     await engine.dispose()
 
 
+def _install_clock(monkeypatch: pytest.MonkeyPatch, clock: dict[str, datetime]) -> None:
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz: timezone | None = None) -> datetime:
+            base = clock["now"]
+            if tz is None:
+                return base.replace(tzinfo=None)
+            return base.astimezone(tz)
+
+    monkeypatch.setattr("app.routers.auth.datetime", Frozen)
+    monkeypatch.setattr("app.deps.datetime", Frozen)
+
+
 @pytest.mark.asyncio
-async def test_verified_device_skips_otp_for_twenty_four_hours(
+async def test_verified_device_skips_until_the_next_regular_open(
     api: tuple[AsyncClient, async_sessionmaker[AsyncSession]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, session_factory = api
+    clock = {"now": _at(2026, 10, 7, 15, 0)}  # Wednesday, regular session
+    _install_clock(monkeypatch, clock)
     sent = _capture(monkeypatch)
     await _signup(client, "session1", "session1@example.com")
     login = await client.post("/auth/login", json={"username": "session1", "password": _PASSWORD})
@@ -212,15 +231,15 @@ async def test_verified_device_skips_otp_for_twenty_four_hours(
     assert "show_connect_modal" in body
     assert "code" not in body
     assert len(sent) == 1
-    me = await client.get("/auth/me", headers={"Authorization": f"Bearer {body['access_token']}"})
+    token = body["access_token"]
+    me = await client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert me.status_code == 200
     assert me.json()["username"] == "session1"
 
-    now = datetime.now(timezone.utc)
     async with session_factory() as session:
         row = await session.scalar(select(OtpDevice).where(OtpDevice.device_id == device_id))
         assert row is not None and row.otp_verified_at is not None
-        row.otp_verified_at = now - timedelta(hours=24)
+        row.otp_verified_at = _at(2026, 10, 6, 15, 0).astimezone(timezone.utc)  # Tuesday, before Wednesday's open
         await session.commit()
 
     required = await client.post("/auth/login", json={"username": "session1", "password": _PASSWORD})
@@ -232,12 +251,18 @@ async def test_verified_device_skips_otp_for_twenty_four_hours(
     async with session_factory() as session:
         row = await session.scalar(select(OtpDevice).where(OtpDevice.device_id == device_id))
         assert row is not None
-        row.otp_verified_at = now - timedelta(hours=24) + timedelta(seconds=30)
+        row.otp_verified_at = _at(2026, 10, 7, 10, 0).astimezone(timezone.utc)
         await session.commit()
     skipped = await client.post("/auth/login", json={"username": "session1", "password": _PASSWORD})
     assert skipped.status_code == 200, skipped.text
     assert skipped.json()["otp_required"] is False
     assert skipped.json()["access_token"]
+    assert len(sent) == 2
+
+    clock["now"] = _at(2026, 10, 8, 9, 30)  # Thursday open expires Wednesday's verification
+    stale = await client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert stale.status_code == 401
+    assert stale.json()["detail"] == "Sign-in verification expired"
     assert len(sent) == 2
 
 
@@ -284,6 +309,8 @@ async def test_second_login_on_loopback_skips_the_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The browser stores the device cookie on http://127.0.0.1 and the next login sends no email."""
+    clock = {"now": _at(2026, 10, 7, 15, 0)}
+    _install_clock(monkeypatch, clock)
     reset_redis_for_tests()
     engine = create_async_engine(
         "sqlite+aiosqlite://",

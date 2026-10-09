@@ -102,6 +102,33 @@ async def _write_db_hash(db: AsyncSession | None, username: str, digest: str, tt
     await db.commit()
 
 
+async def _pending_within_reuse(
+    db: AsyncSession | None,
+    username: str,
+    *,
+    ttl_seconds: int,
+    reuse_seconds: int,
+) -> bool:
+    """True when the shared row was issued inside the reuse window.
+
+    ``expires_at - ttl`` is the issue time. A reload drops process memory, and
+    that must not mint a second code while this row is still the one emailed.
+    """
+    if db is None or ttl_seconds <= 0:
+        return False
+    row = await db.scalar(select(OtpCode).where(OtpCode.username == username.lower()))
+    if row is None:
+        return False
+    expires = _as_utc(row.expires_at)
+    now = datetime.now(timezone.utc)
+    if expires <= now:
+        await db.delete(row)
+        await db.commit()
+        return False
+    remaining = (expires - now).total_seconds()
+    return remaining > float(ttl_seconds - reuse_seconds)
+
+
 async def _delete_db_hash(db: AsyncSession | None, username: str, *, expected: str | None = None) -> None:
     if db is None:
         return
@@ -201,6 +228,10 @@ async def claim_login_code(
     claim_key = _login_claim_key(username)
     slot = await _mutex(f"login:{username.lower()}")
     async with slot:
+        if await _pending_within_reuse(
+            db, username, ttl_seconds=ttl_seconds, reuse_seconds=reuse_seconds
+        ):
+            return LoginCodeClaim(None)
         acquired = await _set_nx(redis, claim_key, "1", reuse_seconds)
         if not acquired:
             if await _wait_for_code(redis, code_key):
@@ -228,11 +259,10 @@ async def verify_otp(
 ) -> bool:
     redis = await get_redis(settings)
     key = _key(username)
-    stored = await redis.get(key)
-    if not stored:
-        # Redis is optional. The hash committed with the email still verifies
-        # after the in-memory stand-in is wiped by a process restart.
-        stored = await _read_db_hash(db, username)
+    # SQLite is the store every API process shares. A hash left in this
+    # process's memory (or a different worker) must not hide the emailed code.
+    shared = await _read_db_hash(db, username)
+    stored = shared if shared else await redis.get(key)
     if not stored:
         return False
     if not otp_matches(code, stored):

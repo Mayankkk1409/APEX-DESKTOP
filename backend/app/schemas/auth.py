@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, EmailStr, Field, model_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 AccountMode = Literal["paper_funded", "real_brokerage"]
 PAPER_PRESETS = {10000, 25000, 50000, 100000}
@@ -45,9 +45,20 @@ class OtpRequest(BaseModel):
     username: str
 
 
+def _digits(value: object) -> object:
+    if isinstance(value, str):
+        return "".join(ch for ch in value if ch.isdigit())
+    return value
+
+
 class OtpVerifyRequest(BaseModel):
     username: str
     code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+    @field_validator("code", mode="before")
+    @classmethod
+    def code_digits(cls, value: object) -> object:
+        return _digits(value)
 
 
 class ForgotPasswordRequest(BaseModel):
@@ -65,6 +76,11 @@ class ForgotPasswordRequest(BaseModel):
 class ForgotPasswordVerifyRequest(BaseModel):
     username: str = Field(min_length=1, max_length=200)
     code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+    @field_validator("code", mode="before")
+    @classmethod
+    def code_digits(cls, value: object) -> object:
+        return _digits(value)
 
 
 class TokenResponse(BaseModel):

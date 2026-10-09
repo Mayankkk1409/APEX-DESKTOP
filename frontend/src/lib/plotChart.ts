@@ -268,7 +268,7 @@ export function drawPlot(
 
   if (opts?.title) {
     ctx.fillStyle = PLOT_COLORS.legend;
-    ctx.font = "600 13px IBM Plex Sans, system-ui, sans-serif";
+    ctx.font = "800 13px Telegraf, system-ui, sans-serif";
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
     ctx.fillText(opts.title, pad.l, 10);
@@ -353,7 +353,7 @@ export function drawPlot(
     { label: "EMA50", color: PLOT_COLORS.ema50, v: series.ema50[last] },
     { label: "BB", color: PLOT_COLORS.bb, v: series.bb.mid[last] },
   ];
-  ctx.font = "10px IBM Plex Sans, system-ui, sans-serif";
+  ctx.font = "10px 'IBM Plex Mono', ui-monospace, monospace";
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
   let lx = pad.l + 4;
@@ -403,7 +403,7 @@ export function drawPlot(
       1.35,
     );
     ctx.fillStyle = PLOT_COLORS.axis;
-    ctx.font = "10px IBM Plex Sans, system-ui, sans-serif";
+    ctx.font = "10px 'IBM Plex Mono', ui-monospace, monospace";
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
     const mLast = series.macd.line[last];
@@ -426,7 +426,7 @@ export function drawPlot(
 
   // Price axis
   ctx.fillStyle = PLOT_COLORS.axis;
-  ctx.font = "10px IBM Plex Sans, system-ui, sans-serif";
+  ctx.font = "10px 'IBM Plex Mono', ui-monospace, monospace";
   ctx.textAlign = "right";
   ctx.textBaseline = "middle";
   for (let i = 0; i <= 4; i++) {

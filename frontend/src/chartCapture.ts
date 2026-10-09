@@ -1,10 +1,10 @@
 /**
  * Live chart state shared between the dashboard chart and Deep Scan.
  *
- * The chart publishes exactly what the user is looking at — symbol, interval,
- * the bars inside the visible logical range, and the active study set. Scan
- * reads that snapshot so every analysis number is reproducible from the same
- * bars the user had on screen when they clicked.
+ * The TradingView embed is a cross-origin iframe. This page cannot read its
+ * pan or zoom, so `visibleBars` is the slice computed from the loaded series
+ * and the host width. It is not a pixel-exact capture of the iframe viewport.
+ * Studies stay on the snapshot; they are not removed to simplify the image.
  */
 
 import type { OhlcBar } from "./lib/ta";

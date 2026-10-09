@@ -107,12 +107,34 @@ export function Dashboard() {
   const [posOpen, setPosOpen] = useState(true);
   const [live, setLive] = useState<{ balance?: number; buying_power?: number; portfolio_value?: number }>({});
   const [scanning, setScanning] = useState(false);
+  const marketSocket = useMarketSocket({
+    token: getAccessToken(),
+    symbols: [activeSymbol, DEFAULT_SYMBOL],
+    onMessage: (msg) => {
+      if (msg.type === "fill") {
+        const livePatch: { balance?: number; buying_power?: number; portfolio_value?: number } = {};
+        if (typeof msg.balance === "number") livePatch.balance = msg.balance;
+        if (typeof msg.buying_power === "number") livePatch.buying_power = msg.buying_power;
+        if (typeof msg.portfolio_value === "number") livePatch.portfolio_value = msg.portfolio_value;
+        if (Object.keys(livePatch).length) setLive((prev) => ({ ...prev, ...livePatch }));
+        refreshDeskQueries(qc);
+      }
+      if (msg.type === "quotes") {
+        for (const row of (msg.quotes as Quote[]) ?? []) {
+          if (row.symbol !== activeSymbol || row.price == null) continue;
+          qc.setQueryData<Quote>(["quote", activeSymbol], (old) =>
+            old ? { ...old, ...row, price: row.price, change: row.change, change_pct: row.change_pct } : row,
+          );
+        }
+      }
+    },
+  });
 
   const quote = useQuery({
     queryKey: ["quote", activeSymbol],
     queryFn: () => api.quote(activeSymbol),
     staleTime: 5_000,
-    refetchInterval: 10_000,
+    refetchInterval: marketSocket.connected ? false : 10_000,
     enabled: Boolean(activeSymbol),
   });
   const fundamentals = useQuery({
@@ -249,29 +271,6 @@ export function Dashboard() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [chartFull, chartAnimating, suggestionsOpen, cert.selected, showConnectModal]);
-
-  useMarketSocket({
-    token: getAccessToken(),
-    symbols: [activeSymbol, DEFAULT_SYMBOL],
-    onMessage: (msg) => {
-      if (msg.type === "fill") {
-        const livePatch: { balance?: number; buying_power?: number; portfolio_value?: number } = {};
-        if (typeof msg.balance === "number") livePatch.balance = msg.balance;
-        if (typeof msg.buying_power === "number") livePatch.buying_power = msg.buying_power;
-        if (typeof msg.portfolio_value === "number") livePatch.portfolio_value = msg.portfolio_value;
-        if (Object.keys(livePatch).length) setLive((prev) => ({ ...prev, ...livePatch }));
-        refreshDeskQueries(qc);
-      }
-      if (msg.type === "quotes") {
-        for (const row of (msg.quotes as Quote[]) ?? []) {
-          if (row.symbol !== activeSymbol || row.price == null) continue;
-          qc.setQueryData<Quote>(["quote", activeSymbol], (old) =>
-            old ? { ...old, ...row, price: row.price, change: row.change, change_pct: row.change_pct } : row,
-          );
-        }
-      }
-    },
-  });
 
   const stats = brokerage.usingBrokerage && brokerage.stats
     ? {
@@ -427,7 +426,7 @@ export function Dashboard() {
       )}
       <header className="desk-header flex items-center border-b border-line px-4 py-3">
         <div className="desk-fold-x" data-desk-hide="brand">
-          <Link to="/portfolio" className="desk-brand" aria-label="Apex" data-testid="apex-brand">
+          <Link to="/dashboard" className="desk-brand" aria-label="Apex" data-testid="apex-brand">
             <ApexLogo size={36} className="shrink-0" />
             <span className="font-display text-xl tracking-[0.2em]">APEX</span>
           </Link>
@@ -896,15 +895,10 @@ function n(v?: number | null) {
   return v.toLocaleString();
 }
 
-function quoteSourceLabel(source?: string | null, secondary?: string | null, fundamentals?: string | null) {
-  const parts = [
-    source && source !== "unavailable" ? source : null,
-    secondary,
-    fundamentals && fundamentals !== "unavailable" && !secondary ? `Fundamentals · ${fundamentals}` : null,
-  ]
+export function quoteSourceLabel(source?: string | null, secondary?: string | null, fundamentals?: string | null) {
+  const parts = [source && source !== "unavailable" ? source : null, secondary, fundamentals && fundamentals !== "unavailable" && !secondary ? `Fundamentals · ${fundamentals}` : null]
     .filter(Boolean)
     .join(" · ")
-    .replace(/\b(indicative|opra|alpaca|demo)\b/gi, "")
     .replace(/\s*·\s*·/g, " · ")
     .replace(/\s*·\s*\(/g, " (")
     .replace(/^[·\s]+|[·\s]+$/g, "")

@@ -41,7 +41,7 @@ export class PivotLabelsPrimitive implements IPanePrimitive<Time> {
     if (!series || !rows.length) return;
     target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
       ctx.save();
-      ctx.font = "11px 'Trebuchet MS', 'IBM Plex Sans', system-ui, sans-serif";
+      ctx.font = "11px 'IBM Plex Mono', ui-monospace, monospace";
       ctx.textBaseline = "middle";
       ctx.textAlign = "left";
       for (const row of rows) {

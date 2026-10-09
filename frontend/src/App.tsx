@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { getAccessToken, restoreSession, subscribeAccessToken } from "./api";
 import { Dashboard } from "./pages/Dashboard";
+import { HomeDashboard } from "./pages/HomeDashboard";
 import { DeepScan } from "./pages/DeepScan";
 import { Login } from "./pages/Login";
 import { Portfolio } from "./pages/Portfolio";
@@ -104,6 +105,14 @@ export default function App() {
       <Route path="/" element={<Navigate to="/login" replace />} />
       <Route path="/login" element={<Login />} />
       <Route path="/signup" element={<Signup />} />
+      <Route
+        path="/dashboard"
+        element={
+          <Guard>
+            <HomeDashboard />
+          </Guard>
+        }
+      />
       <Route
         path="/portfolio"
         element={

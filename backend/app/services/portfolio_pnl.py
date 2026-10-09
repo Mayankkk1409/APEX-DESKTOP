@@ -64,9 +64,18 @@ def replay_filled_orders(orders: list[Order]) -> dict[str, _Book]:
         if order.side == "buy":
             if book.qty > 0:
                 book.avg_cost = (book.avg_cost * book.qty + px * order.qty) / (book.qty + order.qty)
+                book.qty += order.qty
+            elif book.qty < 0:
+                cover = min(order.qty, abs(book.qty))
+                book.realized_pl += (book.avg_cost - px) * cover * mult
+                book.qty += order.qty
+                if book.qty > 0:
+                    book.avg_cost = px
+                elif book.qty == 0:
+                    book.avg_cost = 0.0
             else:
                 book.avg_cost = px
-            book.qty += order.qty
+                book.qty += order.qty
         else:
             sell_qty = min(order.qty, book.qty) if book.qty > 0 else order.qty
             if sell_qty > 0 and book.qty > 0:
@@ -158,9 +167,16 @@ def _replay_equity_events(
             cash -= cost
             if lot.qty > 0:
                 lot.avg_cost = (lot.avg_cost * lot.qty + px * order.qty) / (lot.qty + order.qty)
+                lot.qty += order.qty
+            elif lot.qty < 0:
+                lot.qty += order.qty
+                if lot.qty > 0:
+                    lot.avg_cost = px
+                elif lot.qty == 0:
+                    lot.avg_cost = 0.0
             else:
                 lot.avg_cost = px
-            lot.qty += order.qty
+                lot.qty += order.qty
         else:
             cash += cost
             lot.qty = max(0.0, lot.qty - order.qty)

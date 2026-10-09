@@ -17,8 +17,10 @@ from app.services.executability import (
     spread_confirmation_text,
     spread_vs_mid,
 )
+from app.services.broker_execution import Execution, classify_execution
 from app.services.occ_symbol import parse_occ
 from app.services.orders import account_impact, estimate_order_cost
+from app.services.position_basis import position_after_fill
 from app.strategies.registry import get_strategy_spec, resolve_strategy_id
 from app.strategies.validator import validate_strategy_output
 from app.ws.hub import hub
@@ -125,10 +127,14 @@ def _option_quote_is_equity_fallback(symbol: str, quote: object) -> bool:
 
 
 async def _paper_submit(payload: dict[str, Any]) -> dict:
-    """Existing demo/paper fill used when Alpaca is dark, closed, or rejects."""
+    """Local simulation fill. Never relabeled as a live broker execution."""
     from app.adapters.demo import DemoAdapter
 
-    return await DemoAdapter().submit_order(**payload)
+    result = await DemoAdapter().submit_order(**payload)
+    if isinstance(result, dict):
+        result["venue"] = "simulation"
+        result["broker"] = "demo_paper"
+    return result
 
 
 async def _submit_for_fill(
@@ -157,29 +163,29 @@ async def _submit_for_fill(
         broker = await adapter.submit_order(**payload)
     except Exception as exc:  # noqa: BLE001
         reason = str(exc).strip() or "Broker order failed"
-        # Uncovered-option refusals are absorbed only by the combo path. A single short
-        # is not filled on its own.
-        if strict and not (session_paper and _session_restricted(reason)):
-            raise ValueError(reason) from exc
-        logger.warning("Broker order failed ({}); using paper fill", type(exc).__name__)
-        paper = await _paper_submit(payload)
-        if _session_restricted(reason):
+        # A closed-session paper book is labeled simulation. Every other failure stays a failure.
+        if session_paper and _session_restricted(reason):
+            logger.warning("Broker order failed ({}); using labeled simulation fill", type(exc).__name__)
+            paper = await _paper_submit(payload)
             paper["session_paper_fill"] = True
             paper["paper_fill_note"] = paper_fill_sentence(reason)
-        return paper
+            return paper
+        if strict:
+            raise ValueError(reason) from exc
+        return {"status": "rejected", "rejected": True, "reason": reason, "venue": "live"}
     if not isinstance(broker, dict) or _broker_rejected(broker):
         reason = _broker_reason(broker) if isinstance(broker, dict) else "Broker rejected the order"
-        if strict and not (session_paper and _session_restricted(reason)):
-            raise ValueError(reason)
-        if strict:
-            logger.warning("Broker order rejected ({}); using paper fill", reason)
-        else:
-            logger.warning("Broker order rejected; using paper fill")
-        paper = await _paper_submit(payload)
-        if _session_restricted(reason):
+        if session_paper and _session_restricted(reason):
+            logger.warning("Broker order rejected ({}); using labeled simulation fill", reason)
+            paper = await _paper_submit(payload)
             paper["session_paper_fill"] = True
             paper["paper_fill_note"] = paper_fill_sentence(reason)
-        return paper
+            return paper
+        if strict:
+            raise ValueError(reason)
+        if isinstance(broker, dict) and broker.get("rejected") is True:
+            return broker
+        return {"status": "rejected", "rejected": True, "reason": reason, "venue": "live"}
     return broker
 
 
@@ -197,6 +203,56 @@ async def refresh_portfolio_value(user: User, db: AsyncSession, adapter: Any) ->
     user.portfolio_value = round(live_value, 2)
     user.buying_power = user.cash_balance
     return user.portfolio_value
+
+
+def _same_execution(prior: Order, settlement: Execution) -> bool:
+    if settlement.outcome not in {"filled", "partial"}:
+        return prior.status in {"rejected", "failed", "accepted"}
+    incoming = float(settlement.filled_qty or 0)
+    return incoming <= float(prior.filled_qty or 0) + 1e-9 and prior.status in {"filled", "partial"}
+
+
+async def _apply_fill_to_book(
+    *,
+    user: User,
+    db: AsyncSession,
+    symbol: str,
+    side: str,
+    qty: float,
+    fill_px: float,
+    asset_class: str,
+    strategy_name: str | None,
+    certificate: dict[str, Any] | None,
+) -> None:
+    pos = await db.scalar(select(Position).where(Position.user_id == user.id, Position.symbol == symbol))
+    if pos:
+        updated = position_after_fill(pos.qty, pos.avg_cost, side=side, fill_qty=qty, fill_px=fill_px)
+        if updated is None:
+            await db.delete(pos)
+            return
+        new_qty, new_avg = updated
+        pos.qty = new_qty
+        pos.avg_cost = new_avg
+        pos.current_price = fill_px
+        if strategy_name and not pos.strategy_name:
+            pos.strategy_name = strategy_name
+        if certificate and not pos.certificate:
+            pos.certificate = certificate
+        return
+    if side == "buy" or (side == "sell" and asset_class == "us_option"):
+        opened = qty if side == "buy" else -qty
+        db.add(
+            Position(
+                user_id=user.id,
+                symbol=symbol,
+                qty=opened,
+                avg_cost=fill_px,
+                current_price=fill_px,
+                asset_class=asset_class,
+                strategy_name=strategy_name,
+                certificate=certificate,
+            )
+        )
 
 
 async def execute_market_fill(
@@ -256,7 +312,6 @@ async def execute_market_fill(
         raise ValueError("Live quote unavailable for this symbol")
     mult = position_multiplier(asset_class)
     cost = estimate_order_cost(qty, px, asset_class=asset_class, multiplier=mult)  # type: ignore[arg-type]
-    impact = account_impact(side, cost)
     if side == "buy" and cost > user.buying_power and not closing:
         raise ValueError("Insufficient buying power. The account cannot cover the order.")
 
@@ -293,44 +348,70 @@ async def execute_market_fill(
     paper_note = note if isinstance(note, str) and note.strip() else None
     if paper_note:
         logger.info("paper fill note symbol={} note={}", order.symbol, paper_note)
-    fill_px = float(broker.get("filled_avg_price") or px)
-    order.status = "filled"
-    order.fill_price = fill_px
-    order.filled_at = datetime.now(timezone.utc)
-
-    pos = await db.scalar(select(Position).where(Position.user_id == user.id, Position.symbol == order.symbol))
-    signed = order.qty if order.side == "buy" else -order.qty
-    if pos:
-        new_qty = pos.qty + signed
-        if new_qty == 0:
-            await db.delete(pos)
-        elif order.side == "buy":
-            pos.avg_cost = (pos.avg_cost * pos.qty + fill_px * order.qty) / new_qty
-            pos.qty = new_qty
-            pos.current_price = fill_px
-            if strategy_name and not pos.strategy_name:
-                pos.strategy_name = strategy_name
-            if certificate and not pos.certificate:
-                pos.certificate = certificate
-        else:
-            pos.qty = new_qty
-            pos.current_price = fill_px
-    elif order.side == "buy" or (order.side == "sell" and asset_class == "us_option"):
-        opened = order.qty if order.side == "buy" else -order.qty
-        db.add(
-            Position(
-                user_id=user.id,
-                symbol=order.symbol,
-                qty=opened,
-                avg_cost=fill_px,
-                current_price=fill_px,
-                asset_class=asset_class,
-                strategy_name=strategy_name,
-                certificate=certificate,
+    if isinstance(broker, dict) and broker.get("venue") == "simulation" and _positive_mark(broker.get("filled_avg_price")) is None:
+        # The local book fills at the quote it was given. A live acknowledgement never takes this price.
+        broker = dict(broker)
+        broker["filled_avg_price"] = px
+        broker["filled_qty"] = broker.get("filled_qty") or order.qty
+        broker["status"] = "filled"
+    settlement = classify_execution(broker, requested_qty=order.qty)
+    if settlement.broker_order_id:
+        prior = await db.scalar(
+            select(Order).where(
+                Order.user_id == user.id,
+                Order.broker_order_id == settlement.broker_order_id,
+                Order.id != order.id,
             )
         )
+        if prior is not None and _same_execution(prior, settlement):
+            await db.delete(order)
+            await db.commit()
+            return prior
+        if prior is not None and settlement.outcome in {"filled", "partial"}:
+            await db.delete(order)
+            await db.flush()
+            order = prior
+    order.broker_order_id = settlement.broker_order_id or order.broker_order_id
+    order.venue = settlement.venue
+    if settlement.outcome in {"rejected", "ambiguous"}:
+        order.status = "rejected" if settlement.outcome == "rejected" else "failed"
+        order.fill_price = None
+        await db.commit()
+        raise ValueError(settlement.reason or "Broker order was not filled")
+    if settlement.outcome == "accepted" or settlement.fill_price is None or settlement.filled_qty is None:
+        order.status = "accepted"
+        order.fill_price = None
+        order.filled_qty = 0
+        await db.commit()
+        await db.refresh(order)
+        order.fill_note = paper_note  # type: ignore[attr-defined]
+        return order
 
-    user.cash_balance = round(user.cash_balance + impact, 2)
+    fill_px = settlement.fill_price
+    already = float(order.filled_qty or 0)
+    filled_qty = float(settlement.filled_qty)
+    delta = filled_qty - already
+    if delta <= 1e-9:
+        await db.commit()
+        await db.refresh(order)
+        return order
+    order.status = "filled" if settlement.outcome == "filled" else "partial"
+    order.fill_price = fill_px
+    order.filled_qty = filled_qty
+    order.filled_at = datetime.now(timezone.utc)
+    await _apply_fill_to_book(
+        user=user,
+        db=db,
+        symbol=order.symbol,
+        side=order.side,
+        qty=delta,
+        fill_px=fill_px,
+        asset_class=asset_class,
+        strategy_name=strategy_name,
+        certificate=certificate,
+    )
+    actual_cost = estimate_order_cost(delta, fill_px, asset_class=asset_class, multiplier=mult)  # type: ignore[arg-type]
+    user.cash_balance = round(user.cash_balance + account_impact(order.side, actual_cost), 2)
     await refresh_portfolio_value(user, db, adapter)
     await db.commit()
     await db.refresh(order)
@@ -715,36 +796,17 @@ async def _open_combo_positions(
         fill_px = _leg_premium(leg, marks)
         if not symbol or side not in {"buy", "sell"} or fill_px is None:
             continue
-        pos = await db.scalar(select(Position).where(Position.user_id == user.id, Position.symbol == symbol))
-        signed = qty if side == "buy" else -qty
-        if pos:
-            new_qty = pos.qty + signed
-            if new_qty == 0:
-                await db.delete(pos)
-            elif side == "buy":
-                pos.avg_cost = (pos.avg_cost * pos.qty + fill_px * qty) / new_qty
-                pos.qty = new_qty
-                pos.current_price = fill_px
-                if strategy_name and not pos.strategy_name:
-                    pos.strategy_name = strategy_name
-                if certificate and not pos.certificate:
-                    pos.certificate = certificate
-            else:
-                pos.qty = new_qty
-                pos.current_price = fill_px
-        else:
-            db.add(
-                Position(
-                    user_id=user.id,
-                    symbol=symbol,
-                    qty=signed,
-                    avg_cost=fill_px,
-                    current_price=fill_px,
-                    asset_class="us_option",
-                    strategy_name=strategy_name,
-                    certificate=certificate,
-                )
-            )
+        await _apply_fill_to_book(
+            user=user,
+            db=db,
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            fill_px=fill_px,
+            asset_class="us_option",
+            strategy_name=strategy_name,
+            certificate=certificate,
+        )
     user.cash_balance = round(user.cash_balance + cash_impact, 2)
     await refresh_portfolio_value(user, db, adapter)
     await db.commit()
@@ -875,9 +937,13 @@ async def _execute_combo(
         paper_note = paper_fill_sentence(reason)
         logger.info("combo paper fill symbol={} note={}", combo_symbol, paper_note)
         fill_px = limit
+        venue = "simulation"
     else:
-        raw_fill = broker.get("filled_avg_price")
-        fill_px = abs(float(raw_fill)) if _positive_mark(raw_fill) is not None else limit
+        settlement = classify_execution(broker, requested_qty=qty)
+        if settlement.outcome in {"rejected", "ambiguous", "accepted"} or settlement.fill_price is None:
+            raise _reject(settlement.reason or "Broker acknowledged the combo without an execution price")
+        fill_px = settlement.fill_price
+        venue = settlement.venue
 
     order = Order(
         user_id=user.id,
@@ -892,6 +958,8 @@ async def _execute_combo(
         multiplier=mult,
         status="filled",
         fill_price=fill_px,
+        filled_qty=qty,
+        venue=venue,
         filled_at=datetime.now(timezone.utc),
     )
     order.fill_note = paper_note  # type: ignore[attr-defined]
