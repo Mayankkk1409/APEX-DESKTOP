@@ -24,6 +24,7 @@ export const ACCESS_REFRESH_SKEW_SECONDS = 60;
 
 const ANONYMOUS_AUTH = new Set([
   "/auth/login",
+  "/auth/login/code",
   "/auth/signup",
   "/auth/otp/request",
   "/auth/otp/verify",
@@ -218,9 +219,24 @@ async function req<T>(path: string, init: RequestInit = {}, retried = false): Pr
 
 export const api = {
   health: () => req<{ market_adapter: string; data_feed: string }>("/health"),
-  signup: (body: Record<string, unknown>) => req("/auth/signup", { method: "POST", body: JSON.stringify(body) }),
+  signup: (body: Record<string, unknown>) =>
+    req<{ confirmation_sent?: boolean }>("/auth/signup", { method: "POST", body: JSON.stringify(body) }),
   login: (username: string, password: string) =>
-    req("/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),
+    req<{
+      ok?: boolean;
+      username?: string;
+      account_mode?: string;
+      otp_required?: boolean;
+      ttl_seconds?: number;
+      access_token?: string;
+      expires_in?: number;
+      refresh_in?: number;
+    }>("/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),
+  resendLoginCode: (username: string, password: string) =>
+    req<{ ok: boolean; ttl_seconds: number }>("/auth/login/code", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    }),
   otpRequest: (username: string) =>
     req<{ ok: boolean; ttl_seconds: number; autofill: boolean; code: string | null }>("/auth/otp/request", {
       method: "POST",
@@ -343,7 +359,10 @@ export const api = {
   orderHistory: () => req<{ orders: import("./types").OrderHistoryRow[] }>("/api/orders"),
   order: (body: Record<string, unknown>) => req("/api/orders", { method: "POST", body: JSON.stringify(body) }),
   scan: (snapshot: ChartSnapshot, expiry?: string) =>
-    req("/scan", { method: "POST", body: JSON.stringify({ snapshot, expiry }) }),
+    req("/scan", {
+      method: "POST",
+      body: JSON.stringify({ snapshot, expiry }),
+    }),
   layers: () => req<{ layers: string[] }>("/scan/layers"),
   volatility: (symbol: string, expiry?: string, recommended?: RecommendedContract | null) => {
     const params = new URLSearchParams();

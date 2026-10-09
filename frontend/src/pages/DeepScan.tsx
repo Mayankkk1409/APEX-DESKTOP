@@ -8,7 +8,7 @@ import { FundamentalsScan } from "../components/FundamentalsScan";
 import { OptionsChainGreeks } from "../components/OptionsChainGreeks";
 import { OrderConfirmationCertificate } from "../components/OrderConfirmationCertificate";
 import { OrderRefusalDialog } from "../components/OrderRefusalDialog";
-import { OrderSubmitProgress } from "../components/OrderSubmitProgress";
+import { OrderSubmitProgress, type OrderProgressFacts, type OrderProgressPhase } from "../components/OrderSubmitProgress";
 import { RiskReviewLegs } from "../components/RiskReviewLegs";
 import { RiskReviewOrderActions } from "../components/RiskReviewOrderActions";
 import { SentimentScan } from "../components/SentimentScan";
@@ -18,6 +18,7 @@ import { VolatilityScan } from "../components/volatility/VolatilityScan";
 import { CAROUSEL_LAYERS, SCAN_SLIDE_LAYERS, SNAPSHOT_STUDIES } from "../constants";
 import { scoreTier } from "../lib/chartHighlight";
 import { optionReviewRows, optionsLegBlockReason } from "../lib/orderTicket";
+import { explainOrderRefusal } from "../lib/orderRefusal";
 import { orderPlacement, overrideReasonText, thesisCheckboxState } from "../lib/riskReview";
 import { normalizeStrategyName } from "../lib/strategyDisplay";
 import { readUserSettings } from "../lib/userSettings";
@@ -39,26 +40,58 @@ import type {
 
 const INTRO_MS = 2200;
 
+type DeepScanTestBoot = {
+  skipIntro: boolean;
+  initialIndex: number;
+  invokeScan: boolean;
+};
+
+const idleDeepScanTestBoot = (): DeepScanTestBoot => ({
+  skipIntro: false,
+  initialIndex: 0,
+  invokeScan: false,
+});
+
+let deepScanTestBoot: DeepScanTestBoot = idleDeepScanTestBoot();
+
+/** Static markup tests skip the intro splash and can open a slide. Production leaves this idle. */
+export function setDeepScanTestBoot(patch: Partial<DeepScanTestBoot>) {
+  deepScanTestBoot = { ...deepScanTestBoot, ...patch };
+}
+
+export function resetDeepScanTestBoot() {
+  deepScanTestBoot = idleDeepScanTestBoot();
+}
+
+function slideLayers(reported: readonly string[] | undefined): string[] {
+  const all = reported ?? [];
+  if (!all.length) return [...SCAN_SLIDE_LAYERS];
+  return SCAN_SLIDE_LAYERS.filter((name) => all.includes(name));
+}
+
 export function DeepScan() {
   const nav = useNavigate();
   const qc = useQueryClient();
-  const {
-    symbol,
-    timeframe,
-    expiry,
-    snapshot,
-    chartImage,
-    chartImageFrozen,
-    capturedBars,
-    capturedContext,
-    capturedDaily,
-    captureSnapshot,
-    setRecommendedContract,
-    user,
-    accountMode,
-  } = useSession();
-  const [intro, setIntro] = useState(true);
-  const [idx, setIdx] = useState(0);
+  const hooked = useSession();
+  // Static markup reads getState(); the browser hook snapshot is the initial store
+  // value under renderToStaticMarkup, so a test's setState would otherwise be ignored.
+  const live = typeof window === "undefined" ? useSession.getState() : hooked;
+  const symbol = live.symbol;
+  const timeframe = live.timeframe;
+  const expiry = live.expiry;
+  const snapshot = live.snapshot;
+  const chartImage = live.chartImage;
+  const chartImageFrozen = live.chartImageFrozen;
+  const capturedBars = live.capturedBars;
+  const capturedContext = live.capturedContext;
+  const capturedDaily = live.capturedDaily;
+  const captureSnapshot = live.captureSnapshot;
+  const setRecommendedContract = live.setRecommendedContract;
+  const user = live.user;
+  const accountMode = live.accountMode;
+  const testBoot = deepScanTestBoot;
+  const [intro, setIntro] = useState(() => !testBoot.skipIntro);
+  const [idx, setIdx] = useState(() => testBoot.initialIndex);
   const [thesis, setThesis] = useState(false);
   const [overrideOpen, setOverrideOpen] = useState(false);
   const [spreadConfirmed, setSpreadConfirmed] = useState(false);
@@ -67,6 +100,8 @@ export function DeepScan() {
   const [orderRefusal, setOrderRefusal] = useState<string | null>(null);
   const [orderConfirmation, setOrderConfirmation] = useState<OrderConfirmationDetails | null>(null);
   const [progressComplete, setProgressComplete] = useState(false);
+  const [submitPhase, setSubmitPhase] = useState<OrderProgressPhase>("submitting");
+  const [submitFacts, setSubmitFacts] = useState<OrderProgressFacts | null>(null);
   const filledOutcome = useRef<OrderConfirmationDetails | null>(null);
   const filledResult = useRef<OrderPlacementResult | null>(null);
 
@@ -85,10 +120,18 @@ export function DeepScan() {
     return snap;
   }, [captureSnapshot, capturedBars, capturedContext, capturedDaily, chartImage, chartImageFrozen, snapshot, symbol, timeframe]);
 
+  const scanExpiry = expiry || undefined;
+  const scanKey = ["scan", locked.captured_at, locked.symbol, locked.timeframe, expiry] as const;
+  const scanQueryFn = () => api.scan(locked, scanExpiry) as Promise<ScanResult>;
   const scan = useQuery({
-    queryKey: ["scan", locked.captured_at, locked.symbol, locked.timeframe, expiry],
-    queryFn: () => api.scan(locked, expiry || undefined) as Promise<ScanResult>,
+    queryKey: scanKey,
+    queryFn: scanQueryFn,
   });
+  const scanInvoked = useRef(false);
+  if (testBoot.invokeScan && !scanInvoked.current) {
+    scanInvoked.current = true;
+    void qc.fetchQuery({ queryKey: scanKey, queryFn: scanQueryFn }).catch(() => undefined);
+  }
 
   /**
    * Fallback only: if the user deep-links to /scan without a captured chart there
@@ -262,11 +305,7 @@ export function DeepScan() {
     });
   }
 
-  const layers = useMemo(() => {
-    const all = scan.data?.layers ?? [];
-    if (!all.length) return [...SCAN_SLIDE_LAYERS];
-    return SCAN_SLIDE_LAYERS.filter((name) => all.includes(name));
-  }, [scan.data?.layers]);
+  const layers = useMemo(() => slideLayers(scan.data?.layers), [scan.data?.layers]);
   // Keep slider index in range when the filtered slide list shrinks after scan loads.
   useEffect(() => {
     setIdx((i) => Math.min(i, Math.max(layers.length - 1, 0)));
@@ -286,6 +325,7 @@ export function DeepScan() {
   const fundamentalsLayer = current === "fundamentals";
   const apexScoreLayer = current === "apex_score";
   const strategyLayer = current === "strategy";
+  const slideExpiry = expiry;
   const riskLayer = current === "risk_review";
   // Full-width slides that run their own card carousel and own the arrow keys.
   const ownsArrows = !layers.length || CAROUSEL_LAYERS.includes(current ?? "");
@@ -294,6 +334,7 @@ export function DeepScan() {
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      const target = e.target as { closest?: (selector: string) => unknown } | null;
       if (ownsArrows && (e.key === "ArrowLeft" || e.key === "ArrowRight")) return;
       if (e.key === "ArrowRight" || e.key === "ArrowDown") setIdx((i) => Math.min(i + 1, Math.max(layers.length - 1, 0)));
       if (e.key === "ArrowLeft" || e.key === "ArrowUp") setIdx((i) => Math.max(i - 1, 0));
@@ -307,6 +348,15 @@ export function DeepScan() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [layers.length, nav, ownsArrows, orderRefusal]);
+
+  function orderProgressFacts(detail?: string): OrderProgressFacts {
+    const strategy = normalizeStrategyName(strategyName);
+    return {
+      ticker: locked.symbol || undefined,
+      strategy: strategyName.trim() ? strategy : undefined,
+      detail,
+    };
+  }
 
   const overrideReasons = overrideReasonText([
     riskReview?.quote_not_current
@@ -350,16 +400,23 @@ export function DeepScan() {
     onSuccess: (r) => {
       const result = r as OrderPlacementResult;
       if ((result.status || "").toLowerCase() !== "filled") {
+        const sentence = explainOrderRefusal(
+          result.status ? `Order status: ${result.status}` : "The order was not filled.",
+        );
         filledOutcome.current = null;
         filledResult.current = null;
         setOrderConfirmation(null);
-        setOrderRefusal(result.status ? `Order status: ${result.status}` : "The order was not filled.");
+        setOrderRefusal(sentence);
+        setSubmitPhase("not-submitted");
+        setSubmitFacts(orderProgressFacts(sentence));
         setProgressComplete(true);
         return;
       }
       filledResult.current = result;
       filledOutcome.current = confirmationFromResult(result);
       setOrderRefusal(null);
+      setSubmitPhase("filled");
+      setSubmitFacts(orderProgressFacts());
       setProgressComplete(true);
     },
     onMutate: () => {
@@ -367,14 +424,19 @@ export function DeepScan() {
       setOrderRefusal(null);
       setOrderConfirmation(null);
       setProgressComplete(false);
+      setSubmitPhase("submitting");
+      setSubmitFacts(orderProgressFacts());
       filledOutcome.current = null;
       filledResult.current = null;
     },
     onError: (e) => {
+      const sentence = explainOrderRefusal((e as Error).message);
       filledOutcome.current = null;
       filledResult.current = null;
       setOrderConfirmation(null);
-      setOrderRefusal((e as Error).message);
+      setOrderRefusal(sentence);
+      setSubmitPhase("not-submitted");
+      setSubmitFacts(orderProgressFacts(sentence));
       setProgressComplete(true);
     },
   });
@@ -402,8 +464,12 @@ export function DeepScan() {
   }
 
   return (
-    <main className={`min-h-screen px-6 py-6 ${fullWidth ? "max-w-none" : ""}`} data-testid="deep-scan">
-      <div className="mb-4 flex items-center justify-between">
+    <main
+      className={`min-h-screen px-6 py-6 ${fullWidth ? "max-w-none" : ""}`}
+      data-testid="deep-scan"
+      data-layers={layers.join(",")}
+    >
+      <div className="mb-4 flex items-center justify-between gap-3">
         <button className="text-sm text-bronze" onClick={() => nav("/app")}>
           ← Dashboard
         </button>
@@ -462,7 +528,7 @@ export function DeepScan() {
         <section className="mt-4" data-testid="volatility-scan-layer">
           <VolatilityScan
             symbol={locked.symbol}
-            expiry={expiry}
+            expiry={slideExpiry}
             initial={data as unknown as VolatilitySnapshot | undefined}
           />
         </section>
@@ -470,7 +536,7 @@ export function DeepScan() {
         <section className="mt-4" data-testid="sentiment-layer">
           <SentimentScan
             symbol={locked.symbol}
-            expiry={expiry}
+            expiry={slideExpiry}
             initial={data as unknown as SentimentLayer | undefined}
           />
         </section>
@@ -627,17 +693,17 @@ export function DeepScan() {
         >
           <div className="order-cert-card w-full max-w-lg">
             <div className="order-cert-frame">
-              <div className="order-cert-inner">
+              <div className="order-cert-inner order-cert-stack">
                 <h2 id="trade-override-title" className="order-cert-title">
                   APEX could not verify this trade
                 </h2>
-                <p className="mt-4 text-sm leading-relaxed text-champagne/80" data-testid="trade-override-body">
+                <p className="order-cert-copy" data-testid="trade-override-body">
                   APEX flagged this trade as not executable: {overrideReasons}. You may proceed at your own risk or cancel.
                 </p>
-                <div className="mt-6 flex justify-end gap-2">
+                <div className="order-cert-actions">
                   <button
                     type="button"
-                    className="rounded-md border border-line px-4 py-2 text-sm"
+                    className="order-cert-dismiss order-cert-dismiss-secondary"
                     data-testid="trade-override-cancel"
                     onClick={() => setOverrideOpen(false)}
                   >
@@ -645,7 +711,7 @@ export function DeepScan() {
                   </button>
                   <button
                     type="button"
-                    className="rounded-md bg-gold px-4 py-2 text-sm text-ink disabled:opacity-40"
+                    className="order-cert-dismiss disabled:opacity-40"
                     data-testid="trade-override-proceed"
                     disabled={order.isPending}
                     onClick={() => {
@@ -663,7 +729,7 @@ export function DeepScan() {
       ) : null}
 
       {order.isPending || progressComplete ? (
-        <OrderSubmitProgress complete={progressComplete && !order.isPending} />
+        <OrderSubmitProgress phase={order.isPending ? "submitting" : submitPhase} facts={submitFacts} />
       ) : null}
 
       {orderRefusal !== null && !order.isPending && !progressComplete ? (

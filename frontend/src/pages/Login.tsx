@@ -5,7 +5,11 @@ import { PasswordField } from "../components/PasswordField";
 import { OtpBoxes } from "../components/OtpBoxes";
 import { LegalFooter } from "../components/LegalFooter";
 import { ExpiryLoginCertificate } from "../components/ExpiryLoginCertificate";
+import { LoginCodeDialog } from "../components/LoginCodeDialog";
+import { SignupNoticeDialog } from "../components/SignupNoticeDialog";
 import { api, AUTH_REDIRECT_KEY, getAccessToken, restoreSession, setAccessToken } from "../api";
+import { loginFailureDialog, type LoginFailureDialog } from "../lib/apiError";
+import { loginCodeNotice, type LoginCodeNotice } from "../lib/loginCode";
 import {
   expiryLoginArrivalAlreadyShown,
   expiryLoginRows,
@@ -50,12 +54,15 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
   const [otpNonce, setOtpNonce] = useState(0);
   const [otpUser, setOtpUser] = useState("");
   const [err, setErr] = useState("");
+  const [codeNotice, setCodeNotice] = useState<LoginCodeNotice | null>(null);
+  const [failure, setFailure] = useState<LoginFailureDialog | null>(null);
   const [expiryRows, setExpiryRows] = useState<ExpiryLoginRow[] | null>(null);
   const [expiryIsPaper, setExpiryIsPaper] = useState(false);
   const [expiryUserId, setExpiryUserId] = useState<string | null>(null);
   const [expiryMarketDay, setExpiryMarketDay] = useState<string | null>(null);
   const [flow, setFlow] = useState<Flow>("login");
   const [stage, setStage] = useState<Stage>("identify");
+  const [submitting, setSubmitting] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
   const flowRef = useRef<Flow>("login");
   const afterExpiryPath = useRef("/app");
@@ -147,7 +154,7 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
       }
       const redirectMsg = sessionStorage.getItem(AUTH_REDIRECT_KEY);
       if (redirectMsg) {
-        setErr(redirectMsg);
+        setFailure(loginFailureDialog(redirectMsg));
         sessionStorage.removeItem(AUTH_REDIRECT_KEY);
       }
       // Failed refresh only. Do not clear symbol, expiry, or captured bars.
@@ -189,8 +196,23 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
     setStage("code");
   }
 
+  function presentLoginError(message: string) {
+    const notice = loginCodeNotice(message);
+    if (notice) {
+      setCodeNotice(notice);
+      setFailure(null);
+      setErr("");
+      return;
+    }
+    setCodeNotice(null);
+    setFailure(loginFailureDialog(message));
+    setErr("");
+  }
+
   function startRecovery() {
     setErr("");
+    setCodeNotice(null);
+    setFailure(null);
     setFlow("recovery");
     flowRef.current = "recovery";
     setStage("identify");
@@ -204,6 +226,8 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
 
   function backToLogin() {
     setErr("");
+    setCodeNotice(null);
+    setFailure(null);
     setFlow("login");
     flowRef.current = "login";
     setStage("identify");
@@ -214,22 +238,54 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
     setOtpUser("");
   }
 
+  function openCodeStep(name: string) {
+    setOtpUser(name);
+    setCode("");
+    setAutofill(null);
+    setOtpNonce((n) => n + 1);
+    setStage("code");
+  }
+
+  async function enterDesk(res: { access_token: string; expires_in: number; refresh_in: number }) {
+    setAccessToken(res.access_token, res.expires_in, res.refresh_in);
+    const me = (await api.me()) as import("../types").User;
+    setUser(me);
+    setModal(true);
+    afterExpiryPath.current = "/app";
+    resetExpiryLoginArrival();
+    const expiryCheck = await maybeShowExpiry(me, () => false, true);
+    if (!expiryLoginShouldNavigate(expiryCheck)) return;
+    nav("/app");
+  }
+
   async function onLogin(e: FormEvent) {
     e.preventDefault();
+    if (submitting) return;
     setErr("");
+    setCodeNotice(null);
+    setFailure(null);
     const name = username.trim();
+    setSubmitting(true);
     try {
-      await api.login(name, password);
+      const res = await api.login(name, password);
+      if (res.otp_required === false && res.access_token && res.expires_in != null && res.refresh_in != null) {
+        await enterDesk({ access_token: res.access_token, expires_in: res.expires_in, refresh_in: res.refresh_in });
+        return;
+      }
       flowRef.current = "login";
-      await beginOtpStage(name, false);
+      openCodeStep(name);
     } catch (ex) {
-      setErr((ex as Error).message);
+      presentLoginError((ex as Error).message);
+    } finally {
+      setSubmitting(false);
     }
   }
 
   async function onRequestRecoveryCode(e: FormEvent) {
     e.preventDefault();
     setErr("");
+    setFailure(null);
+    setCodeNotice(null);
     const name = username.trim();
     if (!name) {
       setErr("Enter your username");
@@ -247,39 +303,47 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
       flowRef.current = "recovery";
       await beginOtpStage(name, true);
     } catch (ex) {
-      setErr((ex as Error).message);
+      presentLoginError((ex as Error).message);
     }
   }
 
   async function getCode() {
     setErr("");
+    setCodeNotice(null);
+    setFailure(null);
+    const name = otpUser || username.trim();
     try {
-      await mintCode(otpUser || username.trim(), flowRef.current === "recovery");
+      if (flowRef.current === "recovery") {
+        await mintCode(name, true);
+        return;
+      }
+      await api.resendLoginCode(name, password);
+      setCode("");
+      setAutofill(null);
+      setOtpNonce((n) => n + 1);
     } catch (ex) {
-      setErr((ex as Error).message);
+      presentLoginError((ex as Error).message);
     }
   }
 
   async function verify(e: FormEvent) {
     e.preventDefault();
     setErr("");
+    setFailure(null);
+    setCodeNotice(null);
     const name = otpUser || username.trim();
+    if (submitting) return;
+    setSubmitting(true);
     try {
       const res =
         flowRef.current === "recovery"
           ? await api.forgotPasswordVerify(name, code)
           : await api.otpVerify(name, code);
-      setAccessToken(res.access_token, res.expires_in, res.refresh_in);
-      const me = (await api.me()) as import("../types").User;
-      setUser(me);
-      setModal(true);
-      afterExpiryPath.current = "/app";
-      resetExpiryLoginArrival();
-      const expiryCheck = await maybeShowExpiry(me, () => false, true);
-      if (!expiryLoginShouldNavigate(expiryCheck)) return;
-      nav("/app");
+      await enterDesk(res);
     } catch (ex) {
-      setErr((ex as Error).message);
+      presentLoginError((ex as Error).message);
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -319,6 +383,15 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
   return (
     <>
     {expiryDialog}
+    {codeNotice ? <LoginCodeDialog kind={codeNotice} onClose={() => setCodeNotice(null)} /> : null}
+    {failure ? (
+      <SignupNoticeDialog
+        title={failure.title}
+        message={failure.message}
+        testId={failure.testId}
+        onClose={() => setFailure(null)}
+      />
+    ) : null}
     <main className="min-h-screen flex items-center justify-center px-4">
       <form
         ref={formRef}
@@ -388,6 +461,11 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
         )}
         {showOtp && (
           <div className="mb-4">
+            {!isRecovery && (
+              <p className="mb-3 text-center text-sm text-subtle" data-testid="login-code-hint">
+                Enter the sign-in code emailed to the address on this account.
+              </p>
+            )}
             <div className="mb-2 flex items-center justify-between">
               <span className="text-xs text-bronze">{isRecovery ? "Security code" : "One-time code"}</span>
               <button type="button" data-testid="get-code" className="text-xs text-gold underline" onClick={getCode}>
@@ -398,13 +476,18 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
               key={otpNonce}
               value={code}
               onChange={setCode}
-              autofill={autofill}
+              autofill={isRecovery ? autofill : null}
               onAutofillComplete={() => formRef.current?.requestSubmit()}
             />
           </div>
         )}
         {err && <p className="mb-3 apex-alert apex-alert-error" role="alert">{err}</p>}
-        <button type="submit" className="w-full rounded-md bg-gold py-2.5 font-medium text-ink" data-testid="login-submit">
+        <button
+          type="submit"
+          className="w-full rounded-md bg-gold py-2.5 font-medium text-ink disabled:opacity-60"
+          data-testid="login-submit"
+          disabled={submitting}
+        >
           {submitLabel}
         </button>
         {isRecovery ? (

@@ -244,7 +244,9 @@ describe("DeepScan risk review order panel", () => {
     expect(page).toContain("const userOverride = input.userOverride === true");
     expect(page).toContain("user_override: userOverride");
     expect(page).toContain("OrderRefusalDialog");
-    expect(page).toContain("setOrderRefusal((e as Error).message)");
+    expect(page).toContain("setOrderRefusal(sentence)");
+    expect(page).toContain("explainOrderRefusal((e as Error).message)");
+    expect(page).not.toContain("setOrderRefusal((e as Error).message)");
     expect(page).toContain("OrderSubmitProgress");
     expect(page).toContain("order.isPending || progressComplete");
     expect(page).toContain("orderConfirmation && !order.isPending && !progressComplete");
@@ -259,19 +261,38 @@ describe("DeepScan risk review order panel", () => {
     expect(actions).toContain("Acknowledge");
     const progress = readFileSync(resolve(here, "../components/OrderSubmitProgress.tsx"), "utf8");
     expect(progress).toContain('data-testid="order-progress"');
-    expect(progress).toContain('data-testid="order-progress-pct"');
-    expect(progress).toContain("aria-valuenow={pct}");
-    expect(progress).toContain("setPct(100)");
-    const pending = renderToStaticMarkup(<OrderSubmitProgress complete={false} />);
+    expect(progress).toContain("Submitting");
+    expect(progress).toContain("Filled");
+    expect(progress).toContain("Not submitted");
+    expect(progress).not.toContain("order-progress-pct");
+    expect(progress).not.toContain("aria-valuenow");
+    expect(progress).not.toContain("requestAnimationFrame");
+    const pending = renderToStaticMarkup(
+      <OrderSubmitProgress phase="submitting" facts={{ ticker: "AAPL", strategy: "Bull Call Spread" }} />,
+    );
     expect(pending).toContain('data-testid="order-progress"');
-    expect(pending).toContain('data-testid="order-progress-pct"');
-    expect(pending).toContain('data-complete="false"');
-    expect(pending).toContain(">0%<");
-    expect(pending).not.toContain('aria-valuenow="100"');
-    const done = renderToStaticMarkup(<OrderSubmitProgress complete />);
-    expect(done).toContain('data-complete="true"');
-    expect(done).toContain('aria-valuenow="100"');
-    expect(done).toContain(">100%<");
+    expect(pending).toContain('data-phase="submitting"');
+    expect(pending).toContain("Submitting");
+    expect(pending).toContain("AAPL");
+    expect(pending).toContain("Bull Call Spread");
+    expect(pending).not.toContain("%");
+    expect(pending).not.toContain("order-progress-ring");
+    const filled = renderToStaticMarkup(
+      <OrderSubmitProgress phase="filled" facts={{ ticker: "AAPL", strategy: "Bull Call Spread" }} />,
+    );
+    expect(filled).toContain('data-phase="filled"');
+    expect(filled).toContain("Filled");
+    expect(filled).toContain("AAPL");
+    const refused = renderToStaticMarkup(
+      <OrderSubmitProgress
+        phase="not-submitted"
+        facts={{ detail: "The connection failed, so the order was not submitted." }}
+      />,
+    );
+    expect(refused).toContain('data-phase="not-submitted"');
+    expect(refused).toContain("Not submitted");
+    expect(refused).toContain("The connection failed, so the order was not submitted.");
+    expect(refused).not.toContain("%");
   });
 
   it("renders each option leg from the scan ticket and not the empty sentence", () => {

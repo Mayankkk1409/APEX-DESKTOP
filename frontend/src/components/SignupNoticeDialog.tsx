@@ -1,15 +1,17 @@
 import { useEscapeKey, useFocusTrap } from "../hooks/useFocusTrap";
-import { explainOrderRefusal } from "../lib/orderRefusal";
 
 type Props = {
-  reason: string;
+  title: string;
+  message: string;
+  testId: string;
   onClose: () => void;
 };
 
-/** A submit was attempted and the server or broker refused it. The order is not filled. */
-export function OrderRefusalDialog({ reason, onClose }: Props) {
+/** Centered certificate notice for signup email outcomes. */
+export function SignupNoticeDialog({ title, message, testId, onClose }: Props) {
   const trapRef = useFocusTrap(true);
   useEscapeKey(true, onClose);
+  const titleId = `${testId}-title`;
 
   return (
     <div
@@ -17,19 +19,19 @@ export function OrderRefusalDialog({ reason, onClose }: Props) {
       className="order-cert-backdrop fixed inset-0 z-[60] flex items-center justify-center p-4"
       role="dialog"
       aria-modal="true"
-      aria-labelledby="order-refusal-title"
-      data-testid="order-refusal"
+      aria-labelledby={titleId}
+      data-testid={testId}
     >
       <div className="order-cert-card w-full max-w-lg">
         <div className="order-cert-frame">
           <div className="order-cert-inner order-cert-stack">
-            <h2 id="order-refusal-title" className="order-cert-title">
-              Order not submitted
+            <h2 id={titleId} className="order-cert-title">
+              {title}
             </h2>
-            <p className="order-cert-copy" data-testid="order-refusal-reason">
-              {explainOrderRefusal(reason)}
+            <p className="order-cert-copy" data-testid={`${testId}-message`}>
+              {message}
             </p>
-            <button type="button" className="order-cert-dismiss" data-testid="order-refusal-close" onClick={onClose}>
+            <button type="button" className="order-cert-dismiss" data-testid={`${testId}-close`} onClick={onClose}>
               Close
             </button>
           </div>
