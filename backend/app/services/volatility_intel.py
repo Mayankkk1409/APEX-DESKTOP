@@ -328,11 +328,10 @@ def resolve_recommended_contract(
     direction = str(tech.get("direction") or "neutral")
     vol_signal = "fair"
     if atm_i is not None and hv is not None:
-        gap = atm_i - hv
-        if gap > DEFAULT_THRESHOLDS.iv_hv_rich_pts:
-            vol_signal = "sell_premium"
-        elif gap < -DEFAULT_THRESHOLDS.iv_hv_rich_pts:
-            vol_signal = "buy_premium"
+        from app.analysis.gate_config import assess_vol_regime
+
+        view = assess_vol_regime(iv=atm_i, hv=hv, iv_rank=None)
+        vol_signal = {"sell premium": "sell_premium", "buy premium": "buy_premium", "fair": "fair"}[view.label]
     strategy = infer_strategy_label(
         direction,
         vol_signal,
@@ -452,23 +451,40 @@ def _term_structure_label(legs: Sequence[dict[str, Any]]) -> tuple[str, str]:
 
 
 def _iv_hv_signal(iv: float | None, hv: float | None) -> dict[str, Any]:
-    """Documented §6.1 bands — only when both legs exist."""
+    """Same ±5 vol-point rule as ``assess_vol_regime``. There is no 10-point band."""
     if iv is None or hv is None:
         return {
             "signal": "unavailable",
             "gap_pts": None,
             "reason": "ATM IV or HV is unavailable, so no rich/cheap verdict is claimed.",
         }
-    gap = (iv - hv) * 100.0
-    if gap > 10:
-        signal, reason = "sell_premium", f"IV is {gap:.1f} pts above HV (>10) — options rich vs realised."
-    elif gap < -10:
-        signal, reason = "buy_premium", f"IV is {abs(gap):.1f} pts below HV (>10) — options cheap vs realised."
-    elif abs(gap) <= 5:
-        signal, reason = "fair", f"IV ≈ HV within 5 pts (gap {gap:+.1f}) — fair value band."
+    from app.analysis.gate_config import IV_MISMATCH_VOL_POINTS, assess_vol_regime
+
+    view = assess_vol_regime(iv=iv, hv=hv, iv_rank=None)
+    gap = view.iv_minus_hv_pts
+    signal = {"sell premium": "sell_premium", "buy premium": "buy_premium", "fair": "fair"}[view.label]
+    band = float(IV_MISMATCH_VOL_POINTS)
+    if gap is None:
+        reason = view.verdict
+    elif signal == "sell_premium":
+        reason = (
+            f"IV is {gap:.1f} pts above HV (more than {band:.0f}) — options rich vs realised. "
+            f"{view.verdict}"
+        )
+    elif signal == "buy_premium":
+        reason = (
+            f"IV is {abs(gap):.1f} pts below HV (more than {band:.0f}) — options cheap vs realised. "
+            f"{view.verdict}"
+        )
     else:
-        signal, reason = "between_bands", f"IV/HV gap is {gap:+.1f} pts — between the 5-pt fair and 10-pt rich/cheap bands."
-    return {"signal": signal, "gap_pts": gap, "reason": reason}
+        reason = f"IV versus HV gap is {gap:+.1f} pts, within ±{band:.0f}. {view.verdict}"
+    return {
+        "signal": signal,
+        "gap_pts": gap,
+        "reason": reason,
+        "verdict": view.verdict,
+        "rule": view.rule,
+    }
 
 
 def _fmt_pct(v: float | None, digits: int = 1) -> str:
@@ -577,8 +593,8 @@ def build_analysis_cards(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
                 + (f" (ATM–RV gap {gap_pts:+.1f} pts)." if gap_pts is not None else ".")
                 + " "
                 + (signal.get("reason") or "")
-                + " Desk read: >10 pts rich favours premium selling structures; >10 pts cheap favours "
-                "long premium / spreads; ±5 pts is the fair-value band where defined-risk dominates. "
+                + " Desk read: more than 5 vol points above HV is rich and favours selling premium; "
+                "more than 5 below is cheap and favours long premium; within ±5 is fair. "
                 + (
                     f"IV Rank {_fmt_num(ivr)} / percentile {_fmt_num(ivp)} use {iv_pts} daily points "
                     f"from the {iv_source.replace('_', ' ')} series."
@@ -786,9 +802,23 @@ def build_volatility_payload(
         rank_iv = primary_iv
     iv_hist_values = list(iv_history or [v for _, v in hist_points])
     iv_ranks = compute_iv_rank(iv_hist_values, rank_iv, atm_iv=atm_iv_val, hv=hv)
+    rank_is_proxy = bool(iv_ranks.get("proxy"))
+    published_rank = None if rank_is_proxy else iv_ranks.get("iv_rank")
+    published_percentile = None if rank_is_proxy else iv_ranks.get("iv_percentile")
+    iv_rank_gap = None
+    if rank_is_proxy or published_rank is None:
+        iv_rank_gap = (
+            "IV rank is a data gap: published IV history is missing or shorter than 20 points. "
+            "An HV ratio is not IV rank."
+        )
 
     em = expected_move(resolved_spot, atm_iv_val, dte)
     iv_vs_hv = _iv_hv_signal(atm_iv_val, hv)
+    from app.analysis.gate_config import classify_vol_regime
+
+    regime_words = classify_vol_regime(iv_rank=published_rank, iv=atm_iv_val, hv=hv)
+    regime_signal = {"sell premium": "sell_premium", "buy premium": "buy_premium", "fair": "fair"}[regime_words]
+    iv_vs_hv = {**iv_vs_hv, "signal": regime_signal, "regime": regime_words}
 
     term_legs = list(term_structure or [])
     term_shape, term_detail = _term_structure_label(term_legs)
@@ -805,7 +835,9 @@ def build_volatility_payload(
             notes.append("IV history has fewer than two points — chart may show a reference line only.")
     elif len({round(v, 6) for _, v in hist_points}) < 2:
         notes.append("IV history is flat — check option bar entitlement for the recommended leg.")
-    if iv_ranks.get("iv_rank") is None and len(closes) >= 20:
+    if iv_rank_gap:
+        notes.append(iv_rank_gap)
+    elif iv_ranks.get("iv_rank") is None and len(closes) >= 20:
         pts = int(iv_ranks.get("history_points") or 0)
         if pts > 0:
             notes.append(f"IV Rank / Percentile warming up — {pts} daily IV points (need ≥20).")
@@ -831,16 +863,20 @@ def build_volatility_payload(
         "recommended_contract": rec,
         "hv": hv,
         "hv_by_window": windows,
-        "iv_rank": iv_ranks.get("iv_rank"),
-        "iv_percentile": iv_ranks.get("iv_percentile"),
+        "iv_rank": published_rank,
+        "iv_percentile": published_percentile,
+        "iv_rank_gap": iv_rank_gap,
         "iv_history_points": iv_ranks.get("history_points"),
         "iv_history_source": iv_history_source,
+        "feed": chain.feed if chain else None,
+        "quoted_at": chain.as_of if chain else None,
         "hv_rank": hv30_bundle.get("hv_rank"),
         "hv_percentile": hv30_bundle.get("hv_percentile"),
         "hv_history_points": hv30_bundle.get("history_points"),
         "expected_move": em,
         "iv_vs_hv": iv_vs_hv,
-        "signal": iv_vs_hv.get("signal"),
+        "signal": regime_signal,
+        "regime": regime_words,
         "term_structure": {"shape": term_shape, "detail": term_detail, "legs": term_legs},
         "series": series,
         "methodology": METHODOLOGY,

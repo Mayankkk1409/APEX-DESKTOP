@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timezone
+from decimal import ROUND_HALF_UP, Decimal
 
 from app.models.trading import Order, Position
 from app.models.user import User
 from app.services.fills import position_multiplier
+
+_CENT = Decimal("0.01")
 
 
 def account_baseline(user: User) -> float:
@@ -74,7 +77,24 @@ def replay_filled_orders(orders: list[Order]) -> dict[str, _Book]:
     return books
 
 
+def _money(amount: Decimal) -> float:
+    """Half-up to the cent, then a float for the existing row payload."""
+    return float(amount.quantize(_CENT, rounding=ROUND_HALF_UP))
+
+
+def _dec(value: float) -> Decimal:
+    return Decimal(str(value))
+
+
 def symbol_pnl_rows(orders: list[Order], positions: list[Position]) -> list[SymbolPnlRow]:
+    """Per-symbol P&L.
+
+    unrealized = (mark − average) × qty × multiplier
+    total = realized + unrealized
+
+    qty is signed. A short (qty < 0) gains when the mark falls.
+    Order rows have no fee field; this function does not invent one.
+    """
     books = replay_filled_orders(orders)
     pos_by_sym = {p.symbol.upper(): p for p in positions}
     symbols = set(books) | set(pos_by_sym)
@@ -85,19 +105,21 @@ def symbol_pnl_rows(orders: list[Order], positions: list[Position]) -> list[Symb
         asset_class = pos.asset_class if pos else book.asset_class
         mult = position_multiplier(asset_class)
         qty = pos.qty if pos else book.qty
-        unrealized = 0.0
-        if pos and pos.qty > 0:
-            unrealized = (pos.current_price - pos.avg_cost) * pos.qty * mult
-        realized = book.realized_pl
+        unrealized = Decimal(0)
+        if pos is not None and pos.qty != 0:
+            unrealized = (_dec(pos.current_price) - _dec(pos.avg_cost)) * _dec(pos.qty) * Decimal(mult)
+        realized = _dec(book.realized_pl)
+        realized_q = realized.quantize(_CENT, rounding=ROUND_HALF_UP)
+        unrealized_q = unrealized.quantize(_CENT, rounding=ROUND_HALF_UP)
         rows.append(
             SymbolPnlRow(
                 symbol=sym,
                 asset_class=asset_class,
                 qty=qty,
-                realized_pl=round(realized, 2),
-                unrealized_pl=round(unrealized, 2),
-                total_pl=round(realized + unrealized, 2),
-                is_open=bool(pos and pos.qty > 0),
+                realized_pl=_money(realized_q),
+                unrealized_pl=_money(unrealized_q),
+                total_pl=_money(realized_q + unrealized_q),
+                is_open=bool(pos is not None and pos.qty != 0),
             )
         )
     return rows
@@ -107,21 +129,17 @@ def _utc_date(dt: datetime) -> date:
     return _as_utc(dt).date()
 
 
-def _day_end(d: date) -> datetime:
-    return datetime.combine(d, time.max, tzinfo=timezone.utc)
-
-
-def _day_start(d: date) -> datetime:
-    return datetime.combine(d, time.min, tzinfo=timezone.utc)
-
-
 def _replay_equity_events(
     user: User,
     orders: list[Order],
     positions: list[Position],
     baseline: float,
 ) -> list[tuple[datetime, float]]:
-    """Portfolio equity after each fill and at the live mark."""
+    """Cash plus marked positions after each fill, then the live mark.
+
+    At a fill, the traded symbol is marked at the fill price and other open
+    lots stay at average cost. The live point uses each position's current price.
+    """
     events: list[tuple[datetime, float]] = []
     cash = baseline
     open_lots: dict[str, _Book] = {}
@@ -173,36 +191,31 @@ def _replay_equity_events(
 
 
 def pnl_history_points(user: User, orders: list[Order], positions: list[Position]) -> list[dict]:
-    """Daily account equity from account creation through today."""
+    """Observed portfolio value only.
+
+    portfolio_value = cash + marked positions at that observation.
+    Observations are account open, each fill, and the live mark.
+    Days with no observation are omitted.
+    """
     baseline = account_baseline(user)
     account_start = _as_utc(user.created_at) if user.created_at else datetime.now(timezone.utc)
-    filled = [o for o in orders if o.status == "filled" and o.fill_price is not None]
-
-    range_start = _utc_date(account_start)
-    if filled:
-        earliest_fill = min(_order_ts(o) for o in filled)
-        range_start = min(range_start, _utc_date(earliest_fill))
-
-    today = _utc_date(datetime.now(timezone.utc))
     events = _replay_equity_events(user, orders, positions, baseline)
 
-    points: list[dict] = []
-    current_value = baseline
-    event_idx = 0
-    day = range_start
-    while day <= today:
-        day_end = _day_end(day)
-        while event_idx < len(events) and events[event_idx][0] <= day_end:
-            current_value = events[event_idx][1]
-            event_idx += 1
-        points.append(
-            {
-                "t": _day_start(day).isoformat(),
-                "portfolio_value": round(current_value, 2),
-                "balance": round(current_value, 2),
-                "cumulative_pl": round(current_value - baseline, 2),
-            }
-        )
-        day += timedelta(days=1)
+    raw: list[tuple[datetime, float]] = [(account_start, round(baseline, 2))]
+    raw.extend((_as_utc(ts), value) for ts, value in events)
+    raw.sort(key=lambda item: item[0])
 
+    points: list[dict] = []
+    for ts, value in raw:
+        rounded = round(float(value), 2)
+        point = {
+            "t": ts.isoformat(),
+            "portfolio_value": rounded,
+            "balance": rounded,
+            "cumulative_pl": round(rounded - baseline, 2),
+        }
+        if points and points[-1]["t"] == point["t"]:
+            points[-1] = point
+            continue
+        points.append(point)
     return points

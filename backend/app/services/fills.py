@@ -3,11 +3,21 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.trading import Order, Position
 from app.models.user import User
+from app.services.executability import (
+    DEFAULT_SPREAD_MAX,
+    load_submission_quote,
+    marketable_limit,
+    slippage_dollars,
+    spread_confirmation_text,
+    spread_vs_mid,
+)
+from app.services.occ_symbol import parse_occ
 from app.services.orders import account_impact, estimate_order_cost
 from app.strategies.registry import get_strategy_spec, resolve_strategy_id
 from app.strategies.validator import validate_strategy_output
@@ -18,12 +28,167 @@ def position_multiplier(asset_class: str) -> int:
     return 100 if asset_class == "us_option" else 1
 
 
+_REJECTED_STATUSES = {"rejected", "canceled", "cancelled", "expired", "failed", "suspended", "error"}
+
+
+def _broker_rejected(broker: object) -> bool:
+    if not isinstance(broker, dict):
+        return True
+    if broker.get("rejected") is True:
+        return True
+    return str(broker.get("status") or "").lower() in _REJECTED_STATUSES
+
+
+# Alpaca refuses option market orders when the session is closed. A paper account
+# can still fill on the local book. A buying-power rejection cannot.
+_SESSION_PAPER_MARKERS = (
+    "options market orders are only allowed during market hours",
+    "market orders are only allowed during market hours",
+    "market is closed",
+    "outside of market hours",
+    "outside market hours",
+)
+
+# The broker's option approval level is a property of the broker account, not of the
+# structure. A defined-risk spread carries its own cover, so a paper account fills the
+# whole structure on the local book instead of shopping the short leg on its own.
+_UNCOVERED_PAPER_MARKERS = (
+    "uncovered option",
+    "naked option",
+    "not eligible to trade uncovered",
+    "not approved for uncovered",
+)
+
+
+class ComboHeldBack(ValueError):
+    """A combo rejection whose sentence already states that no short leg was submitted."""
+
+
+def _broker_reason(broker: dict) -> str:
+    reason = broker.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        return reason.strip()
+    return "Broker rejected the order"
+
+
+def _session_restricted(reason: str) -> bool:
+    text = reason.lower()
+    return any(marker in text for marker in _SESSION_PAPER_MARKERS)
+
+
+def paper_fill_sentence(reason: str) -> str:
+    """Broker reason, then the local fill. One notice. No naked-short stack."""
+    text = reason.strip() or "Broker rejected the order"
+    if text[-1] not in ".!?":
+        text = f"{text}."
+    return f"{text} The paper order filled at the mid."
+
+
+def _uncovered_restricted(reason: str) -> bool:
+    text = reason.lower()
+    return any(marker in text for marker in _UNCOVERED_PAPER_MARKERS)
+
+
+def _paper_fillable(reason: str) -> bool:
+    """A closed session or an uncovered-option refusal is a broker limit a paper book can absorb."""
+    return _session_restricted(reason) or _uncovered_restricted(reason)
+
+
+def _sentence(reason: str, fallback: str) -> str:
+    text = reason.strip() or fallback
+    if text[-1] not in ".!?":
+        text = f"{text}."
+    return text
+
+
+def _positive_mark(raw: object) -> float | None:
+    if isinstance(raw, bool) or raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value > 0:
+        return value
+    return None
+
+
+def _option_quote_is_equity_fallback(symbol: str, quote: object) -> bool:
+    """A stock feed cannot price an OCC symbol. The demo fallback looks like a $100 share."""
+    if parse_occ(symbol) is None:
+        return False
+    source = str(getattr(quote, "source", "") or "").lower()
+    asset = str(getattr(quote, "asset_class", "") or "").lower()
+    if asset in {"us_option", "option"}:
+        return False
+    return source in {"demo", "unavailable", ""} or "demo" in source
+
+
+async def _paper_submit(payload: dict[str, Any]) -> dict:
+    """Existing demo/paper fill used when Alpaca is dark, closed, or rejects."""
+    from app.adapters.demo import DemoAdapter
+
+    return await DemoAdapter().submit_order(**payload)
+
+
+async def _submit_for_fill(
+    adapter: Any,
+    *,
+    force_paper: bool,
+    symbol: str,
+    qty: float,
+    side: str,
+    order_type: str,
+    limit_price: float | None,
+    strict: bool = False,
+    session_paper: bool = False,
+) -> dict:
+    payload = {
+        "symbol": symbol,
+        "qty": qty,
+        "side": side,
+        "order_type": order_type,
+        "limit_price": limit_price,
+        "strict": strict,
+    }
+    if force_paper:
+        return await _paper_submit(payload)
+    try:
+        broker = await adapter.submit_order(**payload)
+    except Exception as exc:  # noqa: BLE001
+        reason = str(exc).strip() or "Broker order failed"
+        # Uncovered-option refusals are absorbed only by the combo path. A single short
+        # is not filled on its own.
+        if strict and not (session_paper and _session_restricted(reason)):
+            raise ValueError(reason) from exc
+        logger.warning("Broker order failed ({}); using paper fill", type(exc).__name__)
+        paper = await _paper_submit(payload)
+        if _session_restricted(reason):
+            paper["session_paper_fill"] = True
+            paper["paper_fill_note"] = paper_fill_sentence(reason)
+        return paper
+    if not isinstance(broker, dict) or _broker_rejected(broker):
+        reason = _broker_reason(broker) if isinstance(broker, dict) else "Broker rejected the order"
+        if strict and not (session_paper and _session_restricted(reason)):
+            raise ValueError(reason)
+        if strict:
+            logger.warning("Broker order rejected ({}); using paper fill", reason)
+        else:
+            logger.warning("Broker order rejected; using paper fill")
+        paper = await _paper_submit(payload)
+        if _session_restricted(reason):
+            paper["session_paper_fill"] = True
+            paper["paper_fill_note"] = paper_fill_sentence(reason)
+        return paper
+    return broker
+
+
 async def refresh_portfolio_value(user: User, db: AsyncSession, adapter: Any) -> float:
     positions = (await db.scalars(select(Position).where(Position.user_id == user.id))).all()
     live_value = user.cash_balance
     for pos in positions:
         q = await adapter.quote(pos.symbol)
-        if q.price is not None:
+        if q.price is not None and not _option_quote_is_equity_fallback(pos.symbol, q):
             pos.current_price = q.price
         mult = position_multiplier(pos.asset_class)
         live_value += pos.qty * pos.current_price * mult
@@ -46,15 +211,51 @@ async def execute_market_fill(
     scan_id: str | None = None,
     strategy_name: str | None = None,
     certificate: dict[str, Any] | None = None,
+    force_paper: bool = False,
+    closing: bool = False,
+    strict: bool = False,
+    mark_price: float | None = None,
+    routing: dict[str, Any] | None = None,
+    spread_confirmed: bool = False,
+    spread_max: float = DEFAULT_SPREAD_MAX,
+    submission_path: str = "market_fill",
+    user_override: bool = False,
 ) -> Order:
-    quote = await adapter.quote(symbol)
-    px = limit_price if order_type == "limit" and limit_price is not None else quote.price
+    from app.services.executability import enforce_submission_quotes, marketable_limit
+
+    await enforce_submission_quotes(
+        adapter,
+        [symbol],
+        path=submission_path,
+        spread_confirmed=spread_confirmed,
+        contracts=qty,
+        multiplier=position_multiplier(asset_class),
+        spread_max=spread_max,
+        user_override=user_override,
+    )
+    if asset_class == "us_option":
+        quote = await adapter.quote(symbol)
+        live = marketable_limit(side, quote)
+        live_limit = live[0] if live is not None else None
+        if live_limit is not None:
+            order_type = "limit"
+            limit_price = live_limit
+        elif order_type != "limit":
+            order_type = "limit"
+            if limit_price is None:
+                limit_price = _positive_mark(getattr(quote, "price", None))
+    mark = _positive_mark(mark_price)
+    if asset_class == "us_option" and mark is not None:
+        px = mark
+    else:
+        quote = await adapter.quote(symbol)
+        px = limit_price if order_type == "limit" and limit_price is not None else quote.price
     if px is None:
         raise ValueError("Live quote unavailable for this symbol")
     mult = position_multiplier(asset_class)
     cost = estimate_order_cost(qty, px, asset_class=asset_class, multiplier=mult)  # type: ignore[arg-type]
     impact = account_impact(side, cost)
-    if side == "buy" and cost > user.buying_power:
+    if side == "buy" and cost > user.buying_power and not closing:
         raise ValueError("Insufficient buying power")
 
     order = Order(
@@ -73,13 +274,23 @@ async def execute_market_fill(
     db.add(order)
     await db.flush()
 
-    broker = await adapter.submit_order(
+    broker = await _submit_for_fill(
+        adapter,
+        force_paper=force_paper,
         symbol=order.symbol,
         qty=order.qty,
         side=order.side,
         order_type=order.order_type,
         limit_price=order.limit_price,
+        strict=strict,
+        session_paper=user.account_mode != "real_brokerage",
     )
+    if routing is not None and isinstance(broker, dict) and broker.get("session_paper_fill"):
+        routing["force_paper"] = True
+    note = broker.get("paper_fill_note") if isinstance(broker, dict) else None
+    paper_note = note if isinstance(note, str) and note.strip() else None
+    if paper_note:
+        logger.info("paper fill note symbol={} note={}", order.symbol, paper_note)
     fill_px = float(broker.get("filled_avg_price") or px)
     order.status = "filled"
     order.fill_price = fill_px
@@ -102,12 +313,13 @@ async def execute_market_fill(
         else:
             pos.qty = new_qty
             pos.current_price = fill_px
-    elif order.side == "buy":
+    elif order.side == "buy" or (order.side == "sell" and asset_class == "us_option"):
+        opened = order.qty if order.side == "buy" else -order.qty
         db.add(
             Position(
                 user_id=user.id,
                 symbol=order.symbol,
-                qty=order.qty,
+                qty=opened,
                 avg_cost=fill_px,
                 current_price=fill_px,
                 asset_class=asset_class,
@@ -120,6 +332,7 @@ async def execute_market_fill(
     await refresh_portfolio_value(user, db, adapter)
     await db.commit()
     await db.refresh(order)
+    order.fill_note = paper_note  # type: ignore[attr-defined]
 
     await hub.broadcast(
         user.id,
@@ -134,9 +347,64 @@ async def execute_market_fill(
             "balance": user.cash_balance,
             "buying_power": user.buying_power,
             "portfolio_value": user.portfolio_value,
+            "note": paper_note,
         },
     )
     return order
+
+
+async def _record_user_override(
+    *,
+    user_id: str,
+    scan_id: str | None,
+    reasons: list[str],
+    adapter: Any,
+    legs: list[dict[str, Any]],
+) -> None:
+    """Refetch each leg once and keep the latest price as the limit. Auto-exec never calls this."""
+    from app.contracts import LedgerEntry
+    from app.services.evidence_ledger import record
+    from app.services.executability import load_submission_quote, marketable_limit
+
+    now = datetime.now(timezone.utc).isoformat()
+    used: list[dict[str, Any]] = []
+    for leg in legs:
+        symbol = str(leg.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        quote, problem = await load_submission_quote(adapter, symbol)
+        side = str(leg.get("side") or "buy")
+        live = marketable_limit(side, quote) if quote is not None else None
+        price = live[0] if live else _positive_mark(getattr(quote, "price", None) if quote is not None else None)
+        if price is not None:
+            leg["order_type"] = "limit"
+            leg["limit_price"] = price
+            leg["price"] = price
+        used.append(
+            {
+                "symbol": symbol,
+                "price": price,
+                "bid": getattr(quote, "bid", None) if quote is not None else None,
+                "ask": getattr(quote, "ask", None) if quote is not None else None,
+                "problem": problem,
+            }
+        )
+    logger.info("user override user={} time={} reasons={} quotes={}", user_id, now, reasons, used)
+    if not scan_id:
+        return
+    record(
+        LedgerEntry(
+            scanId=scan_id,
+            kind="value",
+            key="user_override",
+            value={"user_id": user_id, "reasons": reasons, "quotes": used},
+            inputs={"user_id": user_id, "reasons": reasons, "quotes": used, "recorded_at": now},
+            source="user",
+            feed=None,
+            timestamp=now,
+            fn="execute_strategy_legs",
+        )
+    )
 
 
 async def execute_strategy_legs(
@@ -150,8 +418,45 @@ async def execute_strategy_legs(
     strategy_name: str | None = None,
     certificate: dict[str, Any] | None = None,
     equity_legs: list[dict[str, Any]] | None = None,
+    equity_satisfied: bool = False,
+    checks_passed: bool | None = None,
+    auto_execute: bool = False,
+    spread_confirmed: bool = False,
+    spread_max: float = DEFAULT_SPREAD_MAX,
+    submission_path: str = "strategy_legs",
+    wide_spread_only: bool = False,
+    user_override: bool = False,
+    override_reasons: list[str] | None = None,
 ) -> list[Order]:
-    """Fill each recommended leg — options always; equity only when strategy requires it."""
+    """Fill stock first, then options. A short call is sent only after covering shares are in place."""
+    from app.analysis.gate_config import refuse_if_checks_failed
+    from app.services.executability import enforce_submission_quotes, order_symbols
+    from app.services.stock_leg import SHORT_STOCK_INFEASIBLE, is_short_call, partition_option_legs
+
+    honored_override = bool(user_override) and not auto_execute
+    if checks_passed is False and not honored_override and not (wide_spread_only and spread_confirmed):
+        try:
+            refuse_if_checks_failed(checks_passed=checks_passed, auto_execute=auto_execute)
+        except ValueError as exc:
+            logger.warning("order blocked reason={}", exc)
+            raise
+    await enforce_submission_quotes(
+        adapter,
+        order_symbols(legs, *[str((row or {}).get("symbol") or "") for row in (equity_legs or [])]),
+        path=submission_path,
+        spread_confirmed=spread_confirmed,
+        contracts=contracts_per_leg,
+        spread_max=spread_max,
+        user_override=honored_override,
+    )
+    if honored_override:
+        await _record_user_override(
+            user_id=user.id,
+            scan_id=scan_id,
+            reasons=list(override_reasons or []),
+            adapter=adapter,
+            legs=legs,
+        )
     if not legs and not equity_legs:
         raise ValueError("Strategy legs are required for execution")
     if strategy_name and certificate:
@@ -176,52 +481,448 @@ async def execute_strategy_legs(
             raise ValueError(str(err))
         spec = get_strategy_spec(strategy_name)
         if spec and spec.equity_required and spec.equity_leg_spec:
-            overlay = spec.equity_leg_spec.entry_mode == "pre_existing"
-            if not overlay and not equity_legs:
+            if not equity_legs and not equity_satisfied:
                 raise ValueError("Equity-required strategy missing stock leg — execution blocked")
         elif equity_legs:
             raise ValueError("Equity legs submitted for options-only strategy — execution blocked")
     qty = contracts_per_leg
     if qty <= 0:
         raise ValueError("contracts_per_leg must be positive")
+    buys, shorts = partition_option_legs(legs)
+    # One symbol per request. Buys fill before any short option. A rejected component stops the rest of the shorts.
+    strict = bool(equity_legs) or bool(shorts) or equity_satisfied
     orders: list[Order] = []
-    for eq in equity_legs or []:
-        symbol = str(eq.get("symbol") or "").upper()
-        side = str(eq.get("side") or "").lower()
-        eq_qty = float(eq.get("qty") or 100)
-        if not symbol or side not in {"buy", "sell"}:
-            raise ValueError("Each equity leg must include a ticker symbol and buy/sell side")
-        order = await execute_market_fill(
+    routing: dict[str, Any] = {"force_paper": False}
+    stored = list((certificate or {}).get("legs") or [])
+    marks = _premium_marks(list(legs), stored) if honored_override else _premium_marks(stored, list(legs))
+
+    def _option_limit(leg: dict[str, Any]) -> tuple[str, float | None]:
+        kind = str(leg.get("order_type") or "market").lower()
+        if kind != "limit":
+            return "market", None
+        raw = leg.get("limit_price")
+        if raw is None:
+            raw = leg.get("price") if leg.get("price") is not None else leg.get("mid")
+        try:
+            price = float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            price = None
+        if price is None or price <= 0:
+            raise ValueError("Live mid is unavailable, so a limit at mid cannot be priced.")
+        return "limit", price
+
+    async def _fill_one(
+        *,
+        symbol: str,
+        side: str,
+        leg_qty: float,
+        asset_class: str,
+        order_type: str = "market",
+        limit_price: float | None = None,
+    ) -> Order:
+        use_paper = bool(routing["force_paper"])
+        return await execute_market_fill(
             user=user,
             db=db,
             adapter=adapter,
             symbol=symbol,
             side=side,
-            qty=eq_qty,
-            asset_class="us_equity",
-            order_type="market",
+            qty=leg_qty,
+            asset_class=asset_class,
+            order_type=order_type,
+            limit_price=limit_price,
             scan_id=scan_id,
             strategy_name=strategy_name,
             certificate=certificate,
+            force_paper=use_paper,
+            strict=strict and not use_paper,
+            mark_price=marks.get(symbol) if asset_class == "us_option" else None,
+            routing=routing,
+            spread_confirmed=spread_confirmed,
+            spread_max=spread_max,
+            user_override=honored_override,
         )
-        orders.append(order)
-    for leg in legs:
+
+    def _holdback(exc: Exception, *, short_leg: bool) -> ValueError:
+        reason = _sentence(str(exc), "Option or stock order failed")
+        if "No short leg was submitted" in reason:
+            # A combo rejection already covers the holdback. Saying more would invent a
+            # naked short that was never sent.
+            return ValueError(reason)
+        if short_leg:
+            safety = "Remaining short legs were not submitted."
+        elif any(is_short_call(leg) for leg in shorts):
+            safety = "The short call was not submitted. Remaining short legs were not submitted."
+        else:
+            safety = "Remaining short legs were not submitted."
+        if safety in reason:
+            return ValueError(reason)
+        return ValueError(f"{reason} {safety}")
+
+    for eq in equity_legs or []:
+        if str(eq.get("side") or "").lower() == "sell":
+            raise ValueError(SHORT_STOCK_INFEASIBLE)
+
+    try:
+        for eq in equity_legs or []:
+            symbol = str(eq.get("symbol") or "").upper()
+            side = str(eq.get("side") or "").lower()
+            eq_qty = float(eq.get("qty") or 0)
+            if not symbol or side not in {"buy", "sell"} or eq_qty <= 0:
+                raise ValueError("Each equity leg must include a ticker symbol, buy/sell side, and share quantity")
+            order = await _fill_one(symbol=symbol, side=side, leg_qty=eq_qty, asset_class="us_equity")
+            if order.status != "filled":
+                raise ValueError("Stock leg did not fill")
+            orders.append(order)
+        if len(legs) >= 2:
+            for leg in legs:
+                symbol = str(leg.get("symbol") or "").upper()
+                if _leg_premium(leg, marks) is None and symbol:
+                    quote = await adapter.quote(symbol)
+                    price = getattr(quote, "price", None)
+                    if (
+                        isinstance(price, (int, float))
+                        and not isinstance(price, bool)
+                        and price > 0
+                        and not _option_quote_is_equity_fallback(symbol, quote)
+                    ):
+                        marks[symbol] = float(price)
+            orders.append(
+                await _execute_combo(
+                    user=user,
+                    db=db,
+                    adapter=adapter,
+                    legs=list(legs),
+                    qty=qty,
+                    scan_id=scan_id,
+                    strategy_name=strategy_name,
+                    certificate=certificate,
+                    marks=marks,
+                    spread_confirmed=spread_confirmed,
+                    spread_max=spread_max,
+                    submission_path=submission_path,
+                    user_override=honored_override,
+                )
+            )
+            return orders
+        for leg in buys:
+            occ = str(leg.get("symbol") or "").upper()
+            side = str(leg.get("side") or "").lower()
+            if not occ or side not in {"buy", "sell"}:
+                raise ValueError("Each leg must include an OCC symbol and buy/sell side")
+            order_type, limit_price = _option_limit(leg)
+            orders.append(
+                await _fill_one(
+                    symbol=occ,
+                    side=side,
+                    leg_qty=qty,
+                    asset_class="us_option",
+                    order_type=order_type,
+                    limit_price=limit_price,
+                )
+            )
+    except ComboHeldBack:
+        # The combo sentence already says nothing was split and no short leg went out.
+        raise
+    except Exception as exc:
+        # A multi-leg order is one combo. Its rejection already says no short leg was sent.
+        if len(legs) >= 2:
+            raise
+        if shorts:
+            raise _holdback(exc, short_leg=False) from exc
+        raise
+    for leg in shorts:
         occ = str(leg.get("symbol") or "").upper()
         side = str(leg.get("side") or "").lower()
         if not occ or side not in {"buy", "sell"}:
             raise ValueError("Each leg must include an OCC symbol and buy/sell side")
-        order = await execute_market_fill(
-            user=user,
-            db=db,
-            adapter=adapter,
-            symbol=occ,
-            side=side,
-            qty=qty,
-            asset_class="us_option",
-            order_type="market",
-            scan_id=scan_id,
-            strategy_name=strategy_name,
-            certificate=certificate,
-        )
-        orders.append(order)
+        try:
+            order_type, limit_price = _option_limit(leg)
+            orders.append(
+                await _fill_one(
+                    symbol=occ,
+                    side=side,
+                    leg_qty=qty,
+                    asset_class="us_option",
+                    order_type=order_type,
+                    limit_price=limit_price,
+                )
+            )
+        except Exception as exc:
+            raise _holdback(exc, short_leg=True) from exc
     return orders
+
+
+def _leg_side(leg: dict[str, Any]) -> str:
+    action = str(leg.get("side") or leg.get("action") or "").lower()
+    return action if action in {"buy", "sell"} else ""
+
+
+def _leg_premium(leg: dict[str, Any], marks: dict[str, float]) -> float | None:
+    for key in ("limit_price", "price", "mid", "mark"):
+        mark = _positive_mark(leg.get(key))
+        if mark is not None:
+            return mark
+    symbol = str(leg.get("symbol") or "").upper()
+    if symbol and symbol in marks:
+        return marks[symbol]
+    return None
+
+
+def _combo_symbol(legs: list[dict[str, Any]]) -> str:
+    roots: list[str] = []
+    for leg in legs:
+        parsed = parse_occ(str(leg.get("symbol") or ""))
+        if parsed is not None:
+            roots.append(parsed.root)
+    if roots and len(set(roots)) == 1:
+        return roots[0][:32]
+    return "COMBO"
+
+
+def combo_net_mid(legs: list[dict[str, Any]], marks: dict[str, float]) -> float:
+    """Signed premium for one combo. Positive is a debit, negative is a credit."""
+    net = 0.0
+    for leg in legs:
+        premium = _leg_premium(leg, marks)
+        if premium is None:
+            symbol = leg.get("symbol") or leg.get("side") or "option"
+            raise ValueError(f"Live mid is unavailable, so a limit at the net mid cannot be priced for {symbol}.")
+        sign = 1.0 if _leg_side(leg) == "buy" else -1.0
+        net += sign * premium
+    return round(net, 2)
+
+
+async def _open_combo_positions(
+    *,
+    user: User,
+    db: AsyncSession,
+    adapter: Any,
+    legs: list[dict[str, Any]],
+    qty: float,
+    marks: dict[str, float],
+    strategy_name: str | None,
+    certificate: dict[str, Any] | None,
+    order: Order,
+    cash_impact: float,
+    note: str | None = None,
+) -> None:
+    for leg in legs:
+        symbol = str(leg.get("symbol") or "").upper()
+        side = _leg_side(leg)
+        fill_px = _leg_premium(leg, marks)
+        if not symbol or side not in {"buy", "sell"} or fill_px is None:
+            continue
+        pos = await db.scalar(select(Position).where(Position.user_id == user.id, Position.symbol == symbol))
+        signed = qty if side == "buy" else -qty
+        if pos:
+            new_qty = pos.qty + signed
+            if new_qty == 0:
+                await db.delete(pos)
+            elif side == "buy":
+                pos.avg_cost = (pos.avg_cost * pos.qty + fill_px * qty) / new_qty
+                pos.qty = new_qty
+                pos.current_price = fill_px
+                if strategy_name and not pos.strategy_name:
+                    pos.strategy_name = strategy_name
+                if certificate and not pos.certificate:
+                    pos.certificate = certificate
+            else:
+                pos.qty = new_qty
+                pos.current_price = fill_px
+        else:
+            db.add(
+                Position(
+                    user_id=user.id,
+                    symbol=symbol,
+                    qty=signed,
+                    avg_cost=fill_px,
+                    current_price=fill_px,
+                    asset_class="us_option",
+                    strategy_name=strategy_name,
+                    certificate=certificate,
+                )
+            )
+    user.cash_balance = round(user.cash_balance + cash_impact, 2)
+    await refresh_portfolio_value(user, db, adapter)
+    await db.commit()
+    await db.refresh(order)
+    await hub.broadcast(
+        user.id,
+        {
+            "type": "fill",
+            "order_id": order.id,
+            "symbol": order.symbol,
+            "qty": order.qty,
+            "side": order.side,
+            "price": order.fill_price,
+            "asset_class": order.asset_class,
+            "balance": user.cash_balance,
+            "buying_power": user.buying_power,
+            "portfolio_value": user.portfolio_value,
+            "combo": True,
+            "note": note,
+        },
+    )
+
+
+async def _execute_combo(
+    *,
+    user: User,
+    db: AsyncSession,
+    adapter: Any,
+    legs: list[dict[str, Any]],
+    qty: float,
+    scan_id: str | None,
+    strategy_name: str | None,
+    certificate: dict[str, Any] | None,
+    marks: dict[str, float],
+    spread_confirmed: bool = False,
+    spread_max: float = DEFAULT_SPREAD_MAX,
+    submission_path: str = "strategy_legs",
+    user_override: bool = False,
+) -> Order:
+    """One limit combo at the net mid. A rejection is not split into market orders.
+
+    On a paper account a closed session or an uncovered-option refusal fills the whole
+    combo on the local book at the net mid, after the same server-side quote check. A
+    real brokerage account keeps the broker's rejection.
+    """
+    from app.services.executability import enforce_submission_quotes
+
+    try:
+        net = combo_net_mid(legs, marks)
+    except ValueError as exc:
+        raise ComboHeldBack(
+            f"{_sentence(str(exc), 'Live mid is unavailable')} "
+            "The combo was not split into market orders. No short leg was submitted."
+        ) from exc
+    side = "buy" if net >= 0 else "sell"
+    limit = round(abs(net), 2)
+    combo_symbol = _combo_symbol(legs)
+    broker_legs = []
+    for leg in legs:
+        occ = str(leg.get("symbol") or "").upper()
+        leg_side = _leg_side(leg)
+        if not occ or leg_side not in {"buy", "sell"}:
+            raise ValueError("Each leg must include an OCC symbol and buy/sell side")
+        broker_legs.append(
+            {
+                "symbol": occ,
+                "side": leg_side,
+                "ratio_qty": 1,
+                "position_intent": "buy_to_open" if leg_side == "buy" else "sell_to_open",
+            }
+        )
+    mult = position_multiplier("us_option")
+    cost = estimate_order_cost(qty, limit, asset_class="us_option", multiplier=mult)
+    if side == "buy" and cost > user.buying_power:
+        raise ComboHeldBack("Insufficient buying power. No short leg was submitted.")
+
+    payload = {
+        "symbol": combo_symbol,
+        "qty": qty,
+        "side": side,
+        "order_type": "limit",
+        "limit_price": net,
+        "order_class": "mleg",
+        "legs": broker_legs,
+        "strict": True,
+    }
+    session_paper = user.account_mode != "real_brokerage"
+
+    def _reject(reason: str) -> ComboHeldBack:
+        text = _sentence(reason, "Broker cannot accept a combo order")
+        return ComboHeldBack(
+            f"{text} The combo was not split into market orders. No short leg was submitted."
+        )
+
+    paper_note: str | None = None
+    try:
+        broker = await adapter.submit_order(**payload)
+    except TypeError as exc:
+        raise ComboHeldBack(
+            "Broker cannot accept a combo order. The combo was not split into market orders. No short leg was submitted."
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        reason = str(exc).strip() or "Broker order failed"
+        if not (session_paper and _paper_fillable(reason)):
+            raise _reject(reason) from exc
+        broker = {"session_paper_fill": True, "status": "rejected", "reason": reason}
+    if not isinstance(broker, dict) or _broker_rejected(broker):
+        reason = _broker_reason(broker) if isinstance(broker, dict) else "Broker rejected the order"
+        if not (session_paper and _paper_fillable(reason)):
+            raise _reject(reason)
+        # The local book fills the whole structure, so re-run the server-side quote check
+        # that a broker fill would have gone through. A stale or wide quote still blocks.
+        try:
+            await enforce_submission_quotes(
+                adapter,
+                [str(leg["symbol"]) for leg in broker_legs],
+                path=submission_path,
+                spread_confirmed=spread_confirmed,
+                contracts=qty,
+                multiplier=mult,
+                spread_max=spread_max,
+                user_override=user_override,
+            )
+        except ValueError as exc:
+            raise ComboHeldBack(_sentence(str(exc), "Quote not current")) from exc
+        paper_note = paper_fill_sentence(reason)
+        logger.info("combo paper fill symbol={} note={}", combo_symbol, paper_note)
+        fill_px = limit
+    else:
+        raw_fill = broker.get("filled_avg_price")
+        fill_px = abs(float(raw_fill)) if _positive_mark(raw_fill) is not None else limit
+
+    order = Order(
+        user_id=user.id,
+        scan_id=scan_id,
+        symbol=combo_symbol,
+        side=side,
+        qty=qty,
+        order_type="limit",
+        limit_price=limit,
+        estimated_cost=cost,
+        asset_class="us_option",
+        multiplier=mult,
+        status="filled",
+        fill_price=fill_px,
+        filled_at=datetime.now(timezone.utc),
+    )
+    order.fill_note = paper_note  # type: ignore[attr-defined]
+    db.add(order)
+    await db.flush()
+    await _open_combo_positions(
+        user=user,
+        db=db,
+        adapter=adapter,
+        legs=legs,
+        qty=qty,
+        marks=marks,
+        strategy_name=strategy_name,
+        certificate=certificate,
+        order=order,
+        cash_impact=account_impact(side, estimate_order_cost(qty, fill_px, asset_class="us_option", multiplier=mult)),
+        note=paper_note,
+    )
+    order.fill_note = paper_note  # type: ignore[attr-defined]
+    return order
+
+
+def _premium_marks(*groups: list[dict[str, Any]]) -> dict[str, float]:
+    """Chain premium by OCC symbol. The first positive mark wins, so the stored scan mid beats a later copy."""
+    marks: dict[str, float] = {}
+    for group in groups:
+        for leg in group:
+            if not isinstance(leg, dict):
+                continue
+            symbol = str(leg.get("symbol") or "").upper()
+            if not symbol or symbol in marks:
+                continue
+            for key in ("mid", "price", "mark"):
+                mark = _positive_mark(leg.get(key))
+                if mark is not None:
+                    marks[symbol] = mark
+                    break
+    return marks

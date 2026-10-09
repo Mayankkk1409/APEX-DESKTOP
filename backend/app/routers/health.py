@@ -12,4 +12,5 @@ async def health(settings: Settings = Depends(get_settings)) -> dict:
         "env": settings.app_env,
         "market_adapter": "alpaca" if settings.alpaca_keys_present else "demo",
         "data_feed": "opra" if settings.alpaca_trading_mode == "live" and settings.alpaca_keys_present else "indicative",
+        "snaptrade": "configured" if settings.snaptrade_configured else "not_configured",
     }

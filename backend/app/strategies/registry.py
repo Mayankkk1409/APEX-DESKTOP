@@ -22,6 +22,7 @@ StrikeRel = Literal[
     "different",
     "otm_pair",
     "atm",
+    "deep_itm",
     "wide_otm",
     "mixed",
     "n_a",
@@ -120,8 +121,8 @@ _F1: list[StrategySpec] = [
     _spec("apex_benchmark_greeks_strategy", "APEX Benchmark Greeks Strategy", 1, (_leg("buy", "call", "atm", "single"),), max_profit_type="unlimited", payoff_function_ref="payoff_long_option"),
     _spec("long_call_leaps", "Long Call LEAPS", 1, (_leg("buy", "call", "atm", "single"),), max_profit_type="unlimited", payoff_function_ref="payoff_long_option"),
     _spec("long_put_leaps", "Long Put LEAPS", 1, (_leg("buy", "put", "atm", "single"),), max_profit_type="finite", payoff_function_ref="payoff_long_option"),
-    _spec("deep_itm_call", "Deep ITM Call", 1, (_leg("buy", "call", "atm", "single"),), max_profit_type="unlimited", payoff_function_ref="payoff_long_option"),
-    _spec("deep_itm_put", "Deep ITM Put", 1, (_leg("buy", "put", "atm", "single"),), max_profit_type="finite", payoff_function_ref="payoff_long_option"),
+    _spec("deep_itm_call", "Deep ITM Call", 1, (_leg("buy", "call", "deep_itm", "single"),), max_profit_type="unlimited", payoff_function_ref="payoff_long_option"),
+    _spec("deep_itm_put", "Deep ITM Put", 1, (_leg("buy", "put", "deep_itm", "single"),), max_profit_type="finite", payoff_function_ref="payoff_long_option"),
     _spec("atm_call", "At-The-Money Call", 1, (_leg("buy", "call", "same", "single"),), max_profit_type="unlimited", payoff_function_ref="payoff_long_option"),
 ]
 
@@ -236,7 +237,17 @@ _F5: list[StrategySpec] = [
     _spec("long_iron_butterfly", "Long Iron Butterfly", 5, (_leg("buy", "put", "same", "same"), _leg("sell", "put", "different", "same"), _leg("buy", "call", "same", "same"), _leg("sell", "call", "different", "same")), breakeven_type="dual", payoff_function_ref="payoff_long_iron_butterfly"),
     _spec("short_call_butterfly", "Short Call Butterfly", 5, (_leg("sell", "call", "different", "same"), _leg("buy", "call", "same", "same"), _leg("sell", "call", "different", "same")), breakeven_type="dual", payoff_function_ref="payoff_short_butterfly"),
     _spec("short_put_butterfly", "Short Put Butterfly", 5, (_leg("sell", "put", "different", "same"), _leg("buy", "put", "same", "same"), _leg("sell", "put", "different", "same")), breakeven_type="dual", payoff_function_ref="payoff_short_butterfly"),
-    _spec("christmas_tree_spread", "Christmas Tree Spread", 5, (_leg("buy", "call", "atm", "same"), _leg("sell", "call", "different", "same"), _leg("sell", "call", "different", "same")), payoff_function_ref="payoff_christmas_tree"),
+    _spec(
+        "christmas_tree_spread",
+        "Christmas Tree Spread",
+        5,
+        (_leg("buy", "call", "atm", "same"), _leg("sell", "call", "different", "same"), _leg("sell", "call", "different", "same")),
+        risk_type="undefined",
+        max_loss_type="unlimited",
+        breakeven_type="none",
+        tradeable=False,
+        payoff_function_ref="payoff_christmas_tree",
+    ),
 ]
 
 # --- Family 6: Ratio & back spreads (10) ---
@@ -279,11 +290,11 @@ _F7: list[StrategySpec] = [
         "married_put",
         "Married Put",
         7,
-        (_leg("buy", "put", "otm_pair", "single"),),
+        (_leg("buy", "stock", "n_a", "n_a"), _leg("buy", "put", "otm_pair", "single")),
         max_profit_type="unlimited",
-        payoff_function_ref="payoff_long_option",
+        payoff_function_ref="payoff_protective_put",
         equity_required=True,
-        equity_leg_spec=_equity("buy", entry_mode="pre_existing"),
+        equity_leg_spec=_equity("buy"),
     ),
     _spec(
         "leveraged_covered_call",
@@ -311,7 +322,7 @@ _F7: list[StrategySpec] = [
         (_leg("buy", "stock", "n_a", "n_a"), _leg("sell", "call", "otm_pair", "single")),
         payoff_function_ref="payoff_covered_call",
         equity_required=True,
-        equity_leg_spec=_equity("buy", entry_mode="pre_existing"),
+        equity_leg_spec=_equity("buy"),
     ),
     _spec(
         "stock_long_put",
@@ -321,7 +332,7 @@ _F7: list[StrategySpec] = [
         max_profit_type="unlimited",
         payoff_function_ref="payoff_protective_put",
         equity_required=True,
-        equity_leg_spec=_equity("buy", entry_mode="pre_existing"),
+        equity_leg_spec=_equity("buy"),
     ),
     _spec(
         "collar",
@@ -338,8 +349,26 @@ _F7: list[StrategySpec] = [
 
 # --- Family 8: Synthetic & conversion (10) ---
 _F8: list[StrategySpec] = [
-    _spec("synthetic_call", "Synthetic Call", 8, (_leg("buy", "call", "atm", "same"), _leg("sell", "put", "same", "same")), max_profit_type="unlimited", max_loss_type="unlimited", payoff_function_ref="payoff_synthetic_long"),
-    _spec("synthetic_put", "Synthetic Put", 8, (_leg("buy", "put", "atm", "same"), _leg("sell", "call", "same", "same")), max_profit_type="unlimited", max_loss_type="unlimited", payoff_function_ref="payoff_synthetic_short"),
+    _spec(
+        "synthetic_call",
+        "Synthetic Call",
+        8,
+        (_leg("buy", "stock", "n_a", "n_a"), _leg("buy", "put", "atm", "single")),
+        max_profit_type="unlimited",
+        payoff_function_ref="payoff_protective_put",
+        equity_required=True,
+        equity_leg_spec=_equity("buy"),
+    ),
+    _spec(
+        "synthetic_put",
+        "Synthetic Put",
+        8,
+        (_leg("sell", "stock", "n_a", "n_a"), _leg("buy", "call", "atm", "single")),
+        max_profit_type="finite",
+        payoff_function_ref="payoff_synthetic_put",
+        equity_required=True,
+        equity_leg_spec=_equity("sell"),
+    ),
     _spec("conversion", "Conversion", 8, (_leg("buy", "stock", "n_a", "n_a"), _leg("sell", "call", "same", "same"), _leg("buy", "put", "same", "same")), payoff_function_ref="payoff_conversion", equity_required=True, equity_leg_spec=_equity("buy")),
     _spec("reversal", "Reversal", 8, (_leg("sell", "stock", "n_a", "n_a"), _leg("buy", "call", "same", "same"), _leg("sell", "put", "same", "same")), payoff_function_ref="payoff_conversion", equity_required=True, equity_leg_spec=_equity("sell")),
     _spec("box_spread", "Box Spread", 8, (_leg("buy", "call", "atm", "same"), _leg("sell", "call", "different", "same"), _leg("buy", "put", "different", "same"), _leg("sell", "put", "atm", "same")), payoff_function_ref="payoff_box_spread"),
@@ -347,19 +376,47 @@ _F8: list[StrategySpec] = [
     _spec("long_combo", "Long Combo", 8, (_leg("buy", "call", "atm", "same"), _leg("sell", "put", "same", "same")), max_profit_type="unlimited", max_loss_type="unlimited", payoff_function_ref="payoff_synthetic_long"),
     _spec("short_combo", "Short Combo", 8, (_leg("sell", "call", "atm", "same"), _leg("buy", "put", "same", "same")), max_profit_type="unlimited", max_loss_type="unlimited", payoff_function_ref="payoff_synthetic_short"),
     _spec("risk_reversal", "Risk Reversal", 8, (_leg("buy", "call", "otm_pair", "same"), _leg("sell", "put", "otm_pair", "same")), breakeven_type="dual", max_profit_type="unlimited", payoff_function_ref="payoff_risk_reversal"),
-    _spec("synthetic_straddle", "Synthetic Straddle", 8, (_leg("buy", "call", "same", "same"), _leg("buy", "put", "same", "same")), breakeven_type="dual", max_profit_type="unlimited", payoff_function_ref="payoff_long_straddle"),
+    _spec(
+        "synthetic_straddle",
+        "Synthetic Straddle",
+        8,
+        (_leg("buy", "stock", "n_a", "n_a"), _leg("buy", "put", "atm", "same")),
+        breakeven_type="dual",
+        max_profit_type="unlimited",
+        payoff_function_ref="payoff_synthetic_straddle",
+        equity_required=True,
+        equity_leg_spec=_equity("buy"),
+    ),
 ]
 
 # --- Family 9: Volatility & advanced (10) ---
 _F9: list[StrategySpec] = [
     _spec("long_straddle_pre_earnings", "Long Straddle (pre-earnings)", 9, (_leg("buy", "call", "same", "same"), _leg("buy", "put", "same", "same")), breakeven_type="dual", max_profit_type="unlimited", payoff_function_ref="payoff_long_straddle"),
     _spec("iv_crush_short_iron_condor", "IV Crush Short Iron Condor", 9, (_leg("sell", "put", "otm_pair", "same"), _leg("buy", "put", "different", "same"), _leg("sell", "call", "otm_pair", "same"), _leg("buy", "call", "different", "same")), breakeven_type="dual", payoff_function_ref="payoff_iron_condor"),
-    _spec("volatility_skew_trade", "Volatility Skew Trade", 9, (_leg("buy", "put", "otm_pair", "same"), _leg("sell", "call", "otm_pair", "same")), breakeven_type="dual", max_profit_type="unlimited", payoff_function_ref="payoff_risk_reversal"),
+    _spec("volatility_skew_trade", "Volatility Skew Trade", 9, (_leg("buy", "put", "otm_pair", "same"), _leg("sell", "call", "otm_pair", "same")), risk_type="undefined", max_loss_type="unlimited", max_profit_type="finite", breakeven_type="dual", tradeable=False, payoff_function_ref="payoff_risk_reversal"),
     _spec("vix_call_hedge", "VIX Call Hedge", 9, (_leg("buy", "call", "otm_pair", "single"),), max_profit_type="unlimited", payoff_function_ref="payoff_long_option"),
-    _spec("dispersion_trade", "Dispersion Trade", 9, (_leg("sell", "call", "atm", "same"), _leg("buy", "call", "atm", "same")), max_profit_type="variable_iv", breakeven_type="none", payoff_function_ref="payoff_dispersion"),
-    _spec("apex_strategy", "APEX Strategy", 9, (_leg("buy", "call", "wide_otm", "two_distinct"), _leg("buy", "put", "wide_otm", "two_distinct"), _leg("sell", "call", "wide_otm", "two_distinct"), _leg("sell", "put", "wide_otm", "two_distinct")), max_profit_type="unlimited", breakeven_type="range", payoff_function_ref="payoff_apex_strategy"),
+    _spec(
+        "dispersion_trade",
+        "Dispersion Trade",
+        9,
+        (_leg("sell", "call", "atm", "same"), _leg("buy", "call", "atm", "same")),
+        max_profit_type="variable_iv",
+        max_loss_type="variable",
+        breakeven_type="none",
+        payoff_function_ref="payoff_dispersion",
+    ),
+    _spec("apex_strategy", "APEX Strategy", 9, (_leg("buy", "call", "wide_otm", "two_distinct"), _leg("buy", "put", "wide_otm", "two_distinct"), _leg("sell", "call", "wide_otm", "two_distinct"), _leg("sell", "put", "wide_otm", "two_distinct")), max_profit_type="variable_iv", breakeven_type="range", payoff_function_ref="payoff_apex_strategy"),
     _spec("gamma_scalping", "Gamma Scalping", 9, (_leg("buy", "call", "atm", "single"), _leg("buy", "put", "atm", "single")), breakeven_type="dual", max_profit_type="unlimited", payoff_function_ref="payoff_long_straddle"),
-    _spec("vega_neutral_spread", "Vega Neutral Spread", 9, (_leg("buy", "call", "atm", "same"), _leg("sell", "call", "different", "same")), payoff_function_ref="payoff_vertical_debit"),
+    _spec(
+        "vega_neutral_spread",
+        "Vega Neutral Spread",
+        9,
+        (_leg("buy", "call", "atm", "two_distinct"), _leg("sell", "call", "same", "two_distinct")),
+        max_profit_type="variable_iv",
+        max_loss_type="variable",
+        breakeven_type="none",
+        payoff_function_ref="payoff_calendar_spread",
+    ),
     _spec("theta_harvest_iron_condor", "Theta Harvest Iron Condor", 9, (_leg("sell", "put", "otm_pair", "same"), _leg("buy", "put", "different", "same"), _leg("sell", "call", "otm_pair", "same"), _leg("buy", "call", "different", "same")), breakeven_type="dual", payoff_function_ref="payoff_iron_condor"),
     _spec("earnings_straddle", "Earnings Straddle", 9, (_leg("buy", "call", "same", "same"), _leg("buy", "put", "same", "same")), breakeven_type="dual", max_profit_type="unlimited", payoff_function_ref="payoff_long_straddle"),
 ]
@@ -368,7 +425,15 @@ _F9: list[StrategySpec] = [
 _F10: list[StrategySpec] = [
     _spec("iron_condor_monthly", "Iron Condor (monthly)", 10, (_leg("sell", "put", "otm_pair", "same"), _leg("buy", "put", "different", "same"), _leg("sell", "call", "otm_pair", "same"), _leg("buy", "call", "different", "same")), breakeven_type="dual", payoff_function_ref="payoff_iron_condor"),
     _spec("wheel_strategy", "Wheel Strategy", 10, (_leg("sell", "put", "otm_pair", "single"),), max_profit_type="finite", payoff_function_ref="payoff_short_option"),
-    _spec("poor_mans_covered_call", "Poor Man's Covered Call", 10, (_leg("buy", "call", "atm", "single"), _leg("sell", "call", "different", "single")), payoff_function_ref="payoff_pmcc"),
+    _spec(
+        "poor_mans_covered_call",
+        "Poor Man's Covered Call",
+        10,
+        (_leg("buy", "call", "deep_itm", "two_distinct"), _leg("sell", "call", "otm_pair", "two_distinct")),
+        max_profit_type="variable_iv",
+        breakeven_type="none",
+        payoff_function_ref="payoff_pmcc",
+    ),
     _spec("no_trade_insufficient_conviction", "NO TRADE — Insufficient Conviction", 10, (), risk_type="advisory", max_profit_type="finite", max_loss_type="finite", breakeven_type="none", tradeable=False),
     _spec("no_trade_wait_iv_crush", "NO TRADE — Wait for IV Crush", 10, (), risk_type="advisory", max_profit_type="finite", max_loss_type="finite", breakeven_type="none", tradeable=False),
 ]
@@ -414,3 +479,43 @@ def get_strategy_spec(strategy_name_or_id: str) -> StrategySpec | None:
 
 def implemented_strategy_names() -> list[str]:
     return [s.display_name for s in _ALL_FAMILIES if s.payoff_function_ref is not None and s.tradeable]
+
+
+# Option quantity by registry-leg index when the encyclopedia ratio is not 1.
+# The order validator and the knowledge-base legs template both read this map.
+LEG_QUANTITY_BY_INDEX: dict[str, dict[int, int]] = {
+    "strip": {1: 2},
+    "strap": {0: 2},
+    "synthetic_straddle": {1: 2},
+    "long_call_butterfly": {1: 2},
+    "long_put_butterfly": {1: 2},
+    "broken_wing_butterfly": {1: 2},
+    "skip_strike_butterfly": {1: 2},
+    "short_call_butterfly": {1: 2},
+    "short_put_butterfly": {1: 2},
+    "ratio_spread": {1: 2},
+    "call_ratio_spread": {1: 2},
+    "put_ratio_spread": {1: 2},
+    "one_by_two_ratio_spread": {1: 2},
+    "two_by_one_ratio_spread": {0: 2},
+    "back_ratio_spread": {1: 2},
+    "call_backspread": {1: 2},
+    "put_backspread": {1: 2},
+}
+
+
+def format_legs_template(spec: StrategySpec) -> str:
+    """Buy/sell template the knowledge base stores and the order validator checks."""
+    if not spec.leg_specs:
+        return "no legs"
+    quantities = LEG_QUANTITY_BY_INDEX.get(spec.strategy_id, {})
+    parts: list[str] = []
+    for index, leg in enumerate(spec.leg_specs):
+        count = quantities.get(index, 1)
+        if leg.option_type == "stock":
+            shares = spec.equity_leg_spec.shares_per_contract if spec.equity_leg_spec else 100
+            parts.append(f"{leg.side} {shares * count} shares")
+            continue
+        noun = leg.option_type if count == 1 else f"{leg.option_type}s"
+        parts.append(f"{leg.side} {count} {noun}" if count != 1 else f"{leg.side} {noun}")
+    return "; ".join(parts)

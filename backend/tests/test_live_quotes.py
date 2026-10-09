@@ -23,6 +23,21 @@ def test_parse_number_money_and_suffixes() -> None:
     assert parse_number(None) is None
 
 
+def test_rejects_negative_price_and_crossed_quote() -> None:
+    bundle = lq._Bundle(symbol="AAPL", name="AAPL", asset_class="stock")
+    lq._apply(bundle, {"price": -12.5, "open": -1, "source": "Alpaca"}, price=True, fundamentals=False)
+    assert bundle.price is None
+    assert bundle.open is None
+    assert bundle.price_source is None
+    lq._apply(bundle, {"price": 190.25, "change": -1.5, "source": "Alpaca"}, price=True, fundamentals=False)
+    assert bundle.price == 190.25
+    assert bundle.change == -1.5
+    assert lq.quote_mid(12.0, 10.0) is None
+    assert lq.quote_mid(10.0, 12.0) == 11.0
+    assert lq.usable_positive_price(0) is None
+    assert lq.usable_positive_price(-3) is None
+
+
 def test_parse_percent_fraction() -> None:
     assert parse_percent_fraction("0.35%") == pytest.approx(0.0035)
     assert parse_percent_fraction("0.09%") == pytest.approx(0.0009)
@@ -190,3 +205,31 @@ async def test_unavailable_does_not_invent_numbers(monkeypatch: pytest.MonkeyPat
 
 async def _none(*_a, **_k):
     return None
+
+
+def test_quote_bundle_carries_quote_meta() -> None:
+    from datetime import datetime, timezone
+
+    bundle = lq._Bundle(
+        symbol="AAPL",
+        name="Apple",
+        asset_class="stock",
+        price=100.0,
+        bid=99.9,
+        ask=100.1,
+        bid_size=100,
+        ask_size=120,
+        quoted_at="2026-10-05T14:58:00+00:00",
+        quote_feed="other",
+        feed_delayed=False,
+        quote_provider="Alpaca",
+        price_source="Alpaca",
+    )
+    quote = lq._quote_from_bundle(bundle, now=datetime(2026, 10, 5, 15, 0, tzinfo=timezone.utc))
+    assert quote.quote_meta is not None
+    assert quote.quote_meta.provider == "Alpaca"
+    assert quote.quote_meta.feed == "other"
+    assert quote.quote_meta.bid == 99.9
+    assert quote.quote_meta.ask == 100.1
+    assert quote.quote_meta.bidSize == 100
+    assert quote.quote_meta.isStale is False

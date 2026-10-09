@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Settings } from "./Settings";
 import { useSession } from "../store";
 import { createTestQueryClient } from "../test/queryClient";
+import { AUTO_EXEC_DISCLAIMER, DEFAULT_USER_SETTINGS, writeUserSettings } from "../lib/userSettings";
 
 const store: Record<string, string> = {};
 
@@ -17,6 +18,7 @@ vi.mock("../api", () => ({
       day_pl: 0,
       starting_balance: 25000,
     })),
+    overallPnl: vi.fn(async () => ({ rows: [] })),
     syncSettings: vi.fn(async () => ({ ok: true })),
     resetPaperBalance: vi.fn(async () => ({ username: "trader" })),
     deleteAccount: vi.fn(async () => ({ ok: true })),
@@ -93,5 +95,22 @@ describe("Settings page", () => {
     expect(html).toContain('data-testid="settings-auto-exec-toggle"');
     expect(html).toContain('data-testid="settings-delete-account"');
     expect(html).toContain('data-testid="settings-paper-audit"');
+  });
+
+  it("shows the auto-execution disclaimer under the control at the default of 85", () => {
+    writeUserSettings({ ...DEFAULT_USER_SETTINGS, autoExecMinScore: 85 });
+    const qc = createTestQueryClient();
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <Settings />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(html).toContain('data-testid="settings-auto-exec-disclaimer"');
+    expect(html).toContain(AUTO_EXEC_DISCLAIMER);
+    expect(html).toContain("New accounts start at the system default of 85.");
+    expect(html).not.toContain("Scores below 72 increase false-positive risk");
+    expect(html).not.toContain("below 72");
   });
 });

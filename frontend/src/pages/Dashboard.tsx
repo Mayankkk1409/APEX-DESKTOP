@@ -1,9 +1,10 @@
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, getAccessToken } from "../api";
 import { BrokerageConnectionPanel } from "../components/BrokerageConnectionPanel";
 import { LogoutButton } from "../components/LogoutButton";
+import { DailyPnlList, PositionDailyPnl } from "../components/DailyPnlList";
 import { PositionCertificateModal } from "../components/PositionCertificateModal";
 import { SettingsGearLink } from "../components/SettingsGearLink";
 import { TradingViewChart } from "../components/TradingViewChart";
@@ -11,10 +12,15 @@ import { ApexLogo } from "../components/ApexLogo";
 import { LegalFooter } from "../components/LegalFooter";
 import { WatchlistToggle } from "../components/WatchlistToggle";
 import { captureChartState, getChartState, subscribeChartState } from "../chartCapture";
-import { DEFAULT_SYMBOL, SNAPSHOT_STUDIES, WS_BASE } from "../constants";
+import { DEFAULT_SYMBOL, SNAPSHOT_STUDIES } from "../constants";
 import { useBrokerage } from "../hooks/useBrokerage";
+import { useMarketSocket } from "../hooks/useMarketSocket";
 import { defaultAccountLabel, usePositionCertificate } from "../hooks/usePositionCertificate";
+import { DESK_STALE_MS, refreshDeskQueries } from "../lib/deskRefresh";
+import { clearNewsRetry, isNewsRateLimitMessage, newsRetryDelay, noteNewsRateLimit, visibleNewsError } from "../lib/newsFeed";
+import { dayPlOrUnrealized, daysForPosition, displaySessionDay, formatSessionDate, markedPnl } from "../lib/dailyPnl";
 import { resolvePositionDayPl } from "../lib/positionDayPl";
+import { SEARCH_DEBOUNCE_MS, createDebouncedSymbolSearch } from "../lib/symbolSearch";
 import { useSession } from "../store";
 import type { Fundamentals, PositionRow, Quote, SentimentRow, WatchItem } from "../types";
 
@@ -36,6 +42,10 @@ export function Dashboard() {
   const [hitsFor, setHitsFor] = useState("");
   const searchSeq = useRef(0);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const symbolSearchRef = useRef<ReturnType<typeof createDebouncedSymbolSearch> | null>(null);
+  if (!symbolSearchRef.current) {
+    symbolSearchRef.current = createDebouncedSymbolSearch((value) => api.search(value), SEARCH_DEBOUNCE_MS);
+  }
 
   useEffect(() => {
     if (chartReady) setQuery(activeSymbol);
@@ -51,6 +61,7 @@ export function Dashboard() {
 
   function closeSuggestions() {
     searchSeq.current += 1;
+    symbolSearchRef.current?.cancel();
     setHits([]);
     setHitsFor("");
     setHighlightIdx(-1);
@@ -69,17 +80,11 @@ export function Dashboard() {
 
   async function runSearch(value: string) {
     const seq = ++searchSeq.current;
-    if (!value.trim()) {
-      setHits([]);
-      setHitsFor("");
-      setSuggestionsOpen(false);
-      return;
-    }
-    const r = await api.search(value);
-    if (seq !== searchSeq.current) return;
-    setHits(r.hits);
+    const next = await symbolSearchRef.current?.run(value);
+    if (next == null || seq !== searchSeq.current) return;
+    setHits(next);
     setHitsFor(value);
-    setSuggestionsOpen(r.hits.length > 0);
+    setSuggestionsOpen(next.length > 0);
   }
 
   /** Enter resolves to an exact match, then a suggestion for this exact query, then the raw text. */
@@ -90,6 +95,13 @@ export function Dashboard() {
     if (hitsFor.trim().toUpperCase() === typed && hits[0]) return hits[0].symbol;
     return typed;
   }
+  const [chartFull, setChartFull] = useState(false);
+  const [chartAnimating, setChartAnimating] = useState(false);
+  const deskRef = useRef<HTMLDivElement>(null);
+  const motionRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef(0);
+  const restoreScroll = useRef(false);
+  const motionDone = useRef(true);
   const [watchOpen, setWatchOpen] = useState(true);
   const [sentOpen, setSentOpen] = useState(true);
   const [posOpen, setPosOpen] = useState(true);
@@ -100,8 +112,6 @@ export function Dashboard() {
     queryKey: ["quote", activeSymbol],
     queryFn: () => api.quote(activeSymbol),
     staleTime: 5_000,
-    refetchOnMount: "always",
-    refetchOnWindowFocus: true,
     refetchInterval: 10_000,
     enabled: Boolean(activeSymbol),
   });
@@ -109,8 +119,6 @@ export function Dashboard() {
     queryKey: ["fundamentals", activeSymbol],
     queryFn: () => api.fundamentals(activeSymbol),
     staleTime: 15_000,
-    refetchOnMount: "always",
-    refetchOnWindowFocus: true,
     refetchInterval: 30_000,
     enabled: Boolean(activeSymbol),
   });
@@ -120,14 +128,68 @@ export function Dashboard() {
     enabled: Boolean(activeSymbol),
   });
   const watch = useQuery({ queryKey: ["watch"], queryFn: () => api.watchlist() });
-  const sentiment = useQuery({ queryKey: ["sent"], queryFn: () => api.sentiment() });
+  const sentiment = useQuery({
+    queryKey: ["sent", activeSymbol],
+    queryFn: async () => {
+      const next = await api.sentiment(activeSymbol);
+      const caveat = (next as { caveat?: string | null }).caveat;
+      if (!isNewsRateLimitMessage(caveat)) {
+        clearNewsRetry(`desk:${activeSymbol}`);
+        return next;
+      }
+      noteNewsRateLimit(`desk:${activeSymbol}`);
+      const previous = qc.getQueryData<typeof next>(["sent", activeSymbol]);
+      const previousItems = (previous as { items?: unknown[] } | undefined)?.items;
+      if (previousItems?.length) return previous as typeof next;
+      return { ...next, caveat: null, status: "empty" };
+    },
+    enabled: Boolean(activeSymbol),
+    staleTime: 60_000,
+    retry: (failureCount, error) => !isNewsRateLimitMessage((error as Error)?.message) && failureCount < 1,
+    refetchInterval: () => newsRetryDelay(`desk:${activeSymbol}`),
+  });
+  useEffect(() => {
+    const caveat = (sentiment.data as { caveat?: string | null } | undefined)?.caveat;
+    const message = (sentiment.error as Error | undefined)?.message;
+    if (isNewsRateLimitMessage(caveat) || isNewsRateLimitMessage(message)) noteNewsRateLimit(`desk:${activeSymbol}`);
+  }, [activeSymbol, sentiment.data, sentiment.error]);
   const brokerage = useBrokerage();
   const cert = usePositionCertificate({
     isPaper: !brokerage.usingBrokerage,
     accountLabel: defaultAccountLabel(user, !brokerage.usingBrokerage),
   });
-  const portfolio = useQuery({ queryKey: ["port"], queryFn: () => api.portfolio(), enabled: !brokerage.usingBrokerage });
-  const positions = useQuery({ queryKey: ["pos"], queryFn: () => api.positions(), enabled: !brokerage.usingBrokerage });
+  const paperBook = !brokerage.usingBrokerage;
+  const portfolio = useQuery({
+    queryKey: ["port"],
+    queryFn: () => api.portfolio(),
+    enabled: paperBook,
+    staleTime: DESK_STALE_MS,
+  });
+  const positions = useQuery({
+    queryKey: ["pos"],
+    queryFn: () => api.positions(),
+    enabled: paperBook,
+    staleTime: DESK_STALE_MS,
+  });
+  const dailyPnl = useQuery({
+    queryKey: ["daily-pnl"],
+    queryFn: () => api.dailyPnl(),
+    enabled: paperBook,
+    staleTime: DESK_STALE_MS,
+  });
+  // Equity graph and account P&L start with the book so the portfolio page is not a second round trip.
+  useQuery({
+    queryKey: ["pnl-history"],
+    queryFn: () => api.pnlHistory(),
+    enabled: paperBook,
+    staleTime: DESK_STALE_MS,
+  });
+  useQuery({
+    queryKey: ["overall-pnl"],
+    queryFn: () => api.overallPnl(),
+    enabled: paperBook,
+    staleTime: DESK_STALE_MS,
+  });
   // Keep the picker on a live expiry for the current underlying. On symbol change
   // applyTicker clears expiry; once the refetch lands, default to the nearest date.
   useEffect(() => {
@@ -138,42 +200,78 @@ export function Dashboard() {
     }
   }, [expiries.data, expiry, setExpiry]);
 
+  function finishChartMotion() {
+    if (motionDone.current) return;
+    motionDone.current = true;
+    setChartAnimating(false);
+    if (restoreScroll.current) {
+      restoreScroll.current = false;
+      window.scrollTo(0, scrollRef.current);
+    }
+  }
+
+  function requestChartFullscreen(next: boolean) {
+    if (chartAnimating || next === chartFull) return;
+    motionDone.current = false;
+    if (next) {
+      scrollRef.current = window.scrollY;
+      restoreScroll.current = false;
+      window.scrollTo(0, 0);
+    } else {
+      restoreScroll.current = true;
+    }
+    setChartAnimating(true);
+    setChartFull(next);
+  }
+
   useEffect(() => {
-    const token = getAccessToken();
-    if (!token) return;
-    let ws: WebSocket | null = null;
-    let stopped = false;
-    const connect = () => {
-      if (stopped) return;
-      ws = new WebSocket(`${WS_BASE}/ws/market?token=${token}`);
-      ws.onopen = () => ws?.send(JSON.stringify({ type: "subscribe", symbols: [activeSymbol, DEFAULT_SYMBOL] }));
-      ws.onmessage = (ev) => {
-        const msg = JSON.parse(ev.data);
-        if (msg.type === "fill") {
-          setLive({ balance: msg.balance, buying_power: msg.buying_power, portfolio_value: msg.portfolio_value });
-          qc.invalidateQueries({ queryKey: ["port"] });
-          qc.invalidateQueries({ queryKey: ["pos"] });
-          qc.invalidateQueries({ queryKey: ["orders"] });
+    const root = deskRef.current;
+    if (!root) return;
+    root.querySelectorAll<HTMLElement>("[data-desk-hide]").forEach((el) => {
+      (el as HTMLElement & { inert: boolean }).inert = chartFull;
+    });
+  }, [chartFull]);
+
+  useEffect(() => {
+    if (!chartAnimating) return;
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const ms = (reduce ? 140 : 520) + 80;
+    const id = window.setTimeout(() => finishChartMotion(), ms);
+    return () => window.clearTimeout(id);
+  }, [chartAnimating, chartFull]);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Escape" || !chartFull || chartAnimating || suggestionsOpen) return;
+      if (cert.selected || showConnectModal) return;
+      requestChartFullscreen(false);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [chartFull, chartAnimating, suggestionsOpen, cert.selected, showConnectModal]);
+
+  useMarketSocket({
+    token: getAccessToken(),
+    symbols: [activeSymbol, DEFAULT_SYMBOL],
+    onMessage: (msg) => {
+      if (msg.type === "fill") {
+        const livePatch: { balance?: number; buying_power?: number; portfolio_value?: number } = {};
+        if (typeof msg.balance === "number") livePatch.balance = msg.balance;
+        if (typeof msg.buying_power === "number") livePatch.buying_power = msg.buying_power;
+        if (typeof msg.portfolio_value === "number") livePatch.portfolio_value = msg.portfolio_value;
+        if (Object.keys(livePatch).length) setLive((prev) => ({ ...prev, ...livePatch }));
+        refreshDeskQueries(qc);
+      }
+      if (msg.type === "quotes") {
+        for (const row of (msg.quotes as Quote[]) ?? []) {
+          if (row.symbol !== activeSymbol || row.price == null) continue;
+          qc.setQueryData<Quote>(["quote", activeSymbol], (old) =>
+            old ? { ...old, ...row, price: row.price, change: row.change, change_pct: row.change_pct } : row,
+          );
         }
-        if (msg.type === "quotes") {
-          for (const row of (msg.quotes as Quote[]) ?? []) {
-            if (row.symbol !== activeSymbol || row.price == null) continue;
-            qc.setQueryData<Quote>(["quote", activeSymbol], (old) =>
-              old ? { ...old, ...row, price: row.price, change: row.change, change_pct: row.change_pct } : row,
-            );
-          }
-        }
-      };
-      ws.onclose = () => {
-        if (!stopped) setTimeout(connect, 800);
-      };
-    };
-    connect();
-    return () => {
-      stopped = true;
-      ws?.close();
-    };
-  }, [qc, activeSymbol]);
+      }
+    },
+  });
 
   const stats = brokerage.usingBrokerage && brokerage.stats
     ? {
@@ -182,9 +280,9 @@ export function Dashboard() {
         portfolio_value: brokerage.stats.portfolio_value,
       }
     : {
-        balance: live.balance ?? portfolio.data?.balance ?? user?.cash_balance ?? 0,
-        buying_power: live.buying_power ?? portfolio.data?.buying_power ?? user?.buying_power ?? 0,
-        portfolio_value: live.portfolio_value ?? portfolio.data?.portfolio_value ?? user?.portfolio_value ?? 0,
+        balance: portfolio.data?.balance ?? user?.cash_balance ?? live.balance ?? 0,
+        buying_power: portfolio.data?.buying_power ?? user?.buying_power ?? live.buying_power ?? 0,
+        portfolio_value: portfolio.data?.portfolio_value ?? user?.portfolio_value ?? live.portfolio_value ?? 0,
       };
 
   const displayPositions: PositionRow[] = brokerage.usingBrokerage
@@ -199,7 +297,7 @@ export function Dashboard() {
     queries: positionSymbols.map((sym) => ({
       queryKey: ["quote", sym],
       queryFn: () => api.quote(sym),
-      staleTime: 5_000,
+      staleTime: DESK_STALE_MS,
       enabled: displayPositions.length > 0,
     })),
   });
@@ -211,14 +309,27 @@ export function Dashboard() {
     });
     return map;
   }, [positionSymbols, positionQuoteQueries]);
+  const dailyBook = !brokerage.usingBrokerage ? (dailyPnl.data?.book ?? null) : null;
+  const latestBook = displaySessionDay(dailyBook);
+  const seriesReady = dailyBook != null;
   const dayPl = brokerage.usingBrokerage
     ? (brokerage.stats?.day_pnl ?? null)
-    : (portfolio.data?.day_pl as number | null | undefined);
+    : seriesReady
+      ? markedPnl(latestBook)
+      : (portfolio.data?.day_pl as number | null | undefined);
+  const dayPlLabel = seriesReady && markedPnl(latestBook) == null ? "unavailable" : fmt(dayPl);
+  const sessionLabel = latestBook ? formatSessionDate(latestBook.date) : "";
   const dayPct = brokerage.usingBrokerage
     ? brokerage.stats?.day_pnl != null && brokerage.stats.portfolio_value
       ? (brokerage.stats.day_pnl / brokerage.stats.portfolio_value) * 100
       : null
-    : Number(portfolio.data?.day_pct ?? 0);
+    : seriesReady
+      ? dayPl != null && stats.portfolio_value
+        ? (dayPl / stats.portfolio_value) * 100
+        : null
+      : typeof portfolio.data?.day_pct === "number"
+        ? portfolio.data.day_pct
+        : null;
 
   const later = useMutation({
     mutationFn: () => api.brokerage(true),
@@ -285,19 +396,43 @@ export function Dashboard() {
   const beta5y = f?.beta_5y ?? q?.beta_5y;
 
   return (
-    <div className="min-h-screen" data-testid="dashboard">
+    <div
+      ref={deskRef}
+      className={`desk min-h-screen${chartFull ? " desk--chart-full" : ""}`}
+      data-testid="dashboard"
+      data-chart-fullscreen={chartFull ? "true" : "false"}
+      data-chart-animating={chartAnimating ? "true" : "false"}
+    >
+      <div
+        ref={motionRef}
+        data-desk-motion=""
+        className={`desk-motion-sentinel${chartFull ? " is-full" : ""}`}
+        aria-hidden="true"
+        onTransitionEnd={(e) => {
+          if (e.target !== e.currentTarget || e.propertyName !== "opacity") return;
+          finishChartMotion();
+        }}
+      />
       {user?.connect_later_banner && (
-        <div className="flex items-center justify-between border-b border-line bg-gold/10 px-4 py-2 text-sm" data-testid="connect-banner">
-          <span>Brokerage not connected — paper/demo data is active. Connect anytime.</span>
-          <button className="text-gold" onClick={() => api.dismissBanner().then((u) => setUser(u as typeof user))}>
-            Dismiss
-          </button>
+        <div className="desk-fold-y" data-desk-hide="banner">
+          <div className="desk-fold-clip">
+            <div className="flex items-center justify-between border-b border-line bg-gold/10 px-4 py-2 text-sm" data-testid="connect-banner">
+              <span>Brokerage not connected — paper/demo data is active. Connect anytime.</span>
+              <button className="text-gold" onClick={() => api.dismissBanner().then((u) => setUser(u as typeof user))}>
+                Dismiss
+              </button>
+            </div>
+          </div>
         </div>
       )}
-      <header className="flex items-center justify-between gap-3 border-b border-line px-4 py-3">
+      <header className="desk-header flex items-center border-b border-line px-4 py-3">
+        <div className="desk-fold-x" data-desk-hide="brand">
+          <Link to="/portfolio" className="desk-brand" aria-label="Apex" data-testid="apex-brand">
+            <ApexLogo size={36} className="shrink-0" />
+            <span className="font-display text-xl tracking-[0.2em]">APEX</span>
+          </Link>
+        </div>
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-3">
-        <ApexLogo size={36} className="shrink-0" />
-        <p className="font-display text-xl tracking-[0.2em]">APEX</p>
         <div className="relative">
           <input
             ref={searchInputRef}
@@ -335,18 +470,22 @@ export function Dashboard() {
               e.preventDefault();
               if (highlightIdx >= 0 && hits[highlightIdx]) {
                 applyTicker(hits[highlightIdx].symbol);
-              } else {
+              } else if (query.trim()) {
                 applyTicker(resolveTyped());
               }
             }}
+            onFocus={() => {
+              if (!query.trim()) void runSearch("");
+            }}
+            onBlur={() => closeSuggestions()}
           />
           {suggestionsOpen && hits.length > 0 && (
-            <ul id="ticker-suggestions" className="absolute z-20 mt-1 w-full rounded-md border border-line bg-panel text-sm" role="listbox">
+            <ul id="ticker-suggestions" className="ticker-suggestions absolute z-20 mt-1 max-h-72 w-80 overflow-y-auto rounded-md border border-line text-sm" role="listbox">
               {hits.map((h, i) => (
                 <li key={h.symbol} id={`ticker-hit-${i}`} role="option" aria-selected={i === highlightIdx}>
                   <button
                     type="button"
-                    className={`w-full px-3 py-1 text-left ${i === highlightIdx ? "bg-gold/20" : "hover:bg-gold/10"}`}
+                    className="ticker-hit"
                     onMouseDown={(e) => {
                       e.preventDefault();
                       applyTicker(h.symbol);
@@ -380,28 +519,34 @@ export function Dashboard() {
           ))}
         </select>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <Link
-            to="/portfolio"
-            className="rounded-md border border-line bg-panel px-3 py-1.5 text-sm text-gold hover:bg-gold/10"
-            data-testid="portfolio-btn"
-          >
-            Portfolio
-          </Link>
-          <SettingsGearLink />
-          <LogoutButton />
+        <div className="desk-fold-x" data-desk-hide="header-tools">
+          <div className="flex shrink-0 items-center gap-2">
+            <Link
+              to="/portfolio"
+              className="rounded-md border border-line bg-panel px-3 py-1.5 text-sm text-gold hover:bg-gold/10"
+              data-testid="portfolio-btn"
+            >
+              Portfolio
+            </Link>
+            <SettingsGearLink />
+            <LogoutButton />
+          </div>
         </div>
       </header>
 
-      <section className="grid grid-cols-3 gap-3 px-4 py-3">
-        <Stat label="Balance" value={stats.balance} testid="stat-balance" />
-        <Stat label="Buying Power" value={stats.buying_power} testid="stat-bp" />
-        <Stat label="Portfolio Value" value={stats.portfolio_value} testid="stat-pv" />
-      </section>
+      <div className="desk-fold-y" data-desk-hide="stats">
+        <div className="desk-fold-clip">
+          <section className="grid grid-cols-3 gap-3 px-4 py-3">
+            <Stat label="Balance" value={stats.balance} testid="stat-balance" />
+            <Stat label="Buying Power" value={stats.buying_power} testid="stat-bp" />
+            <Stat label="Portfolio Value" value={stats.portfolio_value} testid="stat-pv" />
+          </section>
+        </div>
+      </div>
 
-      <div className="grid grid-cols-12 items-stretch gap-3 px-4 pb-3">
+      <div className="desk-stage grid grid-cols-12 items-stretch gap-3 px-4 pb-3">
         <aside
-          className="col-span-12 h-[calc(100dvh-10.75rem)] min-h-[36rem] overflow-auto rounded-xl border border-line bg-panel p-4 lg:col-span-2"
+          className="desk-ticker col-span-12 h-[calc(100dvh-10.75rem)] min-h-[36rem] overflow-auto rounded-xl border border-line bg-panel p-4 lg:col-span-2"
           data-testid="ticker-panel"
         >
           <p className="font-display text-2xl">{activeSymbol}</p>
@@ -449,16 +594,36 @@ export function Dashboard() {
           )}
         </aside>
 
-        <section className="col-span-12 flex flex-col gap-3 lg:col-span-10">
-          <div className="h-[calc(100dvh-9.5rem)] min-h-[42rem]">
-            <TradingViewChart symbol={symbol} timeframe={timeframe} onTimeframeChange={setTimeframe} />
+        <section className="desk-stage-chart col-span-12 flex flex-col gap-3 lg:col-span-10">
+          <div className="desk-chart-slot h-[calc(100dvh-9.5rem)] min-h-[42rem]">
+            <TradingViewChart
+              symbol={symbol}
+              timeframe={timeframe}
+              onTimeframeChange={setTimeframe}
+              fullscreen={chartFull}
+              fullscreenBusy={chartAnimating}
+              onFullscreenToggle={() => requestChartFullscreen(!chartFull)}
+            />
           </div>
+          <div className="desk-fold-y" data-desk-hide="summary">
+            <div className="desk-fold-clip">
           <div className="flex items-center justify-between rounded-xl border border-line bg-panel px-4 py-2.5">
             <div>
               <p className="text-xs uppercase tracking-wider text-bronze">Daily portfolio summary</p>
               <p className="font-mono" data-testid="day-pl-summary">
-                Day P&L {fmt(dayPl)} · {dayPl == null || dayPct == null ? "—" : `${dayPct.toFixed(2)}%`}
+                {`Day P&L ${dayPlLabel}${sessionLabel ? ` · ${sessionLabel}` : ""} · ${dayPl == null || dayPct == null ? "—" : `${dayPct.toFixed(2)}%`}`}
               </p>
+              {dailyBook && dailyBook.length > 0 && (
+                <div className="mt-2" data-testid="book-daily-pnl">
+                  <p className="text-[10px] uppercase tracking-wider text-bronze">Book daily P&L</p>
+                  <DailyPnlList days={dailyBook} testId="book-daily-pnl-list" />
+                </div>
+              )}
+              {!brokerage.usingBrokerage && dailyPnl.isError && (
+                <p className="text-xs text-faint" data-testid="daily-pnl-error">
+                  Daily P&L unavailable
+                </p>
+              )}
               <p className="text-xs text-faint">
                 Top movers: {((portfolio.data?.top_movers as { symbol: string }[]) ?? []).map((m) => m.symbol).join(", ") || "—"}
               </p>
@@ -467,9 +632,13 @@ export function Dashboard() {
               Scan {activeSymbol}
             </button>
           </div>
+            </div>
+          </div>
         </section>
       </div>
 
+      <div className="desk-fold-y" data-desk-hide="drawer">
+        <div className="desk-fold-clip">
       <section className="space-y-3 px-4 pb-10" data-testid="desk-drawer">
         <BrokerageConnectionPanel />
         <div className="rounded-xl border border-line bg-panel">
@@ -511,10 +680,14 @@ export function Dashboard() {
                   </tr>
                 ) : (
                   displayPositions.map((p) => {
-                    const positionDayPl = resolvePositionDayPl(p, quoteBySymbol.get(p.symbol));
+                    const seriesDays = brokerage.usingBrokerage ? undefined : daysForPosition(dailyPnl.data, p.id);
+                    const fromSeries = dayPlOrUnrealized(seriesDays, p.unrealized_pl);
+                    const positionDayPl =
+                      fromSeries != null ? fromSeries : resolvePositionDayPl(p, quoteBySymbol.get(p.symbol));
+                    const dayCell = fmt(positionDayPl);
                     return (
+                    <Fragment key={p.id}>
                     <tr
-                      key={p.id}
                       className="cursor-pointer"
                       data-testid={`position-row-${p.id}`}
                       tabIndex={0}
@@ -533,11 +706,19 @@ export function Dashboard() {
                       <td className="apex-num">{fmt(p.avg_cost)}</td>
                       <td className="apex-num">{fmt(p.current)}</td>
                       <td className={`apex-num ${positionDayPl == null ? "text-faint" : positionDayPl >= 0 ? "num-up" : "num-down"}`}>
-                        {fmt(positionDayPl)}
+                        {dayCell}
                       </td>
                       <td className={`apex-num ${p.unrealized_pl >= 0 ? "num-up" : "num-down"}`}>{fmt(p.unrealized_pl)}</td>
                       <td className="apex-num px-4">{fmt(p.market_value)}</td>
                     </tr>
+                    {seriesDays && seriesDays.length > 0 && (
+                      <tr data-testid={`position-daily-row-${p.id}`}>
+                        <td colSpan={7} className="px-4 pb-3">
+                          <PositionDailyPnl symbol={p.symbol} days={seriesDays} />
+                        </td>
+                      </tr>
+                    )}
+                    </Fragment>
                     );
                   })
                 )}
@@ -587,22 +768,48 @@ export function Dashboard() {
               aria-expanded={sentOpen}
               onClick={() => setSentOpen((v) => !v)}
             >
-              Market sentiment <span aria-hidden>{sentOpen ? "▾" : "▸"}</span>
+              News · {activeSymbol} <span aria-hidden>{sentOpen ? "▾" : "▸"}</span>
             </button>
             {sentOpen && (
-              <ul className="max-h-56 space-y-3 overflow-auto border-t border-line px-3 py-3 text-sm">
-                {((sentiment.data?.items as SentimentRow[]) ?? []).length === 0 ? (
-                  <li className="text-xs text-faint">
-                    {(sentiment.data as { caveat?: string } | undefined)?.caveat ||
-                      "No live sentiment rows. Open Deep Scan for news flow and chain positioning."}
+              <ul className="max-h-56 space-y-3 overflow-auto border-t border-line px-3 py-3 text-sm" data-testid="sentiment-list">
+                {sentiment.isLoading ? (
+                  <li className="text-xs text-faint" data-testid="sentiment-empty">
+                    Loading news for {activeSymbol}…
+                  </li>
+                ) : sentiment.isError && !isNewsRateLimitMessage((sentiment.error as Error)?.message) ? (
+                  <li className="text-xs text-faint" data-testid="sentiment-empty">
+                    Sentiment request failed: {visibleNewsError((sentiment.error as Error)?.message) || "unknown error"}.{" "}
+                    <button type="button" className="text-bronze underline" data-testid="sentiment-retry" onClick={() => sentiment.refetch()}>
+                      Retry
+                    </button>
+                  </li>
+                ) : ((sentiment.data?.items as SentimentRow[]) ?? []).length === 0 ? (
+                  <li className="text-xs text-faint" data-testid="sentiment-empty">
+                    {visibleNewsError((sentiment.data as { caveat?: string | null } | undefined)?.caveat) ||
+                      (activeSymbol
+                        ? `No recent news for ${activeSymbol} from Alpaca News.`
+                        : "No recent news from Alpaca News.")}{" "}
+                    {sentiment.data?.status === "unavailable" &&
+                    !isNewsRateLimitMessage((sentiment.data as { caveat?: string | null } | undefined)?.caveat) ? (
+                      <button type="button" className="text-bronze underline" data-testid="sentiment-retry" onClick={() => sentiment.refetch()}>
+                        Retry
+                      </button>
+                    ) : null}
                   </li>
                 ) : (
                   ((sentiment.data?.items as SentimentRow[]) ?? []).map((s, i) => (
-                    <li key={i}>
-                      <p className="text-champagne">{s.headline}</p>
-                      <p className="text-xs text-subtle">{s.blurb}</p>
+                    <li key={`${s.published_at}-${i}`}>
+                      {s.url ? (
+                        <a className="text-champagne underline" href={s.url} target="_blank" rel="noopener noreferrer">
+                          {s.headline}
+                        </a>
+                      ) : (
+                        <p className="text-champagne">{s.headline}</p>
+                      )}
+                      {s.blurb ? <p className="text-xs text-subtle">{s.blurb}</p> : null}
                       <p className="text-[10px] text-bronze">
                         {s.source} · {s.published_at}
+                        {s.score_method ? ` · ${s.score_method}` : ""}
                       </p>
                     </li>
                   ))
@@ -612,6 +819,8 @@ export function Dashboard() {
           </div>
         </div>
       </section>
+        </div>
+      </div>
 
       {cert.selected ? (
         <PositionCertificateModal details={cert.selected} onDismiss={cert.dismiss} />
@@ -634,7 +843,11 @@ export function Dashboard() {
         </div>
       )}
 
-      <LegalFooter className="px-4 pb-6" />
+      <div className="desk-fold-y" data-desk-hide="footer">
+        <div className="desk-fold-clip">
+          <LegalFooter className="px-4 pb-6" />
+        </div>
+      </div>
     </div>
   );
 }

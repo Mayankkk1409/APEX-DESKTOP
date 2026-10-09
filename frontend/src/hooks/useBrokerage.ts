@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { api } from "../api";
+import { DESK_STALE_MS } from "../lib/deskRefresh";
 import type { BrokerageAccount, BrokerageBalance, BrokeragePosition } from "../lib/brokerageApi";
 import { mapBrokeragePositions } from "../lib/brokerageMapper";
 import { readPortfolioViewMode } from "../lib/portfolioViewMode";
@@ -39,6 +40,7 @@ export function useBrokerage() {
     queryKey: ["brokerage", "accounts"],
     queryFn: () =>
       api.brokerageAccounts() as Promise<{ connection_status: string | null; accounts: BrokerageAccount[] }>,
+    staleTime: DESK_STALE_MS,
   });
 
   const accounts = accountsQuery.data?.accounts ?? [];
@@ -58,18 +60,29 @@ export function useBrokerage() {
     }
   }, [accounts, accountsQuery.isFetched, selectedBrokerageAccountId, setSelectedBrokerageAccountId]);
 
+  const brokerageBook = usingBrokerage && Boolean(activeId);
+
   const balanceQuery = useQuery({
     queryKey: ["brokerage", "balance", activeId],
     queryFn: () => api.brokerageBalance(activeId!) as Promise<BrokerageBalance>,
-    enabled: usingBrokerage && Boolean(activeId),
-    staleTime: 30_000,
+    enabled: brokerageBook,
+    staleTime: DESK_STALE_MS,
   });
 
   const positionsQuery = useQuery({
     queryKey: ["brokerage", "positions", activeId],
     queryFn: () => api.brokeragePositions(activeId!),
-    enabled: usingBrokerage && Boolean(activeId),
-    staleTime: 30_000,
+    enabled: brokerageBook,
+    staleTime: DESK_STALE_MS,
+  });
+
+  // Equity graph starts with balance and positions, not after the portfolio page mounts.
+  useQuery({
+    queryKey: ["brokerage", "equity-history", activeId],
+    queryFn: () => api.brokerageEquityHistory(activeId!),
+    enabled: brokerageBook,
+    staleTime: DESK_STALE_MS,
+    retry: 2,
   });
 
   const activeAccount = accounts.find((a) => a.id === activeId) ?? null;

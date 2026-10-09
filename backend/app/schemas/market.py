@@ -5,6 +5,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 DataFeed = Literal["indicative", "opra"]
+QuoteFeed = Literal["indicative", "opra", "other"]
 QuoteStatus = Literal["live", "partial", "unavailable"]
 
 #: Where a Greek / IV number came from. ``model`` means locally computed Black-Scholes.
@@ -26,6 +27,21 @@ ChainStatus = Literal[
     "empty",
     "unavailable",
 ]
+
+
+class QuoteMetaModel(BaseModel):
+    """Frozen QuoteMeta. Camel case matches ``app.contracts.QuoteMeta``."""
+
+    provider: str
+    feed: QuoteFeed
+    quotedAt: Optional[str] = None
+    receivedAt: Optional[str] = None
+    bid: Optional[float] = None
+    ask: Optional[float] = None
+    bidSize: Optional[float] = None
+    askSize: Optional[float] = None
+    isStale: bool = False
+    staleReason: Optional[str] = None
 
 
 class Quote(BaseModel):
@@ -51,6 +67,9 @@ class Quote(BaseModel):
     status: QuoteStatus = "unavailable"
     as_of: Optional[str] = None
     asset_class: Optional[str] = None
+    bid: Optional[float] = None
+    ask: Optional[float] = None
+    quote_meta: Optional[QuoteMetaModel] = None
 
 
 class Fundamentals(BaseModel):
@@ -112,6 +131,9 @@ class OptionContract(BaseModel):
     greeks_source: ValueSource = "unavailable"
     iv_source: ValueSource = "unavailable"
     quote_as_of: Optional[str] = None
+    quote_meta: Optional[QuoteMetaModel] = None
+    #: Listed contract size. 100 is the standard equity option; a published value is kept as-is.
+    multiplier: Optional[int] = None
 
 
 class OptionChain(BaseModel):

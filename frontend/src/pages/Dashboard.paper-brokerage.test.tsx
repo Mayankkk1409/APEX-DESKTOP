@@ -23,6 +23,7 @@ vi.mock("../api", () => ({
     positions: vi.fn(async () => ({
       positions: [{ id: "p1", symbol: "AAPL", qty: 10, avg_cost: 150, current: 160, market_value: 1600, unrealized_pl: 100, asset_class: "us_equity" }],
     })),
+    dailyPnl: vi.fn(async () => ({ positions: [], book: [] })),
     search: vi.fn(async () => ({ hits: [] })),
     brokerageAccounts: vi.fn(),
     brokerageBalance: vi.fn(),
@@ -176,5 +177,87 @@ describe("Dashboard paper vs brokerage isolation", () => {
     expect(html).toContain("50,000");
     expect(html).toContain("MSFT");
     expect(html).not.toContain("AAPL");
+  });
+
+  it("shows only the latest marked daily P&L for an open position", () => {
+    const qc = createTestQueryClient();
+    qc.setQueryData(["brokerage", "accounts"], { connection_status: null, accounts: [] });
+    qc.setQueryData(["quote", "SPX"], { symbol: "SPX", name: "S&P 500", price: 5000 });
+    qc.setQueryData(["port"], { balance: 100000, buying_power: 100000, portfolio_value: 100000, day_pl: 500 });
+    qc.setQueryData(["pos"], {
+      positions: [{ id: "p1", symbol: "AAPL", qty: 10, avg_cost: 150, current: 160, market_value: 1600, unrealized_pl: 100, asset_class: "us_equity" }],
+    });
+    qc.setQueryData(["daily-pnl"], {
+      positions: [
+        {
+          id: "p1",
+          symbol: "AAPL",
+          days: [
+            { date: "2026-10-01", pnl: 12.5, status: "marked" },
+            { date: "2026-10-02", pnl: -4, status: "marked" },
+            { date: "2026-10-05", pnl: null, status: "unavailable" },
+          ],
+        },
+      ],
+      book: [
+        { date: "2026-10-01", pnl: 12.5, status: "marked" },
+        { date: "2026-10-02", pnl: -4, status: "marked" },
+        { date: "2026-10-05", pnl: null, status: "unavailable" },
+      ],
+    });
+
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <Dashboard />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(html).toContain('data-testid="position-daily-row-p1"');
+    expect(html).toContain('data-date="2026-10-02"');
+    expect(html).toContain("Oct 2");
+    expect(html).toContain("-$4");
+    expect(html).not.toContain('data-date="2026-10-01"');
+    expect(html).not.toContain('data-date="2026-10-05"');
+    expect(html).not.toContain("+$12.5");
+    expect(html).not.toContain("unavailable");
+    expect(html).toContain('data-testid="book-daily-pnl"');
+    expect(html).toContain("Day P&amp;L -4 · Oct 2");
+    expect(html.match(/data-date=/g)).toHaveLength(2);
+    expect(html).toContain("100");
+  });
+
+  it("shows book dollars when at least one session is marked", () => {
+    const qc = createTestQueryClient();
+    qc.setQueryData(["brokerage", "accounts"], { connection_status: null, accounts: [] });
+    qc.setQueryData(["quote", "SPX"], { symbol: "SPX", name: "S&P 500", price: 5000 });
+    qc.setQueryData(["port"], { balance: 100000, buying_power: 100000, portfolio_value: 100000, day_pl: 500 });
+    qc.setQueryData(["pos"], {
+      positions: [{ id: "p1", symbol: "AAPL", qty: 10, avg_cost: 150, current: 160, market_value: 1600, unrealized_pl: 100, asset_class: "us_equity" }],
+    });
+    qc.setQueryData(["daily-pnl"], {
+      positions: [
+        {
+          id: "p1",
+          symbol: "AAPL",
+          days: [{ date: "2026-10-06", pnl: 18.5, status: "marked" }],
+        },
+      ],
+      book: [{ date: "2026-10-06", pnl: 18.5, status: "marked" }],
+    });
+
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <Dashboard />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(html).toContain('data-testid="day-pl-summary"');
+    expect(html).toContain("Day P&amp;L 18.5");
+    expect(html).toContain("+$18.5");
+    expect(html).not.toContain("Day P&amp;L unavailable");
   });
 });

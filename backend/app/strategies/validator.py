@@ -11,7 +11,7 @@ from app.analysis.score_bounds import assert_score_bounded
 from app.strategies.chain_utils import net_debit_credit, normalize_leg_mids
 from app.strategies.exceptions import StrategyValidationError
 from app.strategies.payoffs import PAYOFF_FUNCTIONS
-from app.strategies.registry import StrategySpec, get_strategy_spec, resolve_strategy_id
+from app.strategies.registry import LEG_QUANTITY_BY_INDEX, StrategySpec, get_strategy_spec, resolve_strategy_id
 
 logger = logging.getLogger(__name__)
 
@@ -429,7 +429,7 @@ def _check_payoff_shape(
     max_loss = metrics.get("max_loss")
     breakevens = metrics.get("breakevens") or []
 
-    if spec.max_profit_type == "finite" and max_profit is None:
+    if spec.max_profit_type == "finite" and max_profit is None and not metrics.get("payoff_depends_on_remaining_leg"):
         errors.append(
             _err(
                 strategy_id=strategy_id,
@@ -468,6 +468,10 @@ def _check_payoff_shape(
     if spec.max_profit_type == "unlimited" and max_profit is not None and not metrics.get("max_profit_unlimited_allowed"):
         pass  # numeric bound acceptable
 
+    # Calendars and diagonals publish no closed-form breakeven. An empty scan is not a missing contract.
+    if metrics.get("payoff_depends_on_remaining_leg"):
+        return
+
     be_clean = [b for b in breakevens if b is not None and isinstance(b, (int, float))]
     if spec.breakeven_type == "none" and be_clean:
         errors.append(
@@ -500,15 +504,18 @@ def _check_payoff_shape(
             )
         )
     elif spec.breakeven_type == "range" and len(be_clean) < 2:
-        errors.append(
-            _err(
-                strategy_id=strategy_id,
-                ticker=ticker,
-                check="breakeven_shape",
-                expected="breakeven range (lower and upper)",
-                actual=str(be_clean),
+        # Front-expiry calendars publish the scan's zero crossings. Fewer than two means the
+        # grid does not cross zero inside ±40% of spot. That is a model result, not a missing leg.
+        if not metrics.get("max_profit_iv_assumption_dependent"):
+            errors.append(
+                _err(
+                    strategy_id=strategy_id,
+                    ticker=ticker,
+                    check="breakeven_shape",
+                    expected="breakeven range (lower and upper)",
+                    actual=str(be_clean),
+                )
             )
-        )
 
 
 def _check_credit_consistency(
@@ -704,6 +711,185 @@ def _check_moneyness_monotonicity(
                 break
 
 
+def _leg_number(leg: dict[str, Any], key: str) -> float | None:
+    raw = leg.get(key)
+    if isinstance(raw, bool) or raw is None:
+        return None
+    try:
+        return round(float(raw), 4)
+    except (TypeError, ValueError):
+        return None
+
+
+def apex_structure_reason(
+    legs: list[dict[str, Any]],
+    *,
+    spot: float | None = None,
+    missing: list[str] | None = None,
+) -> str | None:
+    """Full Document §10 four-leg template. A partial list is not an APEX Strategy."""
+    if missing:
+        return "APEX Strategy requires all four legs. Missing: " + ", ".join(missing) + "."
+    opts = [leg for leg in legs if leg.get("side") in {"call", "put"}]
+    if len(opts) != 4:
+        return (
+            "APEX Strategy requires all four legs: buy the back-week call, buy the back-week put, "
+            "sell the front-week call, and sell the front-week put."
+        )
+    wanted = {("buy", "call"), ("buy", "put"), ("sell", "call"), ("sell", "put")}
+    found = {(str(leg.get("action") or "").lower(), str(leg.get("side") or "")) for leg in opts}
+    if found != wanted:
+        return (
+            "APEX Strategy requires buy call, buy put, sell call, and sell put. "
+            f"Built actions were {sorted(found)}."
+        )
+    if any(int(leg.get("quantity") or 1) != 1 for leg in opts):
+        return "APEX Strategy quantity is 1 on each of the four legs."
+
+    def _one(action: str, side: str) -> dict[str, Any]:
+        return next(leg for leg in opts if leg.get("action") == action and leg.get("side") == side)
+
+    buy_call, buy_put = _one("buy", "call"), _one("buy", "put")
+    sell_call, sell_put = _one("sell", "call"), _one("sell", "put")
+    call_strike = _leg_number(buy_call, "strike")
+    put_strike = _leg_number(buy_put, "strike")
+    if call_strike is None or put_strike is None:
+        return "APEX Strategy requires a call strike and a put strike."
+    if _leg_number(sell_call, "strike") != call_strike or _leg_number(sell_put, "strike") != put_strike:
+        return "APEX Strategy uses the same call strike and the same put strike on both expirations."
+    if call_strike <= put_strike:
+        return "APEX Strategy uses Strike A above Strike B."
+    buy_expiry = str(buy_call.get("expiry") or "")
+    sell_expiry = str(sell_call.get("expiry") or "")
+    if not buy_expiry or not sell_expiry or buy_expiry == sell_expiry:
+        return "APEX Strategy requires a front-week expiration and a later back-week expiration."
+    if str(buy_put.get("expiry") or "") != buy_expiry or str(sell_put.get("expiry") or "") != sell_expiry:
+        return "APEX Strategy keeps the call and the put on the same expiration within each week."
+    if sell_expiry > buy_expiry:
+        return "APEX Strategy sells the front week and buys the back week."
+    if spot is not None and not (call_strike > float(spot) > put_strike):
+        return "APEX Strategy uses a call strike above the spot and a put strike below the spot."
+    return None
+
+
+def _check_leg_template(
+    spec: StrategySpec,
+    legs: list[dict[str, Any]],
+    errors: list[StrategyValidationError],
+    *,
+    strategy_id: str,
+    ticker: str,
+    spot: float | None = None,
+) -> None:
+    """Block a recommendation whose legs do not match the registry template."""
+    if strategy_id == "vega_neutral_spread":
+        expected_pairs = [(ls.side, ls.option_type) for ls in spec.leg_specs]
+        actual_pairs = [
+            (
+                str(leg.get("action") or "").lower(),
+                "stock" if leg.get("side") == "stock" else str(leg.get("side") or ""),
+            )
+            for leg in legs
+        ]
+        if sorted(expected_pairs) != sorted(actual_pairs):
+            errors.append(
+                _err(
+                    strategy_id=strategy_id,
+                    ticker=ticker,
+                    check="leg_template",
+                    expected=str(expected_pairs),
+                    actual=str(actual_pairs),
+                )
+            )
+        return
+
+    qty_overrides = LEG_QUANTITY_BY_INDEX.get(strategy_id, {})
+    expected_options: list[tuple[str, str, int]] = []
+    expected_stock: list[str] = []
+    for index, leg_spec in enumerate(spec.leg_specs):
+        if leg_spec.option_type == "stock":
+            expected_stock.append(leg_spec.side)
+            continue
+        expected_options.append((leg_spec.side, leg_spec.option_type, qty_overrides.get(index, 1)))
+    actual_options: list[tuple[str, str, int]] = []
+    actual_stock: list[str] = []
+    for leg in legs:
+        action = str(leg.get("action") or "").lower()
+        if leg.get("side") == "stock":
+            actual_stock.append(action)
+            try:
+                shares = int(leg.get("quantity") or 0)
+            except (TypeError, ValueError):
+                shares = 0
+            if shares <= 0:
+                errors.append(
+                    _err(
+                        strategy_id=strategy_id,
+                        ticker=ticker,
+                        check="leg_ratio",
+                        expected="positive share quantity",
+                        actual=str(leg.get("quantity")),
+                    )
+                )
+            continue
+        try:
+            qty = int(leg.get("quantity") or 1)
+        except (TypeError, ValueError):
+            qty = 0
+        actual_options.append((action, str(leg.get("side") or ""), qty))
+    if sorted(expected_stock) != sorted(actual_stock) or sorted(
+        (action, side) for action, side, _qty in expected_options
+    ) != sorted((action, side) for action, side, _qty in actual_options):
+        errors.append(
+            _err(
+                strategy_id=strategy_id,
+                ticker=ticker,
+                check="leg_template",
+                expected=str(expected_stock + [(a, s) for a, s, _q in expected_options]),
+                actual=str(actual_stock + [(a, s) for a, s, _q in actual_options]),
+            )
+        )
+    elif sorted(expected_options) != sorted(actual_options):
+        errors.append(
+            _err(
+                strategy_id=strategy_id,
+                ticker=ticker,
+                check="leg_ratio",
+                expected=str(expected_options),
+                actual=str(actual_options),
+            )
+        )
+    if strategy_id == "apex_strategy":
+        reason = apex_structure_reason(legs, spot=spot)
+        if reason:
+            errors.append(
+                _err(
+                    strategy_id=strategy_id,
+                    ticker=ticker,
+                    check="apex_structure",
+                    expected="four-leg APEX Strategy template",
+                    actual=reason,
+                )
+            )
+
+
+def _wheel_stage(legs: list[dict[str, Any]]) -> str | None:
+    """Opening stage is a cash-secured short put. Covered call only when stock is already in the legs."""
+    stock = [leg for leg in legs if leg.get("side") == "stock"]
+    opts = [leg for leg in legs if leg.get("side") in {"call", "put"}]
+    if not stock and len(opts) == 1 and opts[0].get("action") == "sell" and opts[0].get("side") == "put":
+        return "cash_secured_put"
+    if (
+        len(stock) == 1
+        and stock[0].get("action") == "buy"
+        and len(opts) == 1
+        and opts[0].get("action") == "sell"
+        and opts[0].get("side") == "call"
+    ):
+        return "covered_call"
+    return None
+
+
 def validate_strategy_output(
     strategy_name: str,
     metrics: dict[str, Any],
@@ -769,7 +955,11 @@ def validate_strategy_output(
         )
 
     legs = metrics.get("legs") or []
-    if len(legs) != spec.leg_count:
+    wheel_stage = _wheel_stage(legs) if strategy_id == "wheel_strategy" else None
+    if wheel_stage == "covered_call":
+        # Shares are already held, so this stage is stock plus a short call.
+        pass
+    elif len(legs) != spec.leg_count:
         errors.append(
             _err(
                 strategy_id=strategy_id,
@@ -780,7 +970,9 @@ def validate_strategy_output(
             )
         )
 
-    _check_equity_policy(spec, legs, errors, strategy_id=strategy_id, ticker=ticker)
+    if wheel_stage != "covered_call":
+        _check_equity_policy(spec, legs, errors, strategy_id=strategy_id, ticker=ticker)
+        _check_leg_template(spec, legs, errors, strategy_id=strategy_id, ticker=ticker, spot=spot)
     _check_expiration_relationships(spec, legs, errors, strategy_id=strategy_id, ticker=ticker)
     _check_strike_relationships(spec, legs, errors, strategy_id=strategy_id, ticker=ticker)
     _check_occ_consistency(legs, errors, strategy_id=strategy_id, ticker=ticker)

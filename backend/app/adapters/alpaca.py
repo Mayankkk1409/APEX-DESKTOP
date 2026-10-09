@@ -9,7 +9,8 @@ from loguru import logger
 from app.adapters.demo import DemoAdapter
 from app.analysis import black_scholes as bs
 from app.config import Settings
-from app.schemas.market import Expiration, OptionChain, OptionContract, Quote, SearchHit
+from app.analysis.options_rules import build_quote_meta
+from app.schemas.market import Expiration, OptionChain, OptionContract, Quote, QuoteMetaModel, SearchHit
 
 #: Cash-settled indices have no listed chain on Alpaca (US equities and ETFs only).
 CASH_INDEX_SYMBOLS = {"SPX", "SPXW", "NDX", "RUT", "VIX", "XSP", "DJX", "XEO", "OEX"}
@@ -67,6 +68,33 @@ def _strike_from_occ(occ: str) -> float | None:
     return None
 
 
+def _json_or_none(res: Any) -> Any:
+    try:
+        return res.json()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def alpaca_order_error_message(body: Any, *, fallback: str) -> str:
+    """The broker's own sentence, when the response has one."""
+    if isinstance(body, dict):
+        message = body.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+    return fallback
+
+
+def _whole_order_qty(qty: Any) -> Any:
+    """Alpaca rejects a fractional-looking option qty such as 1.0."""
+    try:
+        number = float(qty)
+    except (TypeError, ValueError):
+        return qty
+    if number > 0 and number == int(number):
+        return int(number)
+    return qty
+
+
 def _parse_snapshot(occ: str, snap: Any, meta: Any = None) -> OptionContract | None:
     """Merge one Alpaca option snapshot with its contract reference row.
 
@@ -119,6 +147,7 @@ def _parse_snapshot(occ: str, snap: Any, meta: Any = None) -> OptionContract | N
         greeks_source="vendor" if has_greeks else "unavailable",
         iv_source="vendor" if iv is not None else "unavailable",
         quote_as_of=quote_row.get("t") or trade.get("t"),
+        multiplier=_opt_int(details.get("multiplier")),
     )
 
 
@@ -190,19 +219,29 @@ class AlpacaAdapter:
             return None
 
     async def search(self, query: str) -> list[SearchHit]:
-        data = await self._get(self.settings.resolved_broker_base_url, "/v2/assets", {"status": "active", "asset_class": "us_equity"})
-        if not data:
-            return await self.demo.search(query)
-        q = query.upper()
-        hits = []
-        for row in data:
-            sym = row.get("symbol", "")
-            name = row.get("name", "")
-            if q in sym or q.lower() in name.lower():
-                hits.append(SearchHit(symbol=sym, name=name, asset_class=row.get("class", "us_equity")))
-            if len(hits) >= 12:
-                break
-        return hits or await self.demo.search(query)
+        from app.services.symbol_catalog import Instrument, search_instruments
+
+        extras: list[Instrument] = []
+        # Empty focus shows the backlog only. A typed query may also include
+        # broker assets, which pass through the same type filter.
+        if query.strip():
+            data = await self._get(
+                self.settings.resolved_broker_base_url,
+                "/v2/assets",
+                {"status": "active", "asset_class": "us_equity"},
+            )
+            if isinstance(data, list):
+                for row in data:
+                    if not isinstance(row, dict):
+                        continue
+                    extras.append(
+                        Instrument(
+                            symbol=str(row.get("symbol") or ""),
+                            name=str(row.get("name") or ""),
+                            asset_class=str(row.get("class") or row.get("asset_class") or ""),
+                        )
+                    )
+        return search_instruments(query, extras)
 
     async def quote(self, symbol: str) -> Quote:
         from app.services.live_quotes import get_live_quote
@@ -269,6 +308,105 @@ class AlpacaAdapter:
         if ybars:
             return ybars
         return await self.demo.bars(symbol, timeframe, limit)
+
+    async def option_snapshot_bars(self, symbols: list[str]) -> dict[str, list[dict]]:
+        """Previous and latest session closes for OCC symbols.
+
+        Option history bars need an OPRA agreement this account does not have.
+        The options snapshot feed still publishes ``prevDailyBar`` and ``dailyBar``.
+        A stock snapshot of the OCC symbol is not used — that path rejects the contract.
+        """
+        from app.services.daily_pnl import bars_from_option_snapshot
+        from app.services.occ_symbol import parse_occ
+
+        clean = [s.upper() for s in symbols if s and parse_occ(s)]
+        found: dict[str, list[dict]] = {}
+        if not clean or not self.settings.alpaca_keys_present:
+            return found
+        feeds: list[str] = []
+        for feed in (self.feed, "indicative", "opra"):
+            if feed not in feeds:
+                feeds.append(feed)
+        for feed in feeds:
+            missing = [s for s in clean if s not in found]
+            if not missing:
+                break
+            payload = await self._get(
+                self.settings.resolved_data_base_url,
+                "/v1beta1/options/snapshots",
+                {"symbols": ",".join(missing), "feed": feed},
+            )
+            snaps = payload.get("snapshots") if isinstance(payload, dict) else None
+            if not isinstance(snaps, dict):
+                continue
+            for sym, row in snaps.items():
+                bars = bars_from_option_snapshot({"snapshots": {str(sym).upper(): row}}, str(sym))
+                if bars:
+                    found[str(sym).upper()] = bars
+        return found
+
+    async def vendor_daily_bars(self, symbol: str, *, start: str, end: str) -> list[dict]:
+        """Daily closes from Alpaca. Empty when the feed has no prices.
+
+        The chart path may fall back to the demo generator. Daily P&L must not.
+        Equity bars use the IEX feed. Option contracts use the options snapshot,
+        then option bars. Yahoo is only a last resort for cash indexes.
+        """
+        from app.services.live_quotes import _index_meta, yahoo_ohlc_bars
+        from app.services.occ_symbol import parse_occ
+
+        symbol = symbol.upper()
+        if parse_occ(symbol):
+            snapped = await self.option_snapshot_bars([symbol])
+            if snapped.get(symbol):
+                return snapped[symbol]
+            option_rows = await self.option_bars(symbol, start=start, end=end, timeframe="1Day", limit=1000)
+            if option_rows:
+                return option_rows
+            return []
+        mapped = await self._stock_daily_bars(symbol, start=start, end=end)
+        if mapped:
+            return mapped
+        if _index_meta(symbol):
+            return await yahoo_ohlc_bars(symbol, "1D", 1000)
+        return []
+
+    async def _stock_daily_bars(self, symbol: str, *, start: str, end: str) -> list[dict]:
+        """IEX daily closes. SIP recent bars are not entitled on this account."""
+        params = {
+            "timeframe": "1Day",
+            "limit": 10000,
+            "adjustment": "raw",
+            "start": start,
+            "end": end,
+            "feed": "iex",
+        }
+        data = await self._get(
+            self.settings.resolved_data_base_url,
+            f"/v2/stocks/{symbol}/bars",
+            params,
+        )
+        raw = (data or {}).get("bars") if isinstance(data, dict) else None
+        if not raw:
+            multi = dict(params)
+            multi["symbols"] = symbol
+            data = await self._get(
+                self.settings.resolved_data_base_url,
+                "/v2/stocks/bars",
+                multi,
+            )
+            packed = (data or {}).get("bars") if isinstance(data, dict) else None
+            if isinstance(packed, dict):
+                raw = packed.get(symbol) or packed.get(symbol.upper())
+            else:
+                raw = packed
+        if not raw:
+            return []
+        return [
+            {"t": b.get("t"), "c": b.get("c")}
+            for b in raw
+            if isinstance(b, dict) and b.get("c") is not None
+        ]
 
     async def _option_contracts(
         self,
@@ -443,9 +581,27 @@ class AlpacaAdapter:
         # Contract metadata for THIS expiry only — full pagination, no other dates mixed in.
         meta = {row.get("symbol"): row for row in await self._option_contracts(symbol, expiry) if row.get("symbol")}
         contracts: list[OptionContract] = []
+        received = datetime.now(timezone.utc)
+        from app.services.live_quotes import regular_market_sessions
+
+        sessions = await regular_market_sessions(self.settings)
         for occ, snap in snaps.items():
             contract = _parse_snapshot(occ, snap, meta.get(occ))
             if contract is not None:
+                contract.quote_meta = QuoteMetaModel.model_validate(
+                    build_quote_meta(
+                        provider="Alpaca",
+                        feed=self.feed,
+                        quoted_at=contract.quote_as_of,
+                        received_at=received,
+                        bid=contract.bid,
+                        ask=contract.ask,
+                        bid_size=contract.bid_size,
+                        ask_size=contract.ask_size,
+                        now=received,
+                        sessions=sessions,
+                    )
+                )
                 contracts.append(contract)
         contracts.sort(key=lambda c: (c.strike, c.side))
         if not contracts:
@@ -634,12 +790,59 @@ class AlpacaAdapter:
             )
         return out
 
+    async def _submit_combo(self, kwargs: dict, *, strict: bool) -> dict:
+        """One multi-leg limit. A rejection is returned as-is and is not split into single-leg orders."""
+        _ = strict
+        if not self.settings.alpaca_keys_present:
+            return await self.demo.submit_order(**kwargs)
+        legs = kwargs.get("legs") or []
+        payload = {
+            "order_class": "mleg",
+            "qty": str(_whole_order_qty(kwargs["qty"])),
+            "type": "limit",
+            "time_in_force": "day",
+            "limit_price": str(kwargs.get("limit_price")),
+            "legs": [
+                {
+                    "symbol": leg["symbol"],
+                    "ratio_qty": str(int(leg.get("ratio_qty") or 1)),
+                    "side": leg["side"],
+                    "position_intent": leg.get("position_intent") or (
+                        "buy_to_open" if leg.get("side") == "buy" else "sell_to_open"
+                    ),
+                }
+                for leg in legs
+            ],
+        }
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                res = await client.post(
+                    f"{self.settings.resolved_broker_base_url}/v2/orders",
+                    headers=self._headers(),
+                    json=payload,
+                )
+                if res.status_code >= 400:
+                    reason = alpaca_order_error_message(
+                        _json_or_none(res),
+                        fallback=(res.text or "").strip()[:300] or f"Broker rejected the order ({res.status_code})",
+                    )
+                    logger.warning("Alpaca combo order failed {}", reason)
+                    return {"status": "rejected", "rejected": True, "reason": reason}
+                return res.json()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Alpaca combo order error {}", exc)
+            reason = str(exc).strip() or "Broker order failed"
+            return {"status": "rejected", "rejected": True, "reason": reason}
+
     async def submit_order(self, **kwargs) -> dict:
+        strict = bool(kwargs.pop("strict", False))
+        if kwargs.get("order_class") == "mleg":
+            return await self._submit_combo(kwargs, strict=strict)
         if not self.settings.alpaca_keys_present:
             return await self.demo.submit_order(**kwargs)
         payload = {
             "symbol": kwargs["symbol"],
-            "qty": kwargs["qty"],
+            "qty": _whole_order_qty(kwargs["qty"]),
             "side": kwargs["side"],
             "type": kwargs.get("order_type", "market"),
             "time_in_force": "day",
@@ -654,9 +857,18 @@ class AlpacaAdapter:
                     json=payload,
                 )
                 if res.status_code >= 400:
-                    logger.warning("Alpaca order failed {}", res.text[:300])
+                    reason = alpaca_order_error_message(
+                        _json_or_none(res),
+                        fallback=(res.text or "").strip()[:300] or f"Broker rejected the order ({res.status_code})",
+                    )
+                    logger.warning("Alpaca order failed {}", reason)
+                    if strict:
+                        return {"status": "rejected", "rejected": True, "reason": reason}
                     return await self.demo.submit_order(**kwargs)
                 return res.json()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Alpaca order error {}", exc)
+            reason = str(exc).strip() or "Broker order failed"
+            if strict:
+                return {"status": "rejected", "rejected": True, "reason": reason}
             return await self.demo.submit_order(**kwargs)

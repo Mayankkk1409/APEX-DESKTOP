@@ -78,7 +78,8 @@ def percentile_rank(series: Sequence[float], value: float) -> float | None:
         return None
     below = sum(1 for x in clean if x < value)
     equal = sum(1 for x in clean if x == value)
-    return 100.0 * (below + 0.5 * equal) / len(clean)
+    raw = 100.0 * (below + 0.5 * equal) / len(clean)
+    return assert_score_in_bounds("percentile_rank", round(raw, 1))
 
 
 def range_rank(series: Sequence[float], value: float) -> float | None:
@@ -98,7 +99,7 @@ def range_rank(series: Sequence[float], value: float) -> float | None:
     if value >= hi:
         return assert_score_in_bounds("range_rank", 100.0)
     raw = 100.0 * (value - lo) / (hi - lo)
-    return assert_score_in_bounds("range_rank", raw)
+    return assert_score_in_bounds("range_rank", round(raw, 1))
 
 
 def expected_move(spot: float | None, iv: float | None, dte: int | None) -> dict[str, float | None]:

@@ -5,7 +5,8 @@ import math
 from datetime import date, datetime, timedelta, timezone
 
 from app.analysis import black_scholes as bs
-from app.schemas.market import Expiration, OptionChain, OptionContract, Quote, SearchHit
+from app.analysis.options_rules import build_quote_meta
+from app.schemas.market import Expiration, OptionChain, OptionContract, Quote, QuoteMetaModel, SearchHit
 
 UNIVERSE: dict[str, dict] = {
     "SPX": {
@@ -126,14 +127,9 @@ class DemoAdapter:
     feed = "indicative"
 
     async def search(self, query: str) -> list[SearchHit]:
-        q = query.strip().upper()
-        hits = []
-        for sym, meta in UNIVERSE.items():
-            if q in sym or q.lower() in meta["name"].lower():
-                hits.append(SearchHit(symbol=sym, name=meta["name"], asset_class=meta["asset_class"]))
-        if not hits and q:
-            hits.append(SearchHit(symbol=q, name=f"{q} (demo)", asset_class="us_equity"))
-        return hits[:12]
+        from app.services.symbol_catalog import search_instruments
+
+        return search_instruments(query)
 
     async def quote(self, symbol: str) -> Quote:
         symbol = symbol.upper()
@@ -158,6 +154,21 @@ class DemoAdapter:
         expense = meta.get("expense_ratio")
         if meta.get("asset_class") in {"us_equity", "us_index"}:
             expense = None
+        received = now
+        quote_meta = QuoteMetaModel.model_validate(
+            build_quote_meta(
+                provider="demo",
+                feed="other",
+                quoted_at=received,
+                received_at=received,
+                bid=round(price * 0.999, 2),
+                ask=round(price * 1.001, 2),
+                bid_size=100,
+                ask_size=100,
+                now=received,
+                feed_delayed=False,
+            )
+        )
         return Quote(
             symbol=symbol,
             name=meta["name"],
@@ -178,6 +189,11 @@ class DemoAdapter:
             beta_5y=meta.get("beta_5y"),
             source="demo",
             secondary_source=None,
+            bid=quote_meta.bid,
+            ask=quote_meta.ask,
+            quote_meta=quote_meta,
+            asset_class=str(meta.get("asset_class") or "us_equity"),
+            as_of=received.isoformat(),
         )
 
     async def bars(self, symbol: str, timeframe: str, limit: int = 180) -> list[dict]:
@@ -203,6 +219,11 @@ class DemoAdapter:
             v = 1_200_000 + int(abs(math.sin(i * 0.4 + _seed(symbol))) * 800_000)
             out.append({"t": t.isoformat(), "o": round(o, 2), "h": round(h, 2), "l": round(l, 2), "c": round(c, 2), "v": v})
         return out
+
+    async def vendor_daily_bars(self, symbol: str, *, start: str, end: str) -> list[dict]:
+        """Synthetic demo prices are not marks. Daily P&L stays unavailable."""
+        _ = (symbol, start, end)
+        return []
 
     async def expirations(self, symbol: str) -> list[Expiration]:
         today = _server_today()
@@ -318,6 +339,21 @@ class DemoAdapter:
                         rho=round(g.rho, 4),
                         greeks_source="model",
                         iv_source="model",
+                        multiplier=100,
+                        quote_as_of=_now().isoformat(),
+                        quote_meta=QuoteMetaModel.model_validate(
+                            build_quote_meta(
+                                provider="demo",
+                                feed="other",
+                                quoted_at=_now(),
+                                received_at=_now(),
+                                bid=bid,
+                                ask=ask,
+                                bid_size=int(5 + 60 * nearness),
+                                ask_size=int(5 + 60 * nearness),
+                                feed_delayed=False,
+                            )
+                        ),
                     )
                 )
         return OptionChain(
@@ -342,4 +378,7 @@ class DemoAdapter:
         )
 
     async def submit_order(self, **kwargs) -> dict:
-        return {"status": "filled", "broker": "demo_paper", **kwargs}
+        result = {"status": "filled", "broker": "demo_paper", **kwargs}
+        if kwargs.get("order_class") == "mleg" and kwargs.get("limit_price") is not None:
+            result["filled_avg_price"] = abs(float(kwargs["limit_price"]))
+        return result

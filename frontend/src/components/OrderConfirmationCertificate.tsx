@@ -14,6 +14,13 @@ import {
 import type { CertificateLegDisplay } from "../lib/certificateLegs";
 import { CertificateLegList } from "./CertificateLegList";
 import { ApexLogo } from "./ApexLogo";
+import {
+  EXPIRY_AUTO_CLOSE_NOTICE,
+  formatDaysLeft,
+  sortExpiryItems,
+  type ExpiryNoticeItem,
+} from "../lib/expiryNotice";
+import { formatOptionExpiration } from "../lib/optionSymbolParse";
 import type { BreakevenValue, OrderConfirmationDetails, PositionRow, StrategyLeg } from "../types";
 
 export type PositionCertificateDetails = {
@@ -44,7 +51,20 @@ type PositionProps = {
   closing?: boolean;
 };
 
-type Props = OrderProps | PositionProps;
+export type ExpiryNoticeDetails = {
+  items: ExpiryNoticeItem[];
+  isPaper: boolean;
+};
+
+type ExpiryProps = {
+  variant: "expiry";
+  details: ExpiryNoticeDetails;
+  onDismiss: () => void;
+  onClosePosition?: (positionId: string) => void;
+  closingId?: string | null;
+};
+
+type Props = OrderProps | PositionProps | ExpiryProps;
 
 function positionTicker(symbol: string): string {
   const parsed = parseOccSymbol(symbol);
@@ -55,16 +75,20 @@ export function OrderConfirmationCertificate(props: Props) {
   const trapRef = useFocusTrap(true);
   useEscapeKey(true, props.onDismiss);
 
+  const isExpiry = props.variant === "expiry";
   const isPosition = props.variant === "position";
   const positionDetails = isPosition ? props.details : null;
-  const orderDetails = !isPosition ? props.details : null;
+  const orderDetails = !isPosition && !isExpiry ? props.details : null;
+  const expiryItems = isExpiry ? sortExpiryItems(props.details.items) : [];
 
   const strategyName = normalizeStrategyName(
     isPosition ? positionDetails?.strategyName : orderDetails?.strategyName,
   );
-  const isPaper = isPosition
-    ? Boolean(positionDetails?.isPaper)
-    : orderDetails?.accountMode === "paper_funded";
+  const isPaper = isExpiry
+    ? Boolean(props.details.isPaper)
+    : isPosition
+      ? Boolean(positionDetails?.isPaper)
+      : orderDetails?.accountMode === "paper_funded";
 
   const legs = useMemo((): CertificateLegDisplay[] => {
     if (isPosition && positionDetails) {
@@ -95,9 +119,15 @@ export function OrderConfirmationCertificate(props: Props) {
     : null;
   const pnl = positionDetails?.position.unrealized_pl;
 
-  const testId = isPosition ? "position-certificate-modal" : "order-confirmation-modal";
-  const titleId = isPosition ? "position-cert-title" : "order-cert-title";
-  const title = isPosition ? "Position Certificate" : "Order Confirmation";
+  if (isExpiry && expiryItems.length === 0) return null;
+
+  const testId = isExpiry
+    ? "expiry-notice-modal"
+    : isPosition
+      ? "position-certificate-modal"
+      : "order-confirmation-modal";
+  const titleId = isExpiry ? "expiry-notice-title" : isPosition ? "position-cert-title" : "order-cert-title";
+  const title = isExpiry ? "Expiration notice" : isPosition ? "Position Certificate" : "Order Confirmation";
 
   return (
     <div
@@ -119,7 +149,9 @@ export function OrderConfirmationCertificate(props: Props) {
             {isPaper ? (
               <p
                 className="order-cert-paper-banner"
-                data-testid={isPosition ? "position-cert-paper-banner" : "order-cert-paper-banner"}
+                data-testid={
+                  isExpiry ? "expiry-notice-paper-banner" : isPosition ? "position-cert-paper-banner" : "order-cert-paper-banner"
+                }
               >
                 PAPER TRADE
               </p>
@@ -131,7 +163,9 @@ export function OrderConfirmationCertificate(props: Props) {
               <h2 id={titleId} className="order-cert-title">
                 {title}
               </h2>
-              {isPosition ? (
+              {isExpiry ? (
+                <p className="order-cert-status">Next 7 days</p>
+              ) : isPosition ? (
                 <p className="order-cert-status">Open · read-only</p>
               ) : orderDetails?.status ? (
                 <p className="order-cert-status" data-testid="order-cert-status">
@@ -140,6 +174,62 @@ export function OrderConfirmationCertificate(props: Props) {
               ) : null}
             </div>
 
+            {isExpiry ? (
+              <>
+                <p className="sf-panel-note" data-testid="expiry-notice-copy">
+                  {EXPIRY_AUTO_CLOSE_NOTICE}
+                </p>
+                <div className="order-cert-legs" data-testid="expiry-notice-list">
+                  <p className="order-cert-legs-label">Open trades</p>
+                  <ul>
+                    {expiryItems.map((item) => (
+                      <li key={`${item.position_id ?? "ext"}-${item.symbol}`} data-testid={`expiry-row-${item.symbol}`}>
+                        <dl className="order-cert-grid">
+                          <div className="order-cert-row">
+                            <dt>Symbol</dt>
+                            <dd data-testid={`expiry-symbol-${item.symbol}`}>{item.symbol}</dd>
+                          </div>
+                          <div className="order-cert-row">
+                            <dt>Strategy</dt>
+                            <dd data-testid={`expiry-strategy-${item.symbol}`}>{normalizeStrategyName(item.strategy)}</dd>
+                          </div>
+                          <div className="order-cert-row">
+                            <dt>Expiry</dt>
+                            <dd className="order-cert-leg-expiry" data-testid={`expiry-date-${item.symbol}`}>
+                              {formatOptionExpiration(item.expiry)}
+                            </dd>
+                          </div>
+                          <div className="order-cert-row">
+                            <dt>Days left</dt>
+                            <dd data-testid={`expiry-days-${item.symbol}`}>{formatDaysLeft(item.days_left)}</dd>
+                          </div>
+                        </dl>
+                        {item.can_close && item.position_id && props.variant === "expiry" && props.onClosePosition ? (
+                          <button
+                            type="button"
+                            className="order-cert-dismiss order-cert-dismiss-secondary"
+                            data-testid={`expiry-close-${item.position_id}`}
+                            disabled={props.closingId === item.position_id}
+                            onClick={() => props.onClosePosition?.(item.position_id as string)}
+                          >
+                            Close
+                          </button>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+                <button
+                  type="button"
+                  className="order-cert-dismiss"
+                  data-testid="expiry-notice-dismiss"
+                  onClick={props.onDismiss}
+                >
+                  Dismiss
+                </button>
+              </>
+            ) : (
+              <>
             <dl className="order-cert-grid">
               {isPosition && positionDetails ? (
                 <>
@@ -267,6 +357,8 @@ export function OrderConfirmationCertificate(props: Props) {
               >
                 {isPosition ? "Dismiss" : "Continue to dashboard"}
               </button>
+            )}
+              </>
             )}
           </div>
         </div>

@@ -297,6 +297,9 @@ export interface StrategyLeg {
   mid?: number | null;
   symbol?: string;
   quantity?: number;
+  order_type?: string;
+  limit_basis?: string | null;
+  limit_price?: number | null;
 }
 
 /** Calendar spreads may return a breakeven band instead of a single strike. */
@@ -323,6 +326,18 @@ export interface StrategyMetrics {
   breakeven_assumption_note?: string;
   /** Registry allows unlimited max profit display (long call, straddle, APEX Strategy). */
   max_profit_unlimited_allowed?: boolean;
+  /** Undefined-risk structures: the unbounded loss side is Unlimited, not a scanned stand-in. */
+  max_loss_unlimited_allowed?: boolean;
+  /** Calendars, diagonals, butterflies, and ratios: do not render a scanned max profit. */
+  payoff_depends_on_remaining_leg?: boolean;
+  validation_error?: string | null;
+  equity_covered_by_holdings?: boolean;
+  greeks?: { delta?: number | null; gamma?: number | null; theta?: number | null; vega?: number | null };
+  payoff_grid?: {
+    underlying: number;
+    pnl: number;
+  }[];
+  capital_required?: number | null;
 }
 
 export interface StrategyLayer {
@@ -334,12 +349,29 @@ export interface StrategyLayer {
   clears_threshold?: boolean;
   direction?: string;
   vol_signal?: string;
+  vol_regime?: string | null;
   recommended_contract?: RecommendedContract | null;
   equity_required?: boolean;
   equity_overlay_only?: boolean;
+  equity_note?: string | null;
   what_is_this: string;
   why_recommended: string;
+  why_it_fits?: string;
+  outlook?: string;
+  strategies_evaluated?: number | null;
   selection_rationale?: string | null;
+  risk_notes?: string[];
+  validation_errors?: Array<{ check?: string; expected?: string; actual?: string }>;
+  auto_exec_line?: string | null;
+  auto_exec_blocked?: boolean;
+  auto_execute_eligible?: boolean;
+  structure_label?: string | null;
+  placeable?: boolean;
+  quote_not_current?: boolean;
+  quote_as_of?: string | null;
+  block_reason?: string | null;
+  checks_passed?: boolean;
+  execution_banner?: string | null;
   how_to_execute: string;
   metrics: StrategyMetrics;
   narrative: string;
@@ -402,6 +434,7 @@ export interface OrderLegFill {
   qty: number;
   fill_price?: number | null;
   asset_class?: string;
+  order_type?: string;
 }
 
 export interface OrderConfirmationDetails {
@@ -424,6 +457,8 @@ export interface OverallPnlRow {
   unrealized_pl: number;
   total_pl: number;
   is_open: boolean;
+  /** Present only when the source reported a fee. Omitted means no fee was provided. */
+  fees?: number | null;
 }
 
 export interface PnlPoint {
@@ -462,9 +497,11 @@ export interface SentimentRow {
   blurb: string;
   source: string;
   signal: string;
-  score: number;
+  score: number | null;
+  score_method?: string | null;
   published_at: string;
   symbol: string | null;
+  url?: string | null;
 }
 
 export interface NewsArticleContent {
@@ -496,7 +533,7 @@ export interface SentimentLayer {
   title: string;
   symbol: string;
   score: number | null;
-  score_0_100: number;
+  score_0_100: number | null;
   band?: string;
   bias: string;
   weights: Record<string, number>;
@@ -508,6 +545,7 @@ export interface SentimentLayer {
       count: number;
       method: string;
       source: string | null;
+      as_of?: string | null;
       error?: string | null;
       articles: SentimentArticle[];
     };

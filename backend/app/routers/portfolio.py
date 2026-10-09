@@ -12,6 +12,7 @@ from app.models.user import User
 from app.services.fills import execute_market_fill, execute_strategy_legs
 from app.strategies.validator import validate_strategy_output
 from app.services.orders import account_impact, estimate_order_cost
+from app.services.daily_pnl import assemble_daily_pnl
 from app.services.portfolio_pnl import account_baseline, pnl_history_points, symbol_pnl_rows
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
@@ -24,6 +25,9 @@ class StrategyLegIn(BaseModel):
     strike: float | None = None
     option_side: str | None = None
     expiry: str | None = None
+    price: float | None = None
+    order_type: str | None = None
+    limit_price: float | None = None
 
 
 class OrderIn(BaseModel):
@@ -37,6 +41,9 @@ class OrderIn(BaseModel):
     asset_class: str = "us_option"
     legs: list[StrategyLegIn] | None = None
     contracts_per_leg: float = Field(default=1, gt=0)
+    spread_confirmed: bool = False
+    user_override: bool = False
+    override_reasons: list[str] = Field(default_factory=list)
 
 
 def _position_row(pos: Position) -> dict:
@@ -131,6 +138,17 @@ async def portfolio_pnl_history(
         "account_mode": user.account_mode,
         "points": points,
     }
+
+
+@router.get("/portfolio/daily-pnl")
+async def portfolio_daily_pnl(
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+    adapter=Depends(get_adapter),
+) -> dict:
+    """Per-position and book daily P&L. Missing feed prices stay unavailable."""
+    positions = (await db.scalars(select(Position).where(Position.user_id == user.id))).all()
+    return await assemble_daily_pnl(list(positions), adapter)
 
 
 @router.get("/portfolio/overall-pnl")
@@ -288,8 +306,10 @@ async def place_order(
 
     if body.legs:
         strategy_name: str | None = None
+        strategy_layer: dict = {}
         certificate: dict | None = None
         equity_legs: list[dict] | None = None
+        equity_satisfied = False
         if body.scan_id:
             scan = await db.get(Scan, body.scan_id)
             if scan and scan.user_id == user.id:
@@ -306,9 +326,38 @@ async def place_order(
                     "max_loss": metrics.get("max_loss"),
                     "max_profit": metrics.get("max_profit"),
                     "breakevens": metrics.get("breakevens") or [],
+                    "greeks": metrics.get("greeks") or {},
+                    "net_debit_credit": metrics.get("net_debit_credit"),
+                    "net_type": metrics.get("net_type"),
                 }
-                if strategy_name and not strategy_layer.get("tradeable", True):
-                    raise HTTPException(400, "Strategy layer is not tradeable — validation blocked this structure")
+                from app.services.executability import submission_block_reason
+
+                user_override = bool(body.user_override)
+                if user_override and not body.override_reasons:
+                    raise HTTPException(400, "Override reasons are required")
+                if strategy_name and not user_override:
+                    blocked = submission_block_reason(
+                        strategy_layer,
+                        spread_confirmed=body.spread_confirmed,
+                    )
+                    if blocked:
+                        raise HTTPException(400, blocked)
+                from app.analysis.gate_config import refuse_if_checks_failed
+
+                spread_override = bool(strategy_layer.get("placeable")) and bool(
+                    strategy_layer.get("spread_block_reasons")
+                ) and body.spread_confirmed
+                if not spread_override and not user_override:
+                    try:
+                        refuse_if_checks_failed(
+                            checks_passed=strategy_layer.get("checks_passed"),
+                            auto_execute=bool(strategy_layer.get("clears_threshold")),
+                        )
+                    except ValueError as exc:
+                        from loguru import logger
+
+                        logger.warning("order blocked reason={}", exc)
+                        raise HTTPException(400, str(exc)) from exc
                 if strategy_name:
                     validation = validate_strategy_output(
                         strategy_name,
@@ -320,6 +369,25 @@ async def place_order(
                         detail = validation.errors[0].to_log_dict() if validation.errors else {"check": "validation"}
                         raise HTTPException(400, f"Strategy validation failed: {detail}")
                 equity_legs = (layers.get("risk_review") or {}).get("equity_legs") or []
+                from app.services.stock_leg import submission_equity
+
+                positions = (await db.scalars(select(Position).where(Position.user_id == user.id))).all()
+                ask = None
+                try:
+                    live = await adapter.quote(scan.symbol)
+                    ask = live.ask
+                except Exception:  # noqa: BLE001
+                    ask = None
+                planned = submission_equity(
+                    strategy_name=strategy_name,
+                    ticker=scan.symbol,
+                    contracts=body.contracts_per_leg,
+                    multiplier=int((metrics.get("per_contract_multiplier") or 100)),
+                    positions=list(positions),
+                    ask=ask,
+                )
+                equity_legs = planned.order_legs
+                equity_satisfied = planned.covered_by_holdings
         try:
             orders = await execute_strategy_legs(
                 user=user,
@@ -331,6 +399,14 @@ async def place_order(
                 strategy_name=strategy_name,
                 certificate=certificate,
                 equity_legs=equity_legs if body.scan_id else None,
+                equity_satisfied=equity_satisfied if body.scan_id else False,
+                checks_passed=strategy_layer.get("checks_passed") if strategy_name else None,
+                spread_confirmed=body.spread_confirmed,
+                wide_spread_only=bool(strategy_layer.get("placeable"))
+                and bool(strategy_layer.get("spread_block_reasons")),
+                submission_path="place_order",
+                user_override=bool(body.user_override),
+                override_reasons=list(body.override_reasons),
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -355,6 +431,7 @@ async def place_order(
                     "qty": o.qty,
                     "fill_price": o.fill_price,
                     "asset_class": o.asset_class,
+                    "order_type": o.order_type,
                 }
                 for o in orders
             ],
@@ -385,6 +462,8 @@ async def place_order(
             order_type=body.order_type,
             limit_price=body.limit_price,
             scan_id=body.scan_id,
+            spread_confirmed=body.spread_confirmed,
+            submission_path="place_order",
         )
     except ValueError as exc:
         raise HTTPException(503, str(exc)) from exc

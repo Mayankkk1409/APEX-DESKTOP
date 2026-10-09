@@ -15,7 +15,7 @@ router = APIRouter(prefix="/market", tags=["market"])
 
 
 @router.get("/search")
-async def search(q: str = Query(min_length=1), adapter=Depends(get_adapter)) -> dict:
+async def search(q: str = "", adapter=Depends(get_adapter)) -> dict:
     hits = await adapter.search(q)
     return {"hits": [h.model_dump() for h in hits]}
 
@@ -125,9 +125,13 @@ async def options_analysis(
 
 @router.get("/feed")
 async def feed(settings: Settings = Depends(get_settings), adapter=Depends(get_adapter)) -> dict:
+    feed_name = getattr(adapter, "feed", "indicative")
+    adapter_name = getattr(adapter, "name", "demo")
     return {
-        "adapter": getattr(adapter, "name", "demo"),
-        "feed": getattr(adapter, "feed", "indicative"),
+        "adapter": adapter_name,
+        "feed": feed_name,
+        "quote_feed": feed_name if feed_name in {"indicative", "opra"} else "other",
+        "feed_delayed": bool(adapter_name == "alpaca" and feed_name == "indicative"),
         "alpaca_keys": settings.alpaca_keys_present,
         "trading_mode": settings.alpaca_trading_mode,
         "default_symbol": settings.default_symbol,

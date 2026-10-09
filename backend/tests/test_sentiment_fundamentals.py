@@ -144,7 +144,7 @@ async def test_fundamentals_missing_fields_stay_none(monkeypatch: pytest.MonkeyP
     async def empty_income(*_a, **_k):
         return {"status": "unavailable", "source": None, "revenue": None, "revenue_prior": None, "revenue_yoy_pct": None, "revenue_signal": None, "net_income": None, "net_income_prior": None, "net_income_yoy_pct": None}
 
-    async def empty_cal(symbol, surprise):
+    async def empty_cal(symbol, surprise, asset_class=None):
         return {"status": "unavailable", "next_date": None, "dte": None, "last_reported": None, "source": None, "caveat": "missing"}
 
     async def empty_rot(sector, settings=None):
@@ -271,3 +271,70 @@ def test_build_factor_cards_verbose_no_copout() -> None:
     assert "Consecutive Beats" in cards[2]["body"] or "consecutive" in cards[2]["body"].lower()
     assert "Buy" in cards[3]["body"]
     assert "2026-10-30" in cards[4]["body"]
+
+
+def test_googl_earnings_date_is_estimated_not_confirmed() -> None:
+    from app.services.fundamentals_layer import attach_event_risk, resolve_earnings_info
+
+    info = resolve_earnings_info("GOOGL", asset_class="stock")
+    assert info["date"] == "2026-10-28"
+    assert info["status"] == "estimated"
+    assert info["display"] == "2026-10-28 est."
+    assert any("MarketBeat" in source for source in info["sources"])
+    assert info["date"] != "none"
+    assert "none" not in {str(info["date"]).lower(), str(info["status"]).lower()}
+    flagged = attach_event_risk(dict(info), "2026-10-30")
+    assert flagged["event_risk"] is False
+    # NASDAQ's Zacks algorithm date is another estimate. It does not blank the calendar date.
+    mixed = resolve_earnings_info(
+        "GOOGL",
+        asset_class="stock",
+        provider_dates=[("2026-11-04", "NASDAQ earnings-date")],
+    )
+    assert mixed["date"] == "2026-10-28"
+    assert mixed["status"] == "estimated"
+    assert mixed["display"] == "2026-10-28 est."
+    assert mixed["date"] != "none"
+    assert any(row["date"] == "2026-11-04" for row in mixed["conflicts"])
+
+
+def test_spy_and_qqq_skip_the_unconfirmed_earnings_check() -> None:
+    from app.services.fundamentals_layer import earnings_unconfirmed_applies, resolve_earnings_info
+
+    for symbol in ("SPY", "QQQ"):
+        info = resolve_earnings_info(symbol, asset_class="etf")
+        assert info["securityType"] == "etf"
+        assert info["earnings_applicable"] is False
+        assert info["date"] is None
+        assert info["status"] == "unknown"
+        assert earnings_unconfirmed_applies(info) is False
+        assert info["date"] != "none"
+    from_catalog = resolve_earnings_info("QQQ")
+    assert from_catalog["securityType"] == "etf"
+    assert earnings_unconfirmed_applies(from_catalog) is False
+
+
+def test_confirmed_ir_date_is_kept_and_a_conflict_is_unknown() -> None:
+    from app.services.fundamentals_layer import attach_event_risk, resolve_earnings_info
+
+    agreed = resolve_earnings_info("JPM", provider_dates=[("2026-10-13", "NASDAQ earnings-date")])
+    assert agreed["date"] == "2026-10-13"
+    assert agreed["status"] == "confirmed"
+    assert any("jpmorganchase.com" in source for source in agreed["sources"])
+    for symbol in ("GS", "C", "JNJ", "UNH"):
+        confirmed = resolve_earnings_info(symbol, provider_dates=[("2026-10-13", "NASDAQ earnings-date")])
+        assert confirmed["date"] == "2026-10-13"
+        assert confirmed["status"] == "confirmed"
+    clash = resolve_earnings_info("JPM", provider_dates=[("2026-10-14", "NASDAQ earnings-date")])
+    assert clash["date"] is None
+    assert clash["status"] == "unknown"
+    assert clash["unverified"] is True
+    assert clash["display"] is None
+    missing = resolve_earnings_info("NVDA", asset_class="us_equity")
+    assert missing["date"] is None
+    assert missing["status"] == "unknown"
+    assert missing["date"] != "none"
+    risky = attach_event_risk(dict(missing), "2026-10-30")
+    assert risky["event_risk"] is True
+    later = attach_event_risk(dict(missing), "2026-12-18")
+    assert later["event_risk"] is False

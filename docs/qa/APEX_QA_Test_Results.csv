@@ -1,0 +1,51 @@
+#,Ticker,Sector,Expiry,DTE,Next Earnings,Earnings Before Expiry,Strategy Status,Recommended Strategy,Bias,Vol Regime,Composite Score,Risk Review Eligibility,Legs,Failed Check,Sentiment,Search Rank,Notes
+1,MSFT,Technology,2026-10-30,25,2026-11-04,No,BEST MATCH,Diagonal Spread (bullish),bullish,sell premium,61.8,Auto-execute eligible,2,,,7/9,Exact ticker listed 7th of 9 in search dropdown
+2,NVDA,Technology,2026-11-06,32,,No,BEST MATCH,Diagonal Spread (bullish),bullish,,70.6,Auto-execute eligible,2,,,11/19,Exact ticker listed 11th of 19 in search dropdown
+3,AMD,Technology,2026-10-05,0,,No,NOT EXECUTABLE,Married Put,bullish,fair,54.6,Auto-execute eligible,1,Stale or suspect quote,,1/12,Expiry left at default (0DTE) - automation timing. 0DTE put chosen though strategy text recommends 30-45 DTE; IV rank shows a dash
+4,JPM,Financials,2026-10-16,11,2026-10-13,Yes,NOT EXECUTABLE,Diagonal Spread (bearish),bearish,sell premium,62.9,Auto-execute eligible,2,Stale or suspect quote,Bullish · 73,26/26,Exact ticker listed 26th of 26 in dropdown
+5,GS,Financials,2026-10-16,11,2026-10-13,Yes,NOT EXECUTABLE,Diagonal Spread (bullish),bullish,sell premium,50.5,Auto-execute eligible,2,Stale or suspect quote,,26/26,
+6,BAC,Financials,2026-10-23,18,2026-10-14,Yes,NOT EXECUTABLE,Diagonal Spread (bearish),bearish,fair,51.9,Auto-execute eligible,2,Stale or suspect quote,Bullish · 63,3/26,
+7,WFC,Financials,2026-10-16,11,2026-10-14,Yes,NOT EXECUTABLE,Bear Call Spread,bearish,sell premium,50.2,Auto-execute eligible,2,bid/ask spread is 28,Bullish · 62,1/8,
+8,MS,Financials,2026-10-23,18,2026-10-14,Yes,BEST MATCH,Diagonal Spread (bullish),bullish,sell premium,53.5,Auto-execute eligible,2,,Bullish · 65,1/24,Searching 'MS' returned no Morgan Stanley result; located via company name
+9,C,Financials,2026-10-16,11,2026-10-13,Yes,NOT EXECUTABLE,Bear Call Spread,bearish,sell premium,48.8,Manual confirmation,2,bid/ask spread is 10,Bullish · 63,38/64,Exact ticker 38th of 64 in dropdown. Risk review composite line not in standard format (score below 50 min)
+10,JNJ,Health Care,2026-10-16,11,2026-10-13,Yes,NOT EXECUTABLE,Diagonal Spread (bearish),bearish,sell premium,51.0,Auto-execute eligible,2,Stale or suspect quote,Bullish · 75,1/1,
+11,UNH,Health Care,2026-10-23,18,2026-10-13,Yes,NOT EXECUTABLE,Bull Put Spread,bullish,sell premium,62.2,Auto-execute eligible,2,bid/ask spread is 13,Neutral · 56,5/5,
+12,NFLX,Communication,2026-10-23,18,2026-10-20,Yes,NOT EXECUTABLE,Diagonal Spread (bearish),bearish,buy premium,56.6,Auto-execute eligible,2,Stale or suspect quote,Bullish · 62,5/8,
+13,TSLA,Consumer Disc.,2026-10-23,18,2026-10-28,No,NOT EXECUTABLE,Diagonal Spread (bullish),bullish,sell premium,58.2,Auto-execute eligible,2,Stale or suspect quote,Neutral · 60,17/23,Earnings (Oct 28) is AFTER selected expiry (Oct 23) yet warning says 'before expiry' (may refer to the long diagonal leg)
+14,KO,Consumer Staples,2026-10-23,18,2026-10-27,No,BEST MATCH,Married Put,bullish,buy premium,49.7,Manual confirmation,2,,Neutral · 47,26/26,Exact ticker 26th of 26 in dropdown
+15,GE,Industrials,2026-10-23,18,2026-10-20,Yes,NOT EXECUTABLE,Diagonal Spread (bearish),bearish,sell premium,48.2,Manual confirmation,2,Stale or suspect quote,,26/26,Exact ticker 26th of 26 in dropdown
+16,IBM,Technology,2026-10-23,18,2026-10-21,Yes,NOT EXECUTABLE,Diagonal Spread (bearish),bearish,sell premium,49.7,Manual confirmation,2,Stale or suspect quote,Neutral · 53,1/12,
+17,VZ,Communication,2026-10-23,18,2026-10-26,No,NOT EXECUTABLE,Diagonal Spread (bullish),bullish,sell premium,48.4,Manual confirmation,2,Stale or suspect quote,Neutral · 49,1/2,"Earnings Oct 26 is after Oct 23 expiry, yet flagged 'before expiry'"
+18,T,Communication,2026-10-23,18,2026-10-21,Yes,NOT EXECUTABLE,Diagonal Spread (bearish),bearish,sell premium,49.6,Manual confirmation,2,Stale or suspect quote,Neutral · 54,26/41,Exact ticker 26th of 41
+19,GOOGL,Communication,2026-10-30,25,,No,NOT EXECUTABLE,Bull Put Spread,bullish,fair,61.5,Auto-execute eligible,2,bid/ask spread is 13,,1/11,
+20,META,Communication,2026-10-30,25,2026-11-04,No,NOT EXECUTABLE,Diagonal Spread (bearish),bearish,buy premium,63.1,Auto-execute eligible,2,Stale or suspect quote,,26/26,Earnings Nov 4 is after selected Oct 30 expiry; warning refers to long leg (Nov 6). Exact ticker 26th of 26
+21,AAPL,Technology,2026-11-06,32,2026-10-29,Yes,NOT EXECUTABLE,Married Put,bullish,sell premium,65.5,Auto-execute eligible,1,Stale or suspect quote,Bullish · 70,1/10,
+22,AMZN,Consumer Disc.,2026-11-06,32,2026-10-29,Yes,NOT EXECUTABLE,Diagonal Spread (bullish),bullish,sell premium,62.1,Auto-execute eligible,2,Stale or suspect quote,Neutral · 58,1/12,
+23,XOM,Energy,2026-11-06,32,2026-10-30,Yes,NOT EXECUTABLE,Bull Put Spread,bullish,sell premium,45.1,Manual confirmation,2,bid/ask spread is 31,Bearish · 27,2/4,
+24,CVX,Energy,2026-11-06,32,2026-10-30,Yes,NOT EXECUTABLE,Bull Put Spread,bullish,sell premium,52.7,Auto-execute eligible,2,bid/ask spread is 10,Bullish · 73,1/1,
+25,LLY,Health Care,2026-11-06,32,2026-10-29,Yes,NOT EXECUTABLE,Bull Put Spread,bullish,sell premium,48.8,Manual confirmation,2,bid/ask spread is 39,Neutral · 42,3/6,
+26,PFE,Health Care,2026-10-30,25,2026-11-03,No,NOT EXECUTABLE,Bear Call Spread,bearish,sell premium,46.4,Manual confirmation,2,bid/ask spread is 10,Neutral · 48,2/2,
+27,MRK,Health Care,2026-11-06,32,2026-10-29,Yes,NOT EXECUTABLE,Diagonal Spread (bearish),bearish,sell premium,46.0,Manual confirmation,2,Stale or suspect quote,Neutral · 58,2/2,
+28,ABBV,Health Care,2026-11-06,32,2026-10-30,Yes,NOT EXECUTABLE,Diagonal Spread (bullish),bullish,sell premium,48.7,Manual confirmation,2,Stale or suspect quote,Bullish · 67,1/1,
+29,V,Financials,2026-10-30,25,2026-10-27,Yes,NOT EXECUTABLE,Diagonal Spread (bullish),bullish,sell premium,50.2,Auto-execute eligible,2,Stale or suspect quote,Bullish · 60,29/29,
+30,MA,Financials,2026-11-06,32,2026-10-29,Yes,NOT EXECUTABLE,Diagonal Spread (bearish),bearish,sell premium,50.5,Auto-execute eligible,2,Stale or suspect quote,Neutral · 48,29/30,
+31,AXP,Financials,2026-10-23,18,2026-10-23,Yes,NOT EXECUTABLE,Diagonal Spread (bearish),bearish,sell premium,50.7,Auto-execute eligible,2,Stale or suspect quote,Neutral · 52,1/1,
+32,BLK,Financials,2026-10-16,11,2026-10-14,Yes,NOT EXECUTABLE,Diagonal Spread (bullish),bullish,sell premium,50.7,Auto-execute eligible,2,Stale or suspect quote,Bullish · 65,2/2,
+33,PEP,Consumer Staples,2026-10-16,11,2026-10-08,Yes,NOT EXECUTABLE,Diagonal Spread (bearish),bearish,sell premium,46.8,Manual confirmation,2,Stale or suspect quote,Bearish · 38,4/4,
+34,PG,Consumer Staples,2026-10-23,18,2026-10-22,Yes,NOT EXECUTABLE,Diagonal Spread (bearish),bearish,sell premium,43.9,Manual confirmation,2,Stale or suspect quote,Bearish · 23,26/26,
+35,MCD,Consumer Disc.,2026-11-06,32,2026-11-04,Yes,NOT EXECUTABLE,Bear Call Spread,bearish,sell premium,52.5,Auto-execute eligible,2,bid/ask spread is 23,Bullish · 69,2/2,
+36,SBUX,Consumer Disc.,2026-11-06,32,2026-11-04,Yes,NOT EXECUTABLE,Bull Put Spread,bullish,sell premium,46.7,Manual confirmation,2,bid/ask spread is 106,Neutral · 42,1/1,
+37,CAT,Industrials,2026-11-06,32,2026-11-04,Yes,NOT EXECUTABLE,Diagonal Spread (bullish),bullish,fair,45.2,Manual confirmation,2,Stale or suspect quote,Neutral · 49,8/21,
+38,BA,Industrials,2026-10-30,25,2026-10-27,Yes,NOT EXECUTABLE,Diagonal Spread (bearish),bearish,buy premium,50.6,Auto-execute eligible,2,Stale or suspect quote,Neutral · 53,27/27,
+39,HON,Industrials,2026-10-30,25,2026-10-22,Yes,NOT EXECUTABLE,Diagonal Spread (bearish),bearish,sell premium,47.5,Manual confirmation,2,Stale or suspect quote,Bearish · 39,7/13,
+40,UPS,Industrials,2026-10-30,25,2026-10-27,Yes,NOT EXECUTABLE,Diagonal Spread (bearish),bearish,sell premium,48.6,Manual confirmation,2,Stale or suspect quote,Neutral · 56,5/7,
+41,LMT,Industrials,2026-10-23,18,2026-10-22,Yes,NOT EXECUTABLE,Diagonal Spread (bearish),bearish,sell premium,51.0,Auto-execute eligible,2,Stale or suspect quote,Bullish · 70,2/2,
+42,RTX,Industrials,2026-10-09,4,2026-10-20,No,NOT EXECUTABLE,Bear Call Spread,bearish,sell premium,52.3,Auto-execute eligible,2,bid/ask spread is 47,Neutral · 45,1/2,
+43,COP,Energy,2026-12-18,74,2026-11-05,Yes,NOT EXECUTABLE,Diagonal Spread (bullish),bullish,sell premium,51.6,Auto-execute eligible,2,Stale or suspect quote,Bullish · 67,3/26,
+44,NEE,Utilities,2027-01-15,102,2026-10-27,Yes,NOT EXECUTABLE,Diagonal Spread (bearish),bearish,sell premium,46.2,Manual confirmation,2,Stale or suspect quote,Bearish · 39,4/7,
+45,SPY,ETF (Index),2026-10-07,2,,No,NOT EXECUTABLE,Married Put,bullish,buy premium,66.3,Auto-execute eligible,1,Earnings date is unconfirmed; Stale or suspect quote,,10/17,ETF flagged 'Earnings date is unconfirmed' (ETFs have no earnings); uses 100 shares already held
+46,QQQ,ETF (Index),2026-11-20,46,,No,NOT EXECUTABLE,Married Put,bullish,buy premium,63.7,Auto-execute eligible,1,Stale or suspect quote,,13/28,
+47,DIS,Communication,2027-03-19,165,2026-11-12,Yes,NOT EXECUTABLE,Diagonal Spread (bullish),bullish,sell premium,56.4,Auto-execute eligible,2,Stale or suspect quote,Neutral · 53,27/27,
+48,PLD,Real Estate,2026-10-16,11,2026-10-15,Yes,NOT EXECUTABLE,Diagonal Spread (bullish),bullish,sell premium,48.8,Manual confirmation,2,Stale or suspect quote,Bearish · 31,2/2,
+49,NEM,Materials,2027-06-17,255,2026-10-22,Yes,NOT EXECUTABLE,Diagonal Spread (bearish),bearish,sell premium,60.9,Auto-execute eligible,2,Stale or suspect quote,Bullish · 62,4/5,
+50,HD,Consumer Disc.,2026-11-13,39,2026-11-17,No,NOT EXECUTABLE,Diagonal Spread (bearish),bearish,fair,43.7,Manual confirmation,2,Stale or suspect quote,Bearish · 37,12/13,

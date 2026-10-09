@@ -23,13 +23,14 @@ const paperUser: User = {
 };
 
 describe("formatOrderType", () => {
-  it("joins order type and asset class with middle dot", () => {
-    expect(formatOrderType("market", "us_option")).toBe("market · us_option");
-    expect(formatOrderType("Market", "US_OPTION")).toBe("market · us_option");
+  it("shows the order type without the raw asset class", () => {
+    expect(formatOrderType("limit", "us_option")).toBe("limit");
+    expect(formatOrderType("Limit", "US_OPTION")).toBe("limit");
+    expect(formatOrderType("market", "us_option")).not.toContain("us_option");
   });
 
-  it("defaults missing values", () => {
-    expect(formatOrderType("", "")).toBe("market · us_option");
+  it("defaults missing values to limit", () => {
+    expect(formatOrderType("", "")).toBe("limit");
   });
 });
 
@@ -86,7 +87,8 @@ describe("buildOrderConfirmationDetails", () => {
     expect(details.orderIds).toEqual(["leg-a"]);
     expect(details.strategyName).toBe("Bull Call Spread");
     expect(details.ticker).toBe("SPX");
-    expect(formatOrderType(details.orderType, details.assetClass)).toBe("market · us_option");
+    expect(formatOrderType(details.orderType, details.assetClass)).toBe("limit");
+    expect(formatOrderType(details.orderType, details.assetClass)).not.toContain("us_option");
     expect(details.accountLabel).toBe(formatOrderAccountLabel(paperUser));
   });
 });

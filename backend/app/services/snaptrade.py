@@ -5,11 +5,12 @@ import base64
 import hashlib
 import hmac
 import json
-import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
+from urllib.parse import urlparse
 
 from loguru import logger
 from snaptrade_client import ApiException, SnapTrade, SnapTradeAuth
@@ -25,6 +26,7 @@ class SnapTradeSettings:
     encryption_key: str
     api_base_url: str
     frontend_origin: str
+    host: str
 
     @property
     def configured(self) -> bool:
@@ -32,31 +34,112 @@ class SnapTradeSettings:
 
 
 def get_snaptrade_settings() -> SnapTradeSettings:
-    cors = os.environ.get(
-        "APP_CORS_ORIGINS",
-        "http://localhost:5173,http://127.0.0.1:5173",
-    )
-    frontend = cors.split(",")[0].strip() or "http://localhost:5173"
-    api_base = os.environ.get("VITE_API_BASE_URL", "http://localhost:8000").rstrip("/")
+    """Read SnapTrade config from application settings (the `.env` file).
+
+    Partner credentials are not taken from a separate process environment lookup,
+    so a server started without ``source .env`` still sees the same values Alpaca uses.
+    """
+    from app.config import get_settings
+
+    settings = get_settings()
+    frontend = settings.frontend_base_url.strip().rstrip("/")
+    if not frontend:
+        frontend = settings.cors_origin_list[0] if settings.cors_origin_list else "http://localhost:5173"
+    api_base = settings.api_public_base_url.strip().rstrip("/") or "http://localhost:8000"
     return SnapTradeSettings(
-        client_id=os.environ.get("SNAPTRADE_CLIENT_ID", "").strip(),
-        consumer_key=os.environ.get("SNAPTRADE_CONSUMER_KEY", "").strip(),
-        env=os.environ.get("SNAPTRADE_ENV", "sandbox").strip() or "sandbox",
-        encryption_key=os.environ.get("ENCRYPTION_KEY", "").strip(),
+        client_id=settings.snaptrade_client_id.strip(),
+        consumer_key=settings.snaptrade_consumer_key.strip(),
+        env=settings.snaptrade_env.strip() or "sandbox",
+        encryption_key=settings.encryption_key.strip(),
         api_base_url=api_base,
         frontend_origin=frontend,
+        host=settings.resolved_snaptrade_host,
     )
 
 
-@lru_cache
-def _client() -> SnapTrade:
-    settings = get_snaptrade_settings()
+@lru_cache(maxsize=4)
+def _cached_client(client_id: str, consumer_key: str, host: str) -> SnapTrade:
     return SnapTrade(
         auth=SnapTradeAuth.commercial_api_key(
-            consumer_key=settings.consumer_key,
-            client_id=settings.client_id,
-        )
+            consumer_key=consumer_key,
+            client_id=client_id,
+        ),
+        host=host,
     )
+
+
+def _client() -> SnapTrade:
+    settings = get_snaptrade_settings()
+    return _cached_client(settings.client_id, settings.consumer_key, settings.host)
+
+
+_PROBE_TTL_SECONDS = 30.0
+_probe_cache: tuple[float, dict[str, Any]] | None = None
+
+
+def clear_probe_cache() -> None:
+    global _probe_cache
+    _probe_cache = None
+
+
+def _missing_snaptrade_env(settings: SnapTradeSettings) -> list[str]:
+    missing: list[str] = []
+    if not settings.client_id:
+        missing.append("SNAPTRADE_CLIENT_ID")
+    if not settings.consumer_key:
+        missing.append("SNAPTRADE_CONSUMER_KEY")
+    if not settings.encryption_key:
+        missing.append("ENCRYPTION_KEY")
+    return missing
+
+
+async def _probe_upstream_once() -> dict[str, Any]:
+    settings = get_snaptrade_settings()
+    missing = _missing_snaptrade_env(settings)
+    if missing:
+        return {
+            "upstream": "not_configured",
+            "http_status": None,
+            "host": settings.host,
+            "missing": missing,
+        }
+    try:
+        response = await _call("api_status.check")
+        code = int(getattr(response, "status", None) or 200)
+        return {
+            "upstream": "up" if 200 <= code < 300 else "down",
+            "http_status": code,
+            "host": settings.host,
+            "missing": [],
+        }
+    except ApiException as exc:
+        code = getattr(exc, "status", None)
+        log_safe_error("api_status", exc)
+        return {
+            "upstream": "down",
+            "http_status": int(code) if isinstance(code, int) else None,
+            "host": settings.host,
+            "missing": [],
+        }
+    except Exception as exc:  # noqa: BLE001
+        log_safe_error("api_status", exc)
+        return {
+            "upstream": "down",
+            "http_status": None,
+            "host": settings.host,
+            "missing": [],
+        }
+
+
+async def probe_upstream() -> dict[str, Any]:
+    """Live SnapTrade API status. Never reports up unless the status call succeeds."""
+    global _probe_cache
+    now = time.monotonic()
+    if _probe_cache is not None and now - _probe_cache[0] < _PROBE_TTL_SECONDS:
+        return _probe_cache[1]
+    result = await _probe_upstream_once()
+    _probe_cache = (now, result)
+    return result
 
 
 def encrypt_user_secret(secret: str) -> str:
@@ -140,13 +223,87 @@ async def _call(method: str, **kwargs: Any) -> Any:
     return await asyncio.to_thread(sync_fn, **kwargs)
 
 
+def is_existing_snaptrade_user(exc: Exception) -> bool:
+    """True when SnapTrade already has this user id (code 1010).
+
+    The stored user secret cannot be recovered, so callers delete and register again.
+    """
+    status_code = getattr(exc, "status", None)
+    if status_code not in (400, 409):
+        return False
+    code, detail = _error_code_and_detail(getattr(exc, "body", None))
+    if code == "1010":
+        return True
+    return "already exist" in detail.lower()
+
+
+def _error_code_and_detail(body: Any) -> tuple[str, str]:
+    if isinstance(body, (bytes, str)):
+        text = body.decode("utf-8", "replace") if isinstance(body, bytes) else body
+        try:
+            body = json.loads(text)
+        except json.JSONDecodeError:
+            return "", text
+    if isinstance(body, dict):
+        return str(body.get("code") or ""), str(body.get("detail") or body.get("message") or "")
+    return "", ""
+
+
 async def register_snaptrade_user(user_id: str) -> dict[str, str]:
     response = await _call("authentication.register_snap_trade_user", user_id=user_id)
-    body = response.body or {}
+    body = _mapping(response.body)
+    secret = body.get("userSecret")
+    if not isinstance(secret, str) or not secret:
+        raise RuntimeError("SnapTrade did not return a user secret")
+    user = body.get("userId")
     return {
-        "userId": body.get("userId") or user_id,
-        "userSecret": body["userSecret"],
+        "userId": user if isinstance(user, str) and user else user_id,
+        "userSecret": secret,
     }
+
+
+async def delete_snaptrade_user(user_id: str) -> None:
+    await _call("authentication.delete_snap_trade_user", user_id=user_id)
+
+
+def _mapping(body: Any) -> dict[str, Any]:
+    if isinstance(body, dict):
+        return body
+    if isinstance(body, (bytes, str)):
+        text = body.decode("utf-8", "replace") if isinstance(body, bytes) else body
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    if body is None:
+        return {}
+    mapped: dict[str, Any] = {}
+    for key in ("redirectURI", "redirectUri", "loginLink", "userId", "userSecret"):
+        value = getattr(body, key, None)
+        if value is None and hasattr(body, "get"):
+            try:
+                value = body.get(key)
+            except Exception:  # noqa: BLE001
+                value = None
+        if isinstance(value, str):
+            mapped[key] = value
+    return mapped
+
+
+def portal_redirect_uri(body: Any) -> str | None:
+    mapped = _mapping(body)
+    for key in ("redirectURI", "redirectUri", "loginLink"):
+        value = mapped.get(key)
+        if isinstance(value, str) and _is_snaptrade_portal_url(value):
+            return value
+    return None
+
+
+def _is_snaptrade_portal_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme in {"https", "http"} and "snaptrade" in host
 
 
 async def connection_portal_url(
@@ -168,11 +325,10 @@ async def connection_portal_url(
     if broker:
         kwargs["broker"] = broker
     response = await _call("authentication.login_snap_trade_user", **kwargs)
-    body = response.body or {}
-    url = body.get("redirectURI") or body.get("redirectUri") or body.get("loginLink")
+    url = portal_redirect_uri(getattr(response, "body", None))
     if not url:
         raise RuntimeError("SnapTrade did not return a connection portal URL")
-    return str(url)
+    return url
 
 
 async def list_accounts(user_id: str, user_secret: str) -> list[dict[str, Any]]:
@@ -355,6 +511,32 @@ def _position_symbol(row: dict[str, Any]) -> str:
     )
 
 
+def _position_expiry(row: dict[str, Any]) -> str | None:
+    from app.services.occ_symbol import expiry_iso_from_text
+
+    raw_values: list[Any] = []
+    option = row.get("option_symbol")
+    if isinstance(option, dict):
+        raw_values.extend(
+            [
+                option.get("expiration_date"),
+                option.get("expiry_date"),
+                option.get("expiration"),
+                option.get("ticker"),
+                option.get("symbol"),
+            ]
+        )
+    instrument = row.get("instrument")
+    if isinstance(instrument, dict):
+        raw_values.append(instrument.get("expiration_date"))
+    raw_values.append(_position_symbol(row))
+    for raw in raw_values:
+        iso = expiry_iso_from_text(raw)
+        if iso:
+            return iso
+    return None
+
+
 def _normalize_position(row: dict[str, Any]) -> dict[str, Any]:
     quantity = _num(
         _first_present(row, "units", "quantity", "open_quantity", "fractional_units")
@@ -389,6 +571,7 @@ def _normalize_position(row: dict[str, Any]) -> dict[str, Any]:
         "market_value": market_value,
         "unrealized_pnl": unrealized_pnl,
         "currency": _currency_code(row.get("currency"), "USD"),
+        "expiry": _position_expiry(row),
     }
 
 

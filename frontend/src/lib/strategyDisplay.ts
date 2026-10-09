@@ -12,7 +12,3 @@ export const INSUFFICIENT_CONVICTION_SCORE = 50;
 export function isInsufficientConviction(score: number | null | undefined): boolean {
   return score == null || !Number.isFinite(score) || score < INSUFFICIENT_CONVICTION_SCORE;
 }
-
-export function insufficientConvictionLabel(): string {
-  return "No Trade / Insufficient Conviction";
-}

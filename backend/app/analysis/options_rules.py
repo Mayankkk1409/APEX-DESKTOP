@@ -18,12 +18,20 @@ Documented rules implemented here
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
-from typing import Iterable, Literal, Optional
+import math
+from dataclasses import asdict, dataclass, field, replace
+from datetime import date, datetime, time, timedelta, timezone
+from typing import Any, Iterable, Literal, Optional, Sequence
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
 
+from app.analysis.gate_config import QUOTE_FRESHNESS_SECONDS
+from app.contracts import QuoteMeta
 from app.schemas.market import OptionContract
+
+NY = ZoneInfo("America/New_York")
+FeedName = Literal["indicative", "opra", "other"]
 
 GateStatus = Literal["pass", "fail", "warn", "unknown"]
 Verdict = Literal[
@@ -185,6 +193,35 @@ def spread_metrics(bid: float | None, ask: float | None) -> tuple[float | None, 
     return mid, spread, spread / mid
 
 
+def daily_theta_per_share(
+    theta: float | None,
+    *,
+    mid: float | None = None,
+    multiplier: int | None = 100,
+) -> float | None:
+    """Theta in premium points per share per calendar day.
+
+    Rule 1 compares this number with 0.05. A reading already near 0.15–0.20 is
+    left unchanged so that contract fails. A reading larger than the option mid
+    cannot be per-share premium (the contract would be worth less than one day
+    of decay) and is the whole-contract Greek, so it is divided by the multiplier.
+    """
+    if theta is None or isinstance(theta, bool):
+        return None
+    try:
+        value = float(theta)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    scale = int(multiplier) if multiplier and int(multiplier) > 1 else 100
+    if mid is not None and mid > 0 and abs(value) > mid:
+        per_share = value / scale
+        if abs(per_share) <= mid:
+            value = per_share
+    return value
+
+
 def delta_theta_ratio(delta: float | None, theta: float | None) -> float | None:
     """APEX Delta/Theta ratio (§5.2): |Delta| divided by absolute daily Theta.
 
@@ -218,7 +255,7 @@ def evaluate_contract(contract: OptionContract, ctx: ChainContext) -> ContractVe
 
     mid, spread_abs, spread_pct = spread_metrics(contract.bid, contract.ask)
     abs_delta = abs(contract.delta) if contract.delta is not None else None
-    theta_day = contract.theta
+    theta_day = daily_theta_per_share(contract.theta, mid=mid, multiplier=contract.multiplier)
     ratio = delta_theta_ratio(contract.delta, theta_day)
     moneyness = classify_moneyness(contract.side, contract.strike, ctx.spot, ctx.atm_strike)
 
@@ -520,8 +557,19 @@ def evaluate_contract(contract: OptionContract, ctx: ChainContext) -> ContractVe
 
     # §9.1 Rule 1 / Rule 2 — the tighter proprietary filters
     if abs_delta is not None and theta_day is not None:
-        if _ge(abs_delta, t.rule1_delta_min) and _lt(abs(theta_day), t.rule1_theta_max) and _gt(ratio or 0, t.delta_theta_buy_min):
+        from app.analysis.gate_config import iv_below_hv, rule1_theta_failures
+
+        theta_fail, theta_notes = rule1_theta_failures(
+            delta=abs_delta,
+            theta_per_share=theta_day,
+            premium=mid,
+        )
+        spread_ok = spread_pct is not None and spread_pct < 0.08
+        iv_ok = iv_below_hv(contract.iv, ctx.hv) is True
+        if not theta_fail and spread_ok and iv_ok:
             flags.append("rule1_buy")
+        elif any("skipped" in note for note in theta_notes):
+            flags.append("rule1_ratio_skipped")
         if _le(abs_delta, t.rule2_delta_max) and spread_pct is not None and _le(spread_pct, t.spread_max_pct_of_mid):
             flags.append("rule2_sell")
 
@@ -798,10 +846,19 @@ def _reasoning(
     if "uoa" in flags:
         parts.append("Unusual options activity is present on this strike.")
     if "rule1_buy" in flags:
-        parts.append(
-            f"Meets §9.1 Rule 1 (Delta >= {ctx.thresholds.rule1_delta_min:.2f}, daily Theta < "
-            f"{ctx.thresholds.rule1_theta_max:.2f}, Delta/Theta > {ctx.thresholds.delta_theta_buy_min:g})."
-        )
+        from app.analysis.gate_config import theta_filter_mode
+
+        if theta_filter_mode() == "abs_per_share":
+            parts.append(
+                f"Meets §9.1 Rule 1 (Delta >= {ctx.thresholds.rule1_delta_min:.2f}, daily Theta < "
+                f"{ctx.thresholds.rule1_theta_max:.2f}, Delta/Theta > {ctx.thresholds.delta_theta_buy_min:g}, "
+                "spread under 8% of mid, IV below HV)."
+            )
+        else:
+            parts.append(
+                "Meets §9.1 Rule 1 (Delta >= 0.55, theta within the percent-of-premium cap, "
+                "spread under 8% of mid, IV below HV). The delta/theta ratio was skipped."
+            )
     if "rule2_sell" in flags:
         parts.append(
             f"Meets §9.1 Rule 2 short-leg profile (Delta <= {ctx.thresholds.rule2_delta_max:.2f} with a spread inside the cap)."
@@ -811,6 +868,260 @@ def _reasoning(
 
 def evaluate_chain(contracts: Iterable[OptionContract], ctx: ChainContext) -> list[ContractVerdict]:
     return [evaluate_contract(c, ctx) for c in contracts]
+
+
+def clears_oi_and_volume(
+    open_interest: int | None,
+    volume: int | None,
+    thresholds: RuleThresholds = DEFAULT_THRESHOLDS,
+) -> bool:
+    """Same §5.6 numbers the per-contract gates use. Does not change those numbers."""
+    if open_interest is None or volume is None:
+        return False
+    if open_interest < thresholds.min_open_interest or open_interest <= 0:
+        return False
+    return _gt(volume / open_interest, thresholds.volume_oi_min_ratio)
+
+
+def contract_clears_oi_and_volume(
+    contract: OptionContract | dict[str, Any],
+    thresholds: RuleThresholds = DEFAULT_THRESHOLDS,
+) -> bool:
+    if isinstance(contract, OptionContract):
+        return clears_oi_and_volume(contract.open_interest, contract.volume, thresholds)
+    oi = contract.get("open_interest")
+    vol = contract.get("volume")
+    oi_i = int(oi) if isinstance(oi, (int, float)) and not isinstance(oi, bool) else None
+    vol_i = int(vol) if isinstance(vol, (int, float)) and not isinstance(vol, bool) else None
+    return clears_oi_and_volume(oi_i, vol_i, thresholds)
+
+
+def weekday_sessions(anchor: date, *, back: int = 14, forward: int = 1) -> list[tuple[datetime, datetime]]:
+    """Regular NYSE hours on weekdays. Holidays are not in this fallback."""
+    sessions: list[tuple[datetime, datetime]] = []
+    for offset in range(-back, forward + 1):
+        day = anchor + timedelta(days=offset)
+        if day.weekday() >= 5:
+            continue
+        sessions.append(
+            (
+                datetime.combine(day, time(9, 30), tzinfo=NY),
+                datetime.combine(day, time(16, 0), tzinfo=NY),
+            )
+        )
+    return sessions
+
+
+def parse_alpaca_calendar(rows: Sequence[dict[str, Any]]) -> list[tuple[datetime, datetime]]:
+    """Regular-hours sessions from Alpaca ``GET /v2/calendar`` (open/close, not the extended session)."""
+    sessions: list[tuple[datetime, datetime]] = []
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("date"):
+            continue
+        try:
+            day = date.fromisoformat(str(row["date"])[:10])
+            open_h, open_m = (int(part) for part in str(row.get("open") or "09:30").split(":")[:2])
+            close_h, close_m = (int(part) for part in str(row.get("close") or "16:00").split(":")[:2])
+        except (TypeError, ValueError):
+            continue
+        sessions.append(
+            (
+                datetime.combine(day, time(open_h, open_m), tzinfo=NY),
+                datetime.combine(day, time(close_h, close_m), tzinfo=NY),
+            )
+        )
+    return sessions
+
+
+def _aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def _parse_quoted_at(value: str | datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return _aware(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return _aware(parsed)
+
+
+def in_regular_session(now: datetime, sessions: Sequence[tuple[datetime, datetime]]) -> bool:
+    clock = _aware(now)
+    return any(_aware(start) <= clock < _aware(end) for start, end in sessions)
+
+
+def classify_quote_freshness(
+    *,
+    quoted_at: datetime | str | None,
+    now: datetime,
+    sessions: Sequence[tuple[datetime, datetime]] | None = None,
+    feed_delayed: bool = False,
+    freshness_seconds: int = QUOTE_FRESHNESS_SECONDS,
+) -> tuple[bool, str | None]:
+    """Market-hours staleness. The age cap stays ``QUOTE_FRESHNESS_SECONDS``.
+
+    Outside a regular session a quote that has a timestamp is last close and is
+    not failed for age. A missing timestamp is stale in or out of the session.
+    A delayed feed is labeled ``delayed``. During the session an age past the cap
+    is still stale.
+    """
+    clock = _aware(now)
+    if sessions is None:
+        sessions = weekday_sessions(clock.astimezone(NY).date())
+    if not in_regular_session(clock, sessions):
+        if _parse_quoted_at(quoted_at) is None:
+            return True, "stale"
+        return False, "last_close"
+    quoted = _parse_quoted_at(quoted_at)
+    if quoted is None:
+        return (False, "delayed") if feed_delayed else (False, None)
+    age = (clock - quoted).total_seconds()
+    if age > freshness_seconds:
+        return True, "delayed" if feed_delayed else "stale"
+    if feed_delayed:
+        return False, "delayed"
+    return False, None
+
+
+def canonical_feed(feed: str | None, *, delayed: bool | None = None) -> tuple[FeedName, bool]:
+    """Map a vendor feed name onto the frozen ``indicative | opra | other`` set.
+
+    Alpaca's indicative options feed is delayed (trades by 15 minutes; quotes are
+    not OPRA). OPRA is the subscribed consolidated feed and is not labeled delayed.
+    """
+    name = (feed or "").strip().lower()
+    if name == "indicative":
+        return "indicative", True if delayed is None else delayed
+    if name == "opra":
+        return "opra", False if delayed is None else delayed
+    return "other", bool(delayed)
+
+
+def build_quote_meta(
+    *,
+    provider: str,
+    feed: str,
+    quoted_at: str | datetime | None,
+    received_at: str | datetime | None,
+    bid: float | None,
+    ask: float | None,
+    bid_size: float | None,
+    ask_size: float | None,
+    now: datetime | None = None,
+    sessions: Sequence[tuple[datetime, datetime]] | None = None,
+    feed_delayed: bool | None = None,
+) -> dict[str, Any]:
+    """QuoteMeta dict. Field names match the frozen contract."""
+    feed_name, delayed = canonical_feed(feed, delayed=feed_delayed)
+    clock = _aware(now or datetime.now(timezone.utc))
+    is_stale, reason = classify_quote_freshness(
+        quoted_at=quoted_at,
+        now=clock,
+        sessions=sessions,
+        feed_delayed=delayed,
+    )
+    quoted_text = quoted_at.isoformat() if isinstance(quoted_at, datetime) else (str(quoted_at) if quoted_at else None)
+    received_text = (
+        received_at.isoformat() if isinstance(received_at, datetime) else (str(received_at) if received_at else clock.isoformat())
+    )
+    meta = QuoteMeta(
+        provider=provider,
+        feed=feed_name,
+        quotedAt=quoted_text,
+        receivedAt=received_text,
+        bid=bid,
+        ask=ask,
+        bidSize=None if bid_size is None else float(bid_size),
+        askSize=None if ask_size is None else float(ask_size),
+        isStale=is_stale,
+        staleReason=reason,
+    )
+    return asdict(meta)
+
+
+def chain_quote_flags(
+    contracts: Sequence[OptionContract],
+    *,
+    atm_iv: float | None,
+    spot: float | None,
+    feed: str | None,
+    source: str | None,
+    timestamp: str | None,
+) -> list[dict[str, Any]]:
+    """Flags 2B can ledger. Inverted put skew, crossed markets, IV outside the chain range."""
+    flags: list[dict[str, Any]] = []
+    common = {"feed": feed, "source": source or "unavailable", "timestamp": timestamp}
+
+    if atm_iv is not None and spot is not None and spot > 0:
+        otm_puts = [
+            c
+            for c in contracts
+            if c.side == "put" and c.strike < spot and c.iv is not None and c.iv > 0
+        ]
+        if otm_puts:
+            nearest = max(otm_puts, key=lambda c: c.strike)
+            if nearest.iv is not None and nearest.iv < atm_iv:
+                flags.append(
+                    {
+                        "code": "inverted_put_skew",
+                        "symbol": nearest.symbol,
+                        "strike": nearest.strike,
+                        "value": nearest.iv,
+                        "threshold": atm_iv,
+                        "detail": (
+                            f"OTM put {nearest.strike:g} IV {nearest.iv:.4f} is below ATM IV {atm_iv:.4f}"
+                        ),
+                        **common,
+                    }
+                )
+
+    for contract in contracts:
+        if contract.bid is not None and contract.ask is not None and contract.bid > contract.ask:
+            flags.append(
+                {
+                    "code": "crossed_market",
+                    "symbol": contract.symbol,
+                    "strike": contract.strike,
+                    "side": contract.side,
+                    "value": contract.bid,
+                    "threshold": contract.ask,
+                    "detail": f"bid {contract.bid} is greater than ask {contract.ask}",
+                    **common,
+                }
+            )
+        if contract.iv is None or contract.iv <= 0:
+            continue
+        others = [c.iv for c in contracts if c is not contract and c.iv is not None and c.iv > 0]
+        if len(others) < 2:
+            continue
+        lo, hi = min(others), max(others)
+        span = hi - lo
+        if contract.iv < lo - span or contract.iv > hi + span:
+            flags.append(
+                {
+                    "code": "iv_outside_chain_range",
+                    "symbol": contract.symbol,
+                    "strike": contract.strike,
+                    "side": contract.side,
+                    "value": contract.iv,
+                    "threshold": [lo, hi],
+                    "detail": (
+                        f"IV {contract.iv:.4f} sits outside the other contracts' range "
+                        f"{lo:.4f}–{hi:.4f} by more than that range's width"
+                    ),
+                    **common,
+                }
+            )
+    return flags
 
 
 def build_uoa_reference(contracts: Iterable[OptionContract]) -> tuple[dict[str, float], str]:

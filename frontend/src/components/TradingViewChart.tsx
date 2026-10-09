@@ -25,12 +25,32 @@ function uniqueBars(raw: OhlcBar[]): OhlcBar[] {
  * EMA 50–200 are overlay-drawn on the price pane (no SuperTrend / pivots).
  * Remount key uses NASDAQ:AAPL-style mapped symbol so tickers are not stuck on SPY.
  */
+function resizeEmbeddedChart(host: HTMLElement, commit: (box: { w: number; h: number }) => void) {
+  const w = host.clientWidth;
+  const h = host.clientHeight;
+  commit({ w, h });
+  const frame = host.querySelector("iframe");
+  if (!(frame instanceof HTMLIFrameElement) || w < 2 || h < 2 || typeof window === "undefined") return;
+  // Nudge the iframe box so the embed lays out at the post-transition size.
+  // Remounting the iframe would drop the selected symbol's zoom.
+  frame.style.width = `${Math.max(1, w - 1)}px`;
+  frame.style.height = `${Math.max(1, h - 1)}px`;
+  window.requestAnimationFrame(() => {
+    frame.style.width = "100%";
+    frame.style.height = "100%";
+    window.dispatchEvent(new Event("resize"));
+  });
+}
+
 export function TradingViewChart({
   symbol,
   timeframe,
   chrome = "desk",
   onTimeframeChange,
   bars: barsOverride,
+  fullscreen = false,
+  fullscreenBusy = false,
+  onFullscreenToggle,
 }: {
   symbol: string;
   timeframe: string;
@@ -38,6 +58,9 @@ export function TradingViewChart({
   onTimeframeChange?: (tf: string) => void;
   /** When set (scan freeze), overlay math uses these captured bars; TV still remounts for symbol/tf. */
   bars?: OhlcBar[];
+  fullscreen?: boolean;
+  fullscreenBusy?: boolean;
+  onFullscreenToggle?: () => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const widgetRef = useRef<HTMLDivElement>(null);
@@ -128,6 +151,25 @@ export function TradingViewChart({
   }, []);
 
   useEffect(() => {
+    const host = hostRef.current;
+    if (!host || chrome !== "desk") return;
+    const desk = host.closest(".desk");
+    if (!desk) return;
+    const onEnd = (event: Event) => {
+      const e = event as TransitionEvent;
+      const target = e.target instanceof HTMLElement ? e.target : null;
+      if (!target) return;
+      const slot = host.closest(".desk-chart-slot");
+      const motionDone = target.hasAttribute("data-desk-motion") && e.propertyName === "opacity";
+      const sizeDone = slot != null && target === slot && (e.propertyName === "height" || e.propertyName === "min-height");
+      if (!motionDone && !sizeDone) return;
+      resizeEmbeddedChart(host, setBox);
+    };
+    desk.addEventListener("transitionend", onEnd);
+    return () => desk.removeEventListener("transitionend", onEnd);
+  }, [chrome]);
+
+  useEffect(() => {
     if (chrome !== "desk") return;
     const host = hostRef.current;
     if (!host || !view || !bars.length) return;
@@ -150,6 +192,33 @@ export function TradingViewChart({
 
   return (
     <div className={`apex-chart h-full ${chrome === "frozen" ? "apex-chart--frozen" : ""}`}>
+      {chrome === "desk" && onFullscreenToggle && (
+        <button
+          type="button"
+          className="apex-chart-fullscreen"
+          data-testid="chart-fullscreen"
+          aria-label={fullscreen ? "Exit chart fullscreen" : "Enter chart fullscreen"}
+          aria-pressed={fullscreen}
+          onClick={() => {
+            if (fullscreenBusy) return;
+            onFullscreenToggle();
+          }}
+        >
+          {fullscreen ? (
+            <span aria-hidden="true">×</span>
+          ) : (
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <path
+                d="M3 6V3h3M10 3h3v3M13 10v3h-3M6 13H3v-3"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+              />
+            </svg>
+          )}
+        </button>
+      )}
       {chrome === "desk" && (
         <div className="apex-chart-toolbar">
           <span className="apex-chart-symbol" data-testid="chart-symbol">
@@ -206,14 +275,9 @@ export function ApexChart(props: {
   chrome?: ChartChrome;
   onTimeframeChange?: (tf: string) => void;
   bars?: OhlcBar[];
+  fullscreen?: boolean;
+  fullscreenBusy?: boolean;
+  onFullscreenToggle?: () => void;
 }) {
-  return (
-    <TradingViewChart
-      symbol={props.symbol}
-      timeframe={props.timeframe}
-      chrome={props.chrome}
-      onTimeframeChange={props.onTimeframeChange}
-      bars={props.bars}
-    />
-  );
+  return <TradingViewChart {...props} />;
 }

@@ -1,7 +1,8 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { useBrokerage } from "../hooks/useBrokerage";
+import { openSnapTradeConnectionPortal } from "../lib/brokeragePortal";
 import { useSession } from "../store";
 import type { PortfolioViewMode } from "../types";
 
@@ -20,7 +21,6 @@ export function BrokerageConnectionPanel() {
     balanceQuery,
     positionsQuery,
   } = useBrokerage();
-  const [disclosureOpen, setDisclosureOpen] = useState(false);
   const [disconnectOpen, setDisconnectOpen] = useState(false);
   const [callbackMsg, setCallbackMsg] = useState<string | null>(null);
 
@@ -48,11 +48,8 @@ export function BrokerageConnectionPanel() {
     }
   }, [qc, selectViewMode]);
 
-  const portal = useMutation({
-    mutationFn: () => api.brokeragePortalUrl(),
-    onSuccess: (data) => {
-      window.location.assign(data.url);
-    },
+  const connect = useMutation({
+    mutationFn: () => openSnapTradeConnectionPortal(),
   });
 
   const refresh = useMutation({
@@ -72,12 +69,23 @@ export function BrokerageConnectionPanel() {
     },
   });
 
-  const register = useMutation({
-    mutationFn: () => api.brokerageRegister(),
-    onSuccess: () => setDisclosureOpen(true),
+  const statusQuery = useQuery({
+    queryKey: ["brokerage", "status"],
+    queryFn: () => api.brokerageStatus(),
+    staleTime: 30_000,
+    retry: false,
   });
+  const upstream = statusQuery.data?.upstream;
+  const serviceLabel =
+    upstream === "down"
+      ? "SnapTrade down"
+      : upstream === "not_configured"
+        ? "SnapTrade not configured"
+        : connected
+          ? "Connected"
+          : "Not connected";
+  const serviceLive = upstream === "up" ? connected : upstream == null && connected;
 
-  const brokerLabel = accounts[0]?.broker_name || "your broker";
   const lastSynced = activeAccount?.last_synced_at;
   const syncPending = balanceQuery.isFetching || positionsQuery.isFetching;
 
@@ -91,10 +99,10 @@ export function BrokerageConnectionPanel() {
         <div>
           <p className="text-xs uppercase tracking-wider text-bronze">Account data source</p>
           <span
-            className={`apex-badge mt-1 ${connected ? "apex-badge-live" : "apex-badge-offline"}`}
+            className={`apex-badge mt-1 ${serviceLive ? "apex-badge-live" : "apex-badge-offline"}`}
             data-testid="brokerage-status-badge"
           >
-            {connected ? "Connected" : "Not connected"}
+            {serviceLabel}
           </span>
         </div>
         {!connected ? (
@@ -102,8 +110,8 @@ export function BrokerageConnectionPanel() {
             type="button"
             data-testid="brokerage-connect"
             className="rounded-md bg-gold px-4 py-2 text-sm font-medium text-ink"
-            onClick={() => register.mutate()}
-            disabled={register.isPending}
+            onClick={() => connect.mutate()}
+            disabled={connect.isPending}
           >
             Connect brokerage
           </button>
@@ -150,11 +158,6 @@ export function BrokerageConnectionPanel() {
             </option>
           )}
         </select>
-        {portfolioViewMode === "paper" && (
-          <p className="text-xs text-faint" data-testid="portfolio-view-paper-hint">
-            Paper account is always available — ${paperBalance.toLocaleString(undefined, { maximumFractionDigits: 0 })} simulated balance.
-          </p>
-        )}
       </div>
 
       {callbackMsg && (
@@ -163,9 +166,9 @@ export function BrokerageConnectionPanel() {
         </p>
       )}
 
-      {(accountsQuery.isError || register.isError) && (
+      {(accountsQuery.isError || connect.isError) && (
         <p className="mt-2 text-sm text-bronze" data-testid="brokerage-error">
-          {((register.error ?? accountsQuery.error) as Error).message}
+          {((connect.error ?? accountsQuery.error) as Error).message}
         </p>
       )}
 
@@ -201,37 +204,19 @@ export function BrokerageConnectionPanel() {
         </div>
       )}
 
-      {!connected && (
-        <p className="mt-2 text-xs text-faint">
-          Connect via SnapTrade for live read-only account data. Paper trading remains available without a connection.
+      {upstream === "not_configured" && (
+        <p className="mt-2 text-xs text-bronze" data-testid="brokerage-not-configured">
+          SnapTrade credentials are missing
+          {statusQuery.data?.missing?.length ? ` (${statusQuery.data.missing.join(", ")})` : ""}. Paper trading still
+          works. Add the keys in .env and restart the API — this badge stays offline until SnapTrade answers.
         </p>
       )}
-
-      {disclosureOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--apex-backdrop)]" data-testid="brokerage-disclosure">
-          <div className="w-full max-w-md rounded-2xl border border-line bg-panel p-6">
-            <h2 className="font-display text-xl">Connect your brokerage</h2>
-            <p className="mt-3 text-sm text-champagne/70">
-              You&apos;ll be redirected to {brokerLabel}&apos;s official login page. APEX does not receive or store your
-              brokerage username or password. This connection is read-only — APEX cannot place trades on your behalf.
-            </p>
-            <div className="mt-6 flex gap-3">
-              <button
-                type="button"
-                className="flex-1 rounded-md bg-gold py-2 text-ink"
-                data-testid="brokerage-disclosure-continue"
-                onClick={() => portal.mutate()}
-                disabled={portal.isPending}
-              >
-                Continue
-              </button>
-              <button type="button" className="flex-1 rounded-md border border-line py-2" onClick={() => setDisclosureOpen(false)}>
-                Cancel
-              </button>
-            </div>
-            {portal.isError && <p className="mt-3 text-sm text-bronze">{(portal.error as Error).message}</p>}
-          </div>
-        </div>
+      {upstream === "down" && (
+        <p className="mt-2 text-xs text-bronze" data-testid="brokerage-upstream-down">
+          SnapTrade did not respond
+          {statusQuery.data?.http_status ? ` (HTTP ${statusQuery.data.http_status})` : ""}. Stored accounts stay listed;
+          live balances are not invented.
+        </p>
       )}
 
       {disconnectOpen && (

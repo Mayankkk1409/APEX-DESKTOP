@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { insufficientConvictionLabel, isInsufficientConviction, normalizeStrategyName } from "./strategyDisplay";
+import { isInsufficientConviction, normalizeStrategyName } from "./strategyDisplay";
 
 describe("strategyDisplay", () => {
   it("renames Gamma Trampoline to APEX Strategy", () => {
@@ -14,7 +14,4 @@ describe("strategyDisplay", () => {
     expect(isInsufficientConviction(null)).toBe(true);
   });
 
-  it("uses canonical no-trade label", () => {
-    expect(insufficientConvictionLabel()).toBe("No Trade / Insufficient Conviction");
-  });
 });

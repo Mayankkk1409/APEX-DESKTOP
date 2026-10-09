@@ -1,11 +1,9 @@
 import type { AccountMode, OrderConfirmationDetails, OrderPlacementResult, User } from "../types";
 import { normalizeStrategyName } from "./strategyDisplay";
 
-/** Display order type and asset class as `market · us_option`. */
-export function formatOrderType(orderType: string, assetClass: string): string {
-  const type = orderType.trim().toLowerCase() || "market";
-  const asset = assetClass.trim().toLowerCase() || "us_option";
-  return `${type} · ${asset}`;
+/** Order type for the review. The raw asset-class code is not shown. */
+export function formatOrderType(orderType: string, _assetClass?: string): string {
+  return orderType.trim().toLowerCase() || "limit";
 }
 
 /** Paper or brokerage account label for order confirmation. */
@@ -45,7 +43,7 @@ export function buildOrderConfirmationDetails(
     accountLabel: formatOrderAccountLabel(ctx.user),
     accountMode: ctx.accountMode ?? ctx.user?.account_mode ?? null,
     ticker: ctx.ticker,
-    orderType: "market",
+    orderType: result.legs_filled?.find((leg) => leg.order_type)?.order_type || "limit",
     assetClass,
     status: result.status,
   };

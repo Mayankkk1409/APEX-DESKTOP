@@ -33,18 +33,18 @@ export function filterPnlPoints(points: PnlPoint[], timeframe: PnlTimeframe, now
   const start = timeframeStart(timeframe, now);
   if (!start || points.length === 0) return points;
   const startMs = start.getTime();
-  const filtered = points.filter((p) => {
-    const ms = Date.parse(p.t);
-    return Number.isFinite(ms) && ms >= startMs;
-  });
-  if (filtered.length >= 2) return filtered;
-  if (points.length === 0) return filtered;
-  const anchor = points.reduce((best, p) => {
-    const ms = Date.parse(p.t);
-    if (!Number.isFinite(ms) || ms > startMs) return best;
-    return !best || ms > Date.parse(best.t) ? p : best;
-  }, null as PnlPoint | null);
-  const tail = points.filter((p) => Date.parse(p.t) >= startMs);
-  const merged = anchor ? [anchor, ...tail] : tail;
-  return merged.length >= 2 ? merged : points.length >= 2 ? [points[0], points[points.length - 1]] : points;
+  const inWindow: PnlPoint[] = [];
+  let anchor: PnlPoint | null = null;
+  let anchorMs = Number.NEGATIVE_INFINITY;
+  for (const point of points) {
+    const ms = Date.parse(point.t);
+    if (!Number.isFinite(ms)) continue;
+    if (ms >= startMs) inWindow.push(point);
+    else if (ms >= anchorMs) {
+      anchor = point;
+      anchorMs = ms;
+    }
+  }
+  if (inWindow.length >= 2 || !anchor) return inWindow;
+  return [anchor, ...inWindow];
 }

@@ -2,9 +2,19 @@ import { FormEvent, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ApexLogo } from "../components/ApexLogo";
 import { PasswordField } from "../components/PasswordField";
+import { SignupNoticeDialog } from "../components/SignupNoticeDialog";
+import { SignupValidationDialog } from "../components/SignupValidationDialog";
 import { api } from "../api";
 import { LegalFooter } from "../components/LegalFooter";
 import { PAPER_PRESETS } from "../constants";
+import {
+  INVALID_SIGNUP_EMAIL_MESSAGE,
+  isRejectedSignupEmail,
+  signupEmailNotSentMessage,
+  signupEmailSentMessage,
+} from "../lib/signupConfirmation";
+import { signupFailureMessage } from "../lib/apiError";
+import { isSignupValidationPayload } from "../lib/signupValidation";
 import type { AccountMode } from "../types";
 
 export function Signup() {
@@ -17,7 +27,10 @@ export function Signup() {
   const [mode, setMode] = useState<AccountMode>("paper_funded");
   const [preset, setPreset] = useState<number | "custom">(100000);
   const [custom, setCustom] = useState("100000");
-  const [err, setErr] = useState("");
+  const [validationDetail, setValidationDetail] = useState<unknown>(null);
+  const [accountError, setAccountError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<"invalid-email" | "email-failed" | "email-sent" | null>(null);
+  const [busy, setBusy] = useState(false);
   const [strength, setStrength] = useState({ score: 0, label: "very_weak" });
 
   const starting = useMemo(() => (preset === "custom" ? Number(custom) : preset), [preset, custom]);
@@ -33,22 +46,38 @@ export function Signup() {
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
-    setErr("");
+    if (busy) return;
+    setValidationDetail(null);
+    setAccountError(null);
+    setNotice(null);
+    const submittedEmail = email.trim();
+    if (isRejectedSignupEmail(submittedEmail)) {
+      setNotice("invalid-email");
+      return;
+    }
     const body: Record<string, unknown> = {
       full_name: fullName,
       username,
-      email,
+      email: submittedEmail,
       password,
       confirm_password: confirm,
       account_mode: mode,
     };
     if (mode === "paper_funded") body.starting_balance = starting;
+    setBusy(true);
+    let confirmationSent = false;
     try {
-      await api.signup(body);
-      nav("/login");
+      const created = await api.signup(body);
+      confirmationSent = created.confirmation_sent === true;
     } catch (ex) {
-      setErr((ex as Error).message);
+      const message = ex instanceof Error ? ex.message : "";
+      if (isSignupValidationPayload(message)) setValidationDetail(message);
+      else setAccountError(signupFailureMessage(message));
+      setBusy(false);
+      return;
     }
+    setBusy(false);
+    setNotice(confirmationSent ? "email-sent" : "email-failed");
   }
 
   return (
@@ -115,8 +144,12 @@ export function Signup() {
           </div>
         ) : null}
 
-        {err && <p className="mt-3 apex-alert apex-alert-error" role="alert">{err}</p>}
-        <button type="submit" className="mt-6 w-full rounded-md bg-gold py-2.5 font-medium text-ink" data-testid="signup-submit">
+        <button
+          type="submit"
+          className="mt-6 w-full rounded-md bg-gold py-2.5 font-medium text-ink disabled:opacity-60"
+          data-testid="signup-submit"
+          disabled={busy}
+        >
           Create account
         </button>
         <p className="mt-4 text-center text-sm text-subtle">
@@ -127,6 +160,41 @@ export function Signup() {
         </p>
         <LegalFooter className="mt-6" />
       </form>
+      {validationDetail != null ? (
+        <SignupValidationDialog detail={validationDetail} onClose={() => setValidationDetail(null)} />
+      ) : null}
+      {accountError ? (
+        <SignupNoticeDialog
+          title="Account not created"
+          message={accountError}
+          testId="signup-request-failed"
+          onClose={() => setAccountError(null)}
+        />
+      ) : null}
+      {notice === "invalid-email" ? (
+        <SignupNoticeDialog
+          title="Account not created"
+          message={INVALID_SIGNUP_EMAIL_MESSAGE}
+          testId="account-not-created"
+          onClose={() => setNotice(null)}
+        />
+      ) : null}
+      {notice === "email-failed" ? (
+        <SignupNoticeDialog
+          title="Email not sent"
+          message={signupEmailNotSentMessage(email)}
+          testId="signup-email-not-sent"
+          onClose={() => nav("/login")}
+        />
+      ) : null}
+      {notice === "email-sent" ? (
+        <SignupNoticeDialog
+          title="Email sent"
+          message={signupEmailSentMessage(email)}
+          testId="signup-email-sent"
+          onClose={() => nav("/login")}
+        />
+      ) : null}
     </main>
   );
 }

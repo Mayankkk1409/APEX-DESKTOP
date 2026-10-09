@@ -1,6 +1,6 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
-import { getAccessToken } from "./api";
+import { getAccessToken, restoreSession, subscribeAccessToken } from "./api";
 import { Dashboard } from "./pages/Dashboard";
 import { DeepScan } from "./pages/DeepScan";
 import { Login } from "./pages/Login";
@@ -8,14 +8,42 @@ import { Portfolio } from "./pages/Portfolio";
 import { Settings } from "./pages/Settings";
 import { Signup } from "./pages/Signup";
 import { Splash } from "./pages/Splash";
+import { ExpiryLoginGate } from "./components/ExpiryLoginGate";
+import { ExpiryWatchNotice } from "./components/ExpiryWatchNotice";
 import { useSession } from "./store";
 
 /** Splash plays once on the marketing entry route; deep links skip it so /portfolio is not blocked. */
 const SPLASH_ENTRY = "/";
 
+/** True when the desk may render. A missing memory token waits for the refresh cookie. */
+export async function resolveAuthGuard(opts: {
+  token: string | null;
+  restore: () => Promise<boolean>;
+}): Promise<boolean> {
+  if (opts.token) return true;
+  return opts.restore();
+}
+
 function Guard({ children }: { children: JSX.Element }) {
   const loc = useLocation();
-  if (!getAccessToken()) return <Navigate to="/login" replace state={{ from: loc.pathname }} />;
+  const [allowed, setAllowed] = useState<boolean | null>(() => (getAccessToken() ? true : null));
+
+  useEffect(() => {
+    let cancelled = false;
+    const hadToken = Boolean(getAccessToken());
+    if (!hadToken) useSession.getState().setExpiryLoginPending(true);
+    resolveAuthGuard({ token: getAccessToken(), restore: restoreSession }).then((ok) => {
+      if (cancelled) return;
+      if (!ok || hadToken) useSession.getState().setExpiryLoginPending(false);
+      setAllowed(ok);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [loc.pathname]);
+
+  if (allowed === null) return null;
+  if (!allowed) return <Navigate to="/login" replace state={{ from: loc.pathname }} />;
   return children;
 }
 
@@ -40,6 +68,9 @@ export default function App() {
   const loc = useLocation();
   const splashSeen = useSession((s) => s.splashSeen);
   const markSplashSeen = useSession((s) => s.markSplashSeen);
+  const [accessToken, setAccessTokenState] = useState<string | null>(() => getAccessToken());
+
+  useEffect(() => subscribeAccessToken(setAccessTokenState), []);
 
   useEffect(() => {
     if (!splashSeen && loc.pathname !== SPLASH_ENTRY) {
@@ -62,8 +93,14 @@ export default function App() {
     return <Splash />;
   }
 
+  const showExpiryNotice =
+    Boolean(accessToken) && loc.pathname !== "/login" && loc.pathname !== "/signup";
+
   return (
-    <Routes location={loc}>
+    <>
+      {showExpiryNotice ? <ExpiryLoginGate /> : null}
+      {showExpiryNotice ? <ExpiryWatchNotice /> : null}
+      <Routes location={loc}>
       <Route path="/" element={<Navigate to="/login" replace />} />
       <Route path="/login" element={<Login />} />
       <Route path="/signup" element={<Signup />} />
@@ -95,5 +132,6 @@ export default function App() {
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </>
   );
 }

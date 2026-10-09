@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { ApexLogo } from "../components/ApexLogo";
@@ -7,23 +7,32 @@ import { LegalFooter } from "../components/LegalFooter";
 import { LogoutButton } from "../components/LogoutButton";
 import { PositionCertificateModal } from "../components/PositionCertificateModal";
 import { SettingsGearLink } from "../components/SettingsGearLink";
+import { DailyPnlList, PositionDailyPnl } from "../components/DailyPnlList";
+import { OverallPnlTotal } from "../components/OverallPnlTotal";
 import { PnlChart } from "../components/PnlChart";
+import { useAccountOverallPnl } from "../hooks/useAccountOverallPnl";
 import { useBrokerage } from "../hooks/useBrokerage";
 import { defaultAccountLabel, usePositionCertificate } from "../hooks/usePositionCertificate";
+import { daysForPosition } from "../lib/dailyPnl";
+import { refreshDeskQueries } from "../lib/deskRefresh";
 import { filterPnlPoints, type PnlTimeframe } from "../lib/pnlTimeframe";
 import { assetLabel, fmtBalance, fmtMoney, fmtPlain, fmtTs } from "../lib/portfolioFormat";
+import { isRiskProfile, patchUserSettings, readUserSettings, type RiskProfile } from "../lib/userSettings";
 import { useSession } from "../store";
-import type { OrderHistoryRow, OverallPnlRow, PositionRow } from "../types";
+import { formatOptionExpiration, parseOccSymbol } from "../lib/optionSymbolParse";
+import type { OrderHistoryRow, PositionRow } from "../types";
 
 function Collapsible({
   title,
   testId,
   defaultOpen = true,
+  footer,
   children,
 }: {
   title: string;
   testId: string;
   defaultOpen?: boolean;
+  footer?: React.ReactNode;
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(defaultOpen);
@@ -41,20 +50,9 @@ function Collapsible({
         </span>
       </button>
       {open && <div className="border-t border-line px-4 pb-4">{children}</div>}
+      {footer && <div className="border-t border-line px-4 py-3">{footer}</div>}
     </section>
   );
-}
-
-function brokerageOverallRows(positions: PositionRow[]): OverallPnlRow[] {
-  return positions.map((p) => ({
-    symbol: p.symbol,
-    asset_class: p.asset_class ?? "us_equity",
-    qty: p.qty,
-    realized_pl: 0,
-    unrealized_pl: p.unrealized_pl,
-    total_pl: p.unrealized_pl,
-    is_open: true,
-  }));
 }
 
 export function Portfolio() {
@@ -66,6 +64,27 @@ export function Portfolio() {
     accountLabel: defaultAccountLabel(user, !brokerage.usingBrokerage),
   });
   const [chartTimeframe, setChartTimeframe] = useState<PnlTimeframe>("MAX");
+  const [riskProfile, setRiskProfile] = useState<RiskProfile>(() => readUserSettings().riskProfile);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api.getSettings().then((raw) => {
+      if (cancelled || !raw || typeof raw !== "object") return;
+      const profile = (raw as { risk_profile?: unknown }).risk_profile;
+      if (!isRiskProfile(profile)) return;
+      const next = patchUserSettings({ riskProfile: profile });
+      setRiskProfile(next.riskProfile);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function onRiskProfileChange(nextProfile: RiskProfile) {
+    const next = patchUserSettings({ riskProfile: nextProfile });
+    setRiskProfile(next.riskProfile);
+    void api.syncSettings(next);
+  }
 
   const usingBrokerage = brokerage.usingBrokerage;
 
@@ -80,17 +99,19 @@ export function Portfolio() {
     enabled: !usingBrokerage,
     retry: 2,
   });
+  const dailyPnl = useQuery({
+    queryKey: ["daily-pnl"],
+    queryFn: () => api.dailyPnl(),
+    enabled: !usingBrokerage,
+    retry: 2,
+  });
   const brokerageEquityHistory = useQuery({
     queryKey: ["brokerage", "equity-history", brokerage.activeAccountId],
     queryFn: () => api.brokerageEquityHistory(brokerage.activeAccountId!),
     enabled: usingBrokerage && Boolean(brokerage.activeAccountId),
     retry: 2,
   });
-  const overall = useQuery({
-    queryKey: ["overall-pnl"],
-    queryFn: () => api.overallPnl(),
-    enabled: !usingBrokerage,
-  });
+  const accountPnl = useAccountOverallPnl();
   const positions = useQuery({
     queryKey: ["pos"],
     queryFn: () => api.positions(),
@@ -118,11 +139,7 @@ export function Portfolio() {
           portfolio_value: res.portfolio_value,
         });
       }
-      void qc.invalidateQueries({ queryKey: ["port"] });
-      void qc.invalidateQueries({ queryKey: ["pos"] });
-      void qc.invalidateQueries({ queryKey: ["pnl-history"] });
-      void qc.invalidateQueries({ queryKey: ["overall-pnl"] });
-      void qc.invalidateQueries({ queryKey: ["orders"] });
+      refreshDeskQueries(qc);
     },
   });
 
@@ -149,15 +166,14 @@ export function Portfolio() {
     ? ((brokerageOrders.data?.orders as OrderHistoryRow[] | undefined) ?? [])
     : ((paperOrders.data?.orders as OrderHistoryRow[] | undefined) ?? []);
   const ordersLoading = usingBrokerage ? brokerageOrders.isLoading : paperOrders.isLoading;
-  const overallRows: OverallPnlRow[] = usingBrokerage
-    ? brokerageOverallRows(openPositions)
-    : ((overall.data?.rows as OverallPnlRow[] | undefined) ?? []);
-  const overallLoading = usingBrokerage ? positionsLoading : overall.isLoading;
+  const overallRows = accountPnl.rows;
+  const overallLoading = accountPnl.loading;
+  const totalPnl = accountPnl.total;
   const loadError =
     summary.error?.message ??
     historyQuery.error?.message ??
     positions.error?.message ??
-    overall.error?.message ??
+    (accountPnl.error instanceof Error ? accountPnl.error.message : null) ??
     paperOrders.error?.message ??
     brokerageOrders.error?.message ??
     null;
@@ -206,13 +222,22 @@ export function Portfolio() {
           <PnlChart
             points={points}
             fallbackBalance={fallbackBalance}
+            headlineEquity={typeof headerBalance === "number" ? headerBalance : undefined}
             timeframe={chartTimeframe}
             onTimeframeChange={setChartTimeframe}
             valueLabel={usingBrokerage ? "Equity" : "Portfolio value"}
+            pending={historyQuery.isFetching && !historyQuery.data}
+            overallTotal={totalPnl}
           />
-          {historyQuery.isFetching && !historyQuery.data && (
-            <p className="mt-2 text-xs text-faint" data-testid="portfolio-chart-loading">
-              Loading portfolio history…
+          {!usingBrokerage && dailyPnl.data && dailyPnl.data.book.length > 0 && (
+            <div className="mt-3 rounded-xl border border-line bg-panel px-4 py-3" data-testid="book-daily-pnl">
+              <p className="text-[10px] uppercase tracking-wider text-bronze">Book daily P&L</p>
+              <DailyPnlList days={dailyPnl.data.book} testId="book-daily-pnl-list" />
+            </div>
+          )}
+          {!usingBrokerage && dailyPnl.isError && (
+            <p className="mt-2 text-xs text-faint" data-testid="daily-pnl-error">
+              Daily P&L unavailable
             </p>
           )}
         </section>
@@ -243,9 +268,11 @@ export function Portfolio() {
                 </tr>
               </thead>
               <tbody>
-                {openPositions.map((p) => (
+                {openPositions.map((p) => {
+                  const seriesDays = usingBrokerage ? undefined : daysForPosition(dailyPnl.data, p.id);
+                  return (
+                  <Fragment key={p.id}>
                   <tr
-                    key={p.id}
                     className="cursor-pointer"
                     data-testid={`position-row-${p.id}`}
                     tabIndex={0}
@@ -283,7 +310,16 @@ export function Portfolio() {
                       </td>
                     )}
                   </tr>
-                ))}
+                  {seriesDays && seriesDays.length > 0 && (
+                    <tr data-testid={`position-daily-row-${p.id}`}>
+                      <td colSpan={usingBrokerage ? 7 : 8} className="px-2 pb-3">
+                        <PositionDailyPnl symbol={p.symbol} days={seriesDays} />
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
+                  );
+                })}
               </tbody>
             </table>
             </div>
@@ -305,33 +341,65 @@ export function Portfolio() {
                   <th>Time</th>
                   <th>Side</th>
                   <th>Symbol</th>
+                  <th>Strike</th>
+                  <th>Expiry</th>
                   <th className="apex-num">Qty</th>
+                  <th>Type</th>
                   <th className="apex-num">Fill</th>
                   <th>Status</th>
                 </tr>
               </thead>
               <tbody>
-                {orderRows.map((o) => (
-                  <tr key={o.id}>
-                    <td className="text-subtle">{fmtTs(o.filled_at ?? o.created_at)}</td>
-                    <td>{o.side.toUpperCase()}</td>
-                    <td className="font-mono">{o.symbol}</td>
-                    <td className="apex-num">{fmtPlain(o.qty)}</td>
-                    <td className="apex-num">{fmtPlain(o.fill_price)}</td>
-                    <td>{o.status}</td>
-                  </tr>
-                ))}
+                {orderRows.map((o) => {
+                  const parsed = parseOccSymbol(o.symbol);
+                  return (
+                    <tr key={o.id}>
+                      <td className="text-subtle">{fmtTs(o.filled_at ?? o.created_at)}</td>
+                      <td>{o.side.toUpperCase()}</td>
+                      <td className="font-mono">{o.symbol}</td>
+                      <td>{parsed ? parsed.strike : "—"}</td>
+                      <td>{parsed ? formatOptionExpiration(parsed.expiry) : "—"}</td>
+                      <td className="apex-num">{fmtPlain(o.qty)}</td>
+                      <td>{o.order_type || "market"}</td>
+                      <td className="apex-num">{fmtPlain(o.fill_price)}</td>
+                      <td>{o.status}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
             </div>
           )}
         </Collapsible>
 
-        <Collapsible title="Overall P&amp;L" testId="portfolio-overall-section" defaultOpen={false}>
+        <section className="rounded-xl border border-line bg-panel p-4" data-testid="portfolio-risk-profile">
+          <label className="block text-sm">
+            <span className="text-subtle">Risk profile</span>
+            <select
+              className="mt-1 w-full max-w-xs rounded-md border border-line bg-ink px-3 py-2 text-sm"
+              data-testid="portfolio-risk-profile-select"
+              value={riskProfile}
+              onChange={(e) => onRiskProfileChange(e.target.value as RiskProfile)}
+            >
+              <option value="conservative">Conservative</option>
+              <option value="moderate">Moderate</option>
+              <option value="aggressive">Aggressive</option>
+              <option value="custom">Custom</option>
+            </select>
+          </label>
+          <p className="mt-2 text-xs text-faint">Same profile as Settings → Risk &amp; Auto-Execution. Scans use this Best Match preference.</p>
+        </section>
+
+        <Collapsible
+          title="Overall P&amp;L"
+          testId="portfolio-overall-section"
+          defaultOpen={false}
+          footer={<OverallPnlTotal value={totalPnl} />}
+        >
           {overallLoading ? (
             <p className="mt-3 text-sm text-faint">Loading P&amp;L breakdown…</p>
           ) : overallRows.length === 0 ? (
-            <p className="mt-3 text-sm text-faint">No trade history yet.</p>
+            <p className="mt-3 text-sm text-faint">No order history yet.</p>
           ) : (
             <div className="apex-table-wrap">
             <table className="apex-table mt-3">

@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from loguru import logger
 
 from app.config import Settings
+from app.contracts import EarningsInfo
 from app.schemas.market import Quote
 from app.services.catalyst_calendar import _nasdaq_earnings_day
 from app.services.live_quotes import HTTP_HEADERS, get_live_fundamentals, parse_number
@@ -430,6 +432,255 @@ def _parse_us_date(text: str | None) -> date | None:
     return None
 
 
+# Company IR pages fetched for Change 12. A date is listed only when that page states it.
+# JPM's IR release says results at approximately 7:00 a.m. ET, not 6:45 a.m.
+IR_CONFIRMED: dict[str, dict[str, str]] = {
+    "JPM": {
+        "date": "2026-10-13",
+        "source": (
+            "JPMorganChase IR "
+            "https://www.jpmorganchase.com/ir/news/2026/jpmc-to-host-third-quarter-2026-earnings-call "
+            "Tuesday, October 13, 2026; results approximately 7:00 a.m. ET; call 8:30 a.m. ET"
+        ),
+    },
+    "GS": {
+        "date": "2026-10-13",
+        "source": (
+            "Goldman Sachs press release "
+            "https://www.goldmansachs.com/pressroom/press-releases/2025/conference-call-dates-to-announce-4q25-and-2026-earnings-results "
+            "Third quarter 2026 – Tuesday, October 13, 2026"
+        ),
+    },
+    "C": {
+        "date": "2026-10-13",
+        "source": (
+            "Citigroup press release "
+            "https://www.citigroup.com/global/news/press-release/2026/citi-third-quarter-2026-earnings-call "
+            "Tuesday, October 13, 2026; results approximately 8 a.m. ET; call 11 a.m. ET"
+        ),
+    },
+    "JNJ": {
+        "date": "2026-10-13",
+        "source": (
+            "Johnson & Johnson IR "
+            "https://investor.jnj.com/events-and-presentations/events/event-details/2026/Johnson--Johnson-Third-Quarter-2026-Earnings-Call/default.aspx "
+            "Oct 13, 2026 8:30 AM ET"
+        ),
+    },
+    "UNH": {
+        "date": "2026-10-13",
+        "source": (
+            "UnitedHealth Group newsroom "
+            "https://www.unitedhealthgroup.com/newsroom/2026/2026-09-15-uhg-announces-q3-earnings-release-date.html "
+            "Tuesday, October 13, 2026, before the market opens; call 8:00 a.m. ET"
+        ),
+    },
+}
+
+# Provider estimates. Alphabet IR (https://abc.xyz/investor/) does not list 28 October 2026.
+PROVIDER_ESTIMATES: dict[str, dict[str, Any]] = {
+    "GOOGL": {
+        "date": "2026-10-28",
+        "sources": [
+            "MarketBeat https://www.marketbeat.com/earnings/reports/2026-10-28-alphabet-inc-stock/ 10/28/2026 after the close",
+            "Public.com https://public.com/stocks/goog/earnings expected 2026-10-28",
+        ],
+    },
+    "GOOG": {
+        "date": "2026-10-28",
+        "sources": [
+            "MarketBeat https://www.marketbeat.com/earnings/reports/2026-10-28-alphabet-inc-stock/ 10/28/2026 after the close",
+            "Public.com https://public.com/stocks/goog/earnings expected 2026-10-28",
+        ],
+    },
+}
+
+
+def security_type_for_symbol(symbol: str, asset_class: str | None = None) -> str:
+    """ETF or index when the quote class or the symbol catalog says so."""
+    from app.services.symbol_catalog import CATALOG, canonical_asset_class
+
+    raw_values = [asset_class] if asset_class else []
+    sym = symbol.upper()
+    for row in CATALOG:
+        if row.symbol.upper() == sym:
+            raw_values.append(row.asset_class)
+            break
+    classes: set[str] = set()
+    for raw in raw_values:
+        if not raw:
+            continue
+        canon = canonical_asset_class(str(raw)) or str(raw).strip().lower()
+        classes.add(canon)
+    if classes & {"us_etf", "etf"}:
+        return "etf"
+    if classes & {"us_index", "index"}:
+        return "index"
+    return "stock"
+
+
+def _quarter_end_on_or_before(day: date) -> date:
+    found: date | None = None
+    for year in (day.year - 1, day.year):
+        for month, last in ((3, 31), (6, 30), (9, 30), (12, 31)):
+            qe = date(year, month, last)
+            if qe <= day and (found is None or qe > found):
+                found = qe
+    return found or date(day.year - 1, 12, 31)
+
+
+def expiry_in_typical_report_window(expiry: date) -> bool:
+    """True when expiry falls 10–45 days after a calendar quarter-end.
+
+    That span is the usual US reporting season after a quarter closes. It is not
+    a company earnings date.
+    """
+    qe = _quarter_end_on_or_before(expiry)
+    return qe + timedelta(days=10) <= expiry <= qe + timedelta(days=45)
+
+
+def earnings_unconfirmed_applies(info: dict[str, Any]) -> bool:
+    """ETFs and indexes do not fail an earnings-date check."""
+    if info.get("earnings_applicable") is False:
+        return False
+    if info.get("securityType") in {"etf", "index"}:
+        return False
+    return info.get("status") == "unknown" or not info.get("date")
+
+
+def resolve_earnings_info(
+    symbol: str,
+    *,
+    asset_class: str | None = None,
+    provider_dates: list[tuple[str, str]] | None = None,
+) -> dict[str, Any]:
+    """EarningsInfo plus display fields. A missing date is unknown, never the string none."""
+    security = security_type_for_symbol(symbol, asset_class)
+    sym = symbol.upper()
+
+    def pack(info: EarningsInfo, **extra: Any) -> dict[str, Any]:
+        payload = asdict(info)
+        payload.update(extra)
+        if payload.get("date") == "none":
+            payload["date"] = None
+        return payload
+
+    if security in {"etf", "index"}:
+        return pack(
+            EarningsInfo(date=None, status="unknown", sources=[], securityType=security),
+            earnings_applicable=False,
+            unverified=False,
+            display=None,
+            event_risk=False,
+            conflicts=[],
+        )
+
+    by_day: dict[str, list[str]] = {}
+    for raw_day, source in list(provider_dates or []):
+        day = str(raw_day or "")[:10]
+        if day and source:
+            by_day.setdefault(day, []).append(source)
+    estimate = PROVIDER_ESTIMATES.get(sym)
+    if estimate:
+        for source in estimate["sources"]:
+            by_day.setdefault(estimate["date"], []).append(source)
+    ir = IR_CONFIRMED.get(sym)
+
+    conflicts: list[dict[str, str]] = []
+    if len(by_day) > 1 or (ir and by_day and ir["date"] not in by_day):
+        if ir:
+            conflicts.append({"date": ir["date"], "source": ir["source"]})
+        for day, sources in by_day.items():
+            for source in sources:
+                conflicts.append({"date": day, "source": source})
+
+    if conflicts:
+        # A second estimate does not erase the calendar date. Company IR still wins above.
+        calendar = PROVIDER_ESTIMATES.get(sym)
+        if calendar and not ir:
+            return pack(
+                EarningsInfo(
+                    date=calendar["date"],
+                    status="estimated",
+                    sources=[*calendar["sources"], *[row["source"] for row in conflicts]],
+                    securityType=security,
+                ),
+                earnings_applicable=True,
+                unverified=False,
+                display=f"{calendar['date']} est.",
+                event_risk=False,
+                conflicts=conflicts,
+            )
+        return pack(
+            EarningsInfo(
+                date=None,
+                status="unknown",
+                sources=[row["source"] for row in conflicts],
+                securityType=security,
+            ),
+            earnings_applicable=True,
+            unverified=True,
+            display=None,
+            event_risk=None,
+            conflicts=conflicts,
+        )
+
+    if ir and (not by_day or ir["date"] in by_day):
+        sources = [ir["source"], *by_day.get(ir["date"], [])]
+        return pack(
+            EarningsInfo(date=ir["date"], status="confirmed", sources=sources, securityType=security),
+            earnings_applicable=True,
+            unverified=False,
+            display=ir["date"],
+            event_risk=False,
+            conflicts=[],
+        )
+
+    if len(by_day) == 1:
+        day, sources = next(iter(by_day.items()))
+        return pack(
+            EarningsInfo(date=day, status="estimated", sources=sources, securityType=security),
+            earnings_applicable=True,
+            unverified=False,
+            display=f"{day} est.",
+            event_risk=False,
+            conflicts=[],
+        )
+
+    return pack(
+        EarningsInfo(date=None, status="unknown", sources=[], securityType=security),
+        earnings_applicable=True,
+        unverified=True,
+        display=None,
+        event_risk=None,
+        conflicts=[],
+    )
+
+
+def attach_event_risk(info: dict[str, Any], expiry: str | date | None) -> dict[str, Any]:
+    """Flag event risk when an unverified date could sit inside a typical report window."""
+    if info.get("earnings_applicable") is False or info.get("status") in {"confirmed", "estimated"}:
+        info["event_risk"] = False
+        return info
+    if not expiry:
+        info["event_risk"] = None
+        return info
+    try:
+        day = expiry if isinstance(expiry, date) else date.fromisoformat(str(expiry)[:10])
+    except ValueError:
+        info["event_risk"] = None
+        return info
+    info["event_risk"] = expiry_in_typical_report_window(day)
+    return info
+
+
+def announcement_date(announcement: str | None) -> date | None:
+    """Date printed in a NASDAQ earnings-date ``announcement`` string, or None."""
+    if not isinstance(announcement, str) or ":" not in announcement:
+        return None
+    return _parse_us_date(announcement.split(":")[-1].strip())
+
+
 async def _scan_nasdaq_earnings_calendar(symbol: str, *, horizon_days: int = 90) -> dict[str, Any] | None:
     """Walk the NASDAQ earnings calendar for the next ``horizon_days`` and return the nearest future print."""
     today = date.today()
@@ -463,12 +714,36 @@ async def _scan_nasdaq_earnings_calendar(symbol: str, *, horizon_days: int = 90)
     return None
 
 
-async def _earnings_calendar(symbol: str, surprise: dict[str, Any]) -> dict[str, Any]:
+async def _earnings_calendar(
+    symbol: str,
+    surprise: dict[str, Any],
+    asset_class: str | None = None,
+) -> dict[str, Any]:
     """Resolve earnings timing without inventing a date.
 
-    Order: NASDAQ analyst earnings-date → NASDAQ earnings calendar scan → last reported only.
+    Order: company IR when one was verified → NASDAQ analyst earnings-date →
+    NASDAQ earnings calendar. A missing date stays unknown. ETFs skip the check.
     """
     today = date.today()
+    if security_type_for_symbol(symbol, asset_class) in {"etf", "index"}:
+        info = resolve_earnings_info(symbol, asset_class=asset_class)
+        return {
+            "status": "unavailable",
+            "next_date": None,
+            "dte": None,
+            "time": None,
+            "eps_forecast": None,
+            "last_reported": None,
+            "source": None,
+            "vendor_note": None,
+            "date_status": info["status"],
+            "sources": info["sources"],
+            "security_type": info["securityType"],
+            "earnings_applicable": False,
+            "unverified": False,
+            "display": None,
+            "earnings": info,
+        }
     last = None
     latest = (surprise or {}).get("latest") or {}
     if latest.get("date_reported"):
@@ -480,18 +755,23 @@ async def _earnings_calendar(symbol: str, surprise: dict[str, Any]) -> dict[str,
     )
     data = (payload or {}).get("data") if isinstance(payload, dict) else None
     announcement = (data or {}).get("announcement") if isinstance(data, dict) else None
+    report_text = (data or {}).get("reportText") if isinstance(data, dict) else None
+    vendor_note = None
+    if isinstance(report_text, str) and report_text.strip():
+        parts = [part.strip() for part in report_text.strip().split(". ") if part.strip()]
+        vendor_note = ". ".join(parts[:2])
+        if vendor_note and not vendor_note.endswith("."):
+            vendor_note += "."
 
     next_date = None
     dte = None
     source = None
     event_time = None
-    if isinstance(announcement, str):
-        maybe = announcement.split(":")[-1].strip()
-        parsed = _parse_us_date(maybe)
-        if parsed is not None:
-            next_date = parsed.isoformat()
-            dte = (parsed - today).days
-            source = "NASDAQ earnings-date"
+    parsed = announcement_date(announcement if isinstance(announcement, str) else None)
+    if parsed is not None:
+        next_date = parsed.isoformat()
+        dte = (parsed - today).days
+        source = "NASDAQ earnings-date"
 
     if next_date is None:
         scanned = await _scan_nasdaq_earnings_calendar(symbol)
@@ -501,25 +781,35 @@ async def _earnings_calendar(symbol: str, surprise: dict[str, Any]) -> dict[str,
             source = scanned.get("source")
             event_time = scanned.get("time")
 
-    if next_date is not None:
-        return {
-            "status": "live",
-            "next_date": next_date,
-            "dte": dte,
-            "time": event_time,
-            "eps_forecast": latest.get("consensus"),
-            "last_reported": last,
-            "source": source,
-        }
-
+    provider_dates: list[tuple[str, str]] = []
+    if next_date and source:
+        provider_dates.append((str(next_date), str(source)))
+    info = resolve_earnings_info(symbol, asset_class=asset_class, provider_dates=provider_dates)
+    resolved = info.get("date")
+    resolved_dte = None
+    if isinstance(resolved, str):
+        try:
+            resolved_dte = (date.fromisoformat(resolved) - today).days
+        except ValueError:
+            resolved = None
+            resolved_dte = None
+    fetch_status = "live" if resolved else ("partial" if last else "unavailable")
     return {
-        "status": "partial" if last else "unavailable",
-        "next_date": None,
-        "dte": None,
-        "time": None,
-        "eps_forecast": None,
+        "status": fetch_status,
+        "next_date": resolved,
+        "dte": resolved_dte,
+        "time": event_time,
+        "eps_forecast": latest.get("consensus") if resolved else None,
         "last_reported": last,
-        "source": "NASDAQ" if last else None,
+        "source": info["sources"][0] if info.get("sources") else source,
+        "vendor_note": vendor_note,
+        "date_status": info["status"],
+        "sources": info["sources"],
+        "security_type": info["securityType"],
+        "earnings_applicable": info["earnings_applicable"],
+        "unverified": info["unverified"],
+        "display": info["display"],
+        "earnings": info,
     }
 
 
@@ -564,7 +854,7 @@ async def build_fundamentals_layer(symbol: str, quote: Quote, settings: Settings
     )
     rotation, calendar = await asyncio.gather(
         _sector_rotation(profile.get("sector"), settings),
-        _earnings_calendar(sym, surprise),
+        _earnings_calendar(sym, surprise, quote.asset_class or base.asset_class),
     )
 
     pe = quote.pe_ttm if quote.pe_ttm is not None else base.pe_ttm
@@ -908,15 +1198,31 @@ def _build_factor_cards(
     dte = calendar.get("dte")
     last = calendar.get("last_reported")
     event_time = calendar.get("time")
+    date_status = calendar.get("date_status")
+    applicable = calendar.get("earnings_applicable", True)
+    display = calendar.get("display")
     next_q = (forecast or {}).get("next_quarter") or {}
     earn_parts: list[str] = []
-    if nd:
+    if applicable is False:
+        kind = calendar.get("security_type") or "ETF"
         earn_parts.append(
-            f"Next earnings date is {nd}"
+            f"{sym} is classified as {kind}. An issuer earnings date does not apply."
+        )
+    elif date_status == "unknown" or (date_status and not nd):
+        earn_parts.append("Earnings date is unknown. This is a data gap.")
+        if calendar.get("unverified"):
+            earn_parts.append("Earnings date unverified.")
+    elif nd:
+        shown = display or nd
+        earn_parts.append(
+            f"Next earnings date is {shown}"
             + (f" ({dte} days out)" if dte is not None else "")
             + (f", expected {event_time}" if event_time else "")
             + f" per {calendar.get('source') or 'NASDAQ'}."
         )
+        note = calendar.get("vendor_note")
+        if isinstance(note, str) and note.strip():
+            earn_parts.append(note.strip())
     if next_q.get("consensus_eps") is not None:
         earn_parts.append(
             f"Forward-quarter consensus EPS is {next_q['consensus_eps']:.2f}"

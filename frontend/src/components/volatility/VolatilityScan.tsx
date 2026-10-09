@@ -67,9 +67,21 @@ export function VolatilityScan({
       { k: "ATM IV", v: fmtPct(data?.atm_iv ?? null) },
       { k: "30D HV", v: fmtPct(data?.hv ?? null) },
       { k: "DTE", v: data?.dte != null ? String(data.dte) : "—" },
-      { k: "IV Rank", v: fmtNum(data?.iv_rank ?? null), hint: ivHint },
+      {
+        k: "IV Rank",
+        v:
+          data?.iv_rank != null && !Number.isNaN(data.iv_rank)
+            ? data.iv_rank.toFixed(1)
+            : `unavailable: ${ivHint ?? "published IV history is missing"}`,
+      },
       { k: "HV Rank", v: fmtNum(data?.hv_rank ?? null) },
-      { k: "IV %ile", v: fmtNum(data?.iv_percentile ?? null), hint: ivHint },
+      {
+        k: "IV %ile",
+        v:
+          data?.iv_percentile != null && !Number.isNaN(data.iv_percentile)
+            ? data.iv_percentile.toFixed(1)
+            : `unavailable: ${ivHint ?? "published IV history is missing"}`,
+      },
       { k: "HV %ile", v: fmtNum(data?.hv_percentile ?? null) },
       {
         k: "1σ move",

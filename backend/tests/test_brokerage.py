@@ -270,6 +270,59 @@ async def test_brokerage_requires_auth(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_connection_portal_url_registers_and_returns_snaptrade_host(client: AsyncClient) -> None:
+    headers = await _auth_headers(client, "broker_portal")
+    portal = "https://app.snaptrade.com/snapTrade/redeemToken?token=test-token"
+    with (
+        patch.object(st, "register_snaptrade_user", AsyncMock(return_value={"userId": "apex-portal", "userSecret": "sec"})),
+        patch.object(st, "connection_portal_url", AsyncMock(return_value=portal)) as portal_mock,
+    ):
+        res = await client.post("/api/brokerage/connection-portal-url", headers=headers, json={})
+    assert res.status_code == 200
+    host = res.json()["url"].split("/")[2]
+    assert "snaptrade" in host
+    assert portal_mock.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_connection_portal_reregisters_when_snaptrade_user_exists(client: AsyncClient) -> None:
+    headers = await _auth_headers(client, "broker_portal_exists")
+    exists = st.ApiException(status=400, reason="Bad Request")
+    exists.body = {"code": "1010", "detail": "User already exists"}
+    register = AsyncMock(side_effect=[exists, {"userId": "apex-re", "userSecret": "sec"}])
+    portal = "https://app.snaptrade.com/snapTrade/redeemToken?token=test-token"
+    with (
+        patch.object(st, "register_snaptrade_user", register),
+        patch.object(st, "delete_snaptrade_user", AsyncMock()) as delete_user,
+        patch.object(st, "connection_portal_url", AsyncMock(return_value=portal)),
+    ):
+        res = await client.post("/api/brokerage/connection-portal-url", headers=headers, json={})
+    assert res.status_code == 200
+    assert "snaptrade" in res.json()["url"].split("/")[2]
+    assert delete_user.await_count == 1
+    assert register.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_connection_portal_url_reads_redirect_uri() -> None:
+    class _Response:
+        body = {"redirectURI": "https://app.snaptrade.com/snapTrade/redeemToken?token=test-token"}
+
+    with patch.object(st, "_call", AsyncMock(return_value=_Response())):
+        url = await st.connection_portal_url(user_id="apex-user", user_secret="sec", state="state")
+    assert url.split("/")[2] == "app.snaptrade.com"
+
+
+def test_existing_snaptrade_user_detection() -> None:
+    exc = st.ApiException(status=400, reason="Bad Request")
+    exc.body = {"code": "1010", "detail": "User already exists"}
+    assert st.is_existing_snaptrade_user(exc) is True
+    other = st.ApiException(status=500, reason="Error")
+    other.body = {"code": "1010"}
+    assert st.is_existing_snaptrade_user(other) is False
+
+
+@pytest.mark.asyncio
 async def test_register_user_idempotent(client: AsyncClient) -> None:
     headers = await _auth_headers(client, "broker_reg")
     with patch.object(st, "register_snaptrade_user", AsyncMock(return_value={"userId": "apex-1", "userSecret": "sec"})):
@@ -403,6 +456,119 @@ async def test_balance_failure_no_placeholder(client: AsyncClient) -> None:
     body = res.json()
     assert body["total_equity"] == 500.0
     assert "Unable to reach" not in str(body)
+
+
+def test_host_normalization_strips_version_prefix() -> None:
+    from app.config import Settings
+
+    snap = Settings(snaptrade_base_url="https://api.snaptrade.com/api/v1/")
+    assert snap.resolved_snaptrade_host == "https://api.snaptrade.com"
+    broker = Settings(alpaca_broker_base_url="https://paper-api.alpaca.markets/v2")
+    assert broker.resolved_broker_base_url == "https://paper-api.alpaca.markets"
+    data = Settings(alpaca_data_base_url="https://data.alpaca.markets/v1beta1")
+    assert data.resolved_data_base_url == "https://data.alpaca.markets"
+
+
+@pytest.mark.asyncio
+async def test_probe_upstream_down_on_unauthorized() -> None:
+    from snaptrade_client import ApiException
+
+    settings = st.SnapTradeSettings(
+        client_id="client",
+        consumer_key="consumer",
+        env="sandbox",
+        encryption_key="key",
+        api_base_url="http://localhost:8000",
+        frontend_origin="http://localhost:5173",
+        host="https://api.snaptrade.com",
+    )
+    st.clear_probe_cache()
+    with (
+        patch.object(st, "get_snaptrade_settings", return_value=settings),
+        patch.object(st, "_call", AsyncMock(side_effect=ApiException(status=401, reason="Unauthorized"))),
+    ):
+        result = await st.probe_upstream()
+    st.clear_probe_cache()
+    assert result["upstream"] == "down"
+    assert result["http_status"] == 401
+
+
+@pytest.mark.asyncio
+async def test_brokerage_status_not_configured(client: AsyncClient) -> None:
+    headers = await _auth_headers(client, "broker_status_nc")
+    empty = st.SnapTradeSettings(
+        client_id="",
+        consumer_key="",
+        env="sandbox",
+        encryption_key="",
+        api_base_url="http://localhost:8000",
+        frontend_origin="http://localhost:5173",
+        host="https://api.snaptrade.com",
+    )
+    st.clear_probe_cache()
+    with patch.object(st, "get_snaptrade_settings", return_value=empty):
+        res = await client.get("/api/brokerage/status", headers=headers)
+    st.clear_probe_cache()
+    assert res.status_code == 200
+    body = res.json()
+    assert body["upstream"] == "not_configured"
+    assert body["configured"] is False
+    assert body["http_status"] is None
+    assert "SNAPTRADE_CLIENT_ID" in body["missing"]
+    assert "SNAPTRADE_CONSUMER_KEY" in body["missing"]
+    assert "ENCRYPTION_KEY" in body["missing"]
+
+
+@pytest.mark.asyncio
+async def test_brokerage_status_up_only_when_probe_succeeds(client: AsyncClient) -> None:
+    headers = await _auth_headers(client, "broker_status_up")
+    with patch.object(
+        st,
+        "probe_upstream",
+        AsyncMock(
+            return_value={
+                "upstream": "up",
+                "http_status": 200,
+                "host": "https://api.snaptrade.com",
+                "missing": [],
+            }
+        ),
+    ):
+        res = await client.get("/api/brokerage/status", headers=headers)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["upstream"] == "up"
+    assert body["http_status"] == 200
+    assert body["configured"] is True
+
+
+@pytest.mark.asyncio
+async def test_balance_uses_cache_when_snaptrade_not_configured(client: AsyncClient) -> None:
+    headers = await _auth_headers(client, "broker_bal_unconfigured")
+    with patch.object(st, "register_snaptrade_user", AsyncMock(return_value={"userId": "apex-bal-nc2", "userSecret": "sec"})):
+        await client.post("/api/brokerage/register-user", headers=headers)
+    accounts = [{"id": "acc-nc-1", "name": "Main", "number": "99998888", "institution_name": "Fidelity"}]
+    balance = {"cash_balance": 80.0, "buying_power": 80.0, "total_equity": 4400.0, "currency": "USD"}
+    with (
+        patch.object(st, "list_accounts", AsyncMock(return_value=accounts)),
+        patch.object(st, "fetch_balance", AsyncMock(return_value=balance)),
+        patch.object(st, "fetch_day_pnl", AsyncMock(return_value=None)),
+    ):
+        await client.post("/api/brokerage/sync", headers=headers)
+    empty = st.SnapTradeSettings(
+        client_id="",
+        consumer_key="",
+        env="sandbox",
+        encryption_key="",
+        api_base_url="http://localhost:8000",
+        frontend_origin="http://localhost:5173",
+        host="https://api.snaptrade.com",
+    )
+    with patch.object(st, "get_snaptrade_settings", return_value=empty):
+        res = await client.get("/api/brokerage/accounts/acc-nc-1/balance", headers=headers)
+    assert res.status_code == 200
+    assert res.json()["total_equity"] == 4400.0
+    assert res.json()["cash_balance"] == 80.0
 
 
 @pytest.mark.asyncio

@@ -7,13 +7,33 @@
  */
 import type { ChainAnalysis, ChainContractRow, ContractVerdict, RecommendedContract } from "../types";
 
+/** One strategy leg to mark on the chain. Expiry is required for dual-expiry structures. */
+export type ChainHighlightLeg = {
+  strike: number;
+  side: "call" | "put";
+  expiry?: string | null;
+  symbol?: string | null;
+};
+
+/** Leg shapes the scan already returns — strategy metrics, risk-review legs, or a recommended contract. */
+export type ChainHighlightInputLeg = {
+  side?: string | null;
+  option_side?: string | null;
+  strike?: number | null;
+  expiry?: string | null;
+  symbol?: string | null;
+};
+
 export type ChainLadderRow = {
   strike: number;
   call: ChainContractRow | null;
   put: ChainContractRow | null;
-  /** True when this strike row carries the server-recommended contract leg. */
+  /** True when this strike row carries at least one selected strategy leg. */
   isRecommended: boolean;
+  /** Set when exactly one side of the strike is a selected leg. */
   recommendedSide: "call" | "put" | null;
+  /** Every selected side on this strike — a straddle marks both. */
+  recommendedSides: ("call" | "put")[];
   /** Which side of this strike is in the money, for the ITM shading band. */
   itmSide: "call" | "put" | null;
   /** True when either leg is hard-rejected by the §5.5 spread gate. */
@@ -76,13 +96,129 @@ export function moneyness(side: "call" | "put", strike: number, spot: number | n
   return strike > spot ? "itm" : "otm";
 }
 
+function expiryKey(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const match = String(value).match(/\d{4}-\d{2}-\d{2}/);
+  return match ? match[0] : String(value);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Underlying ticker, or an OCC symbol that belongs to that underlying. */
+export function legBelongsToSymbol(legSymbol: string | null | undefined, underlying: string): boolean {
+  if (!legSymbol || !underlying) return true;
+  const symbol = legSymbol.toUpperCase();
+  const root = underlying.toUpperCase();
+  if (symbol === root) return true;
+  return new RegExp(`^${escapeRegExp(root)}\\d{6}[CP]`).test(symbol);
+}
+
+function optionSide(leg: ChainHighlightInputLeg): "call" | "put" | null {
+  const raw = (leg.option_side ?? leg.side ?? "").toLowerCase();
+  if (raw === "call" || raw === "put") return raw;
+  return null;
+}
+
+function asHighlightLeg(
+  strike: number | null | undefined,
+  side: "call" | "put" | null,
+  expiry: string | null | undefined,
+  symbol: string | null | undefined,
+  underlying: string,
+): ChainHighlightLeg | null {
+  const numeric = strike == null ? Number.NaN : Number(strike);
+  if (side == null || !Number.isFinite(numeric)) return null;
+  if (!legBelongsToSymbol(symbol, underlying)) return null;
+  return { strike: numeric, side, expiry: expiry ?? null, symbol: symbol ?? null };
+}
+
+function dedupeHighlights(legs: ChainHighlightLeg[]): ChainHighlightLeg[] {
+  const seen = new Set<string>();
+  const out: ChainHighlightLeg[] = [];
+  for (const leg of legs) {
+    const key = `${expiryKey(leg.expiry) ?? ""}|${leg.side}|${leg.strike}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(leg);
+  }
+  return out;
+}
+
+/**
+ * Strikes to mark on the chain for this symbol.
+ *
+ * Legs win. A missing leg list falls
+ * back to the scan's recommended structure strike. Score and auto-exec gates are not
+ * inputs — a low composite must not erase a strike the payload already named.
+ * Another symbol's contract is ignored. No legs and no strike yields nothing (no ATM guess).
+ */
+export function resolveChainHighlights(input: {
+  symbol: string;
+  legs?: ChainHighlightInputLeg[] | null;
+  recommended?: RecommendedContract | null;
+  sessionRecommended?: RecommendedContract | null;
+}): ChainHighlightLeg[] {
+  const fromLegs = dedupeHighlights(
+    (input.legs ?? [])
+      .map((leg) => asHighlightLeg(leg.strike, optionSide(leg), leg.expiry, leg.symbol, input.symbol))
+      .filter((leg): leg is ChainHighlightLeg => leg != null),
+  );
+  if (fromLegs.length) return fromLegs;
+
+  const recommended = asHighlightLeg(
+    input.recommended?.strike,
+    input.recommended?.side ?? null,
+    input.recommended?.expiry,
+    input.recommended?.symbol,
+    input.symbol,
+  );
+  if (recommended) return [recommended];
+
+  // A scan that supplied empty legs and no strike must not inherit a previous ticker.
+  if (input.legs != null || input.recommended !== undefined) return [];
+
+  const session = asHighlightLeg(
+    input.sessionRecommended?.strike,
+    input.sessionRecommended?.side ?? null,
+    input.sessionRecommended?.expiry,
+    input.sessionRecommended?.symbol,
+    input.symbol,
+  );
+  return session ? [session] : [];
+}
+
 export function matchesRecommended(
   strike: number,
   side: "call" | "put",
-  recommended: RecommendedContract | null | undefined,
+  recommended: RecommendedContract | ChainHighlightLeg | null | undefined,
+  chainExpiry?: string | null,
 ): boolean {
   if (!recommended) return false;
-  return recommended.strike === strike && recommended.side === side;
+  if (recommended.side !== side || !Number.isFinite(recommended.strike)) return false;
+  if (Math.abs(recommended.strike - strike) > 1e-6) return false;
+  const want = expiryKey(recommended.expiry);
+  const have = expiryKey(chainExpiry);
+  if (want && have && want !== have) return false;
+  return true;
+}
+
+function highlightList(
+  recommended: RecommendedContract | ChainHighlightLeg[] | null | undefined,
+): ChainHighlightLeg[] {
+  if (!recommended) return [];
+  if (Array.isArray(recommended)) return recommended;
+  if (!Number.isFinite(recommended.strike)) return [];
+  if (recommended.side !== "call" && recommended.side !== "put") return [];
+  return [
+    {
+      strike: recommended.strike,
+      side: recommended.side,
+      expiry: recommended.expiry,
+      symbol: recommended.symbol,
+    },
+  ];
 }
 
 /**
@@ -92,7 +228,8 @@ export function matchesRecommended(
 export function buildLadder(
   contracts: ChainContractRow[],
   spot: number | null | undefined,
-  recommended: RecommendedContract | null | undefined = null,
+  recommended: RecommendedContract | ChainHighlightLeg[] | null | undefined = null,
+  chainExpiry?: string | null,
 ): ChainLadderRow[] {
   const byStrike = new Map<number, { call: ChainContractRow | null; put: ChainContractRow | null }>();
   for (const c of contracts) {
@@ -108,16 +245,19 @@ export function buildLadder(
     const callItm = moneyness("call", strike, spot) === "itm";
     const putItm = moneyness("put", strike, spot) === "itm";
     const legs = [slot.call, slot.put].filter(Boolean) as ChainContractRow[];
-    const recSide =
-      (slot.call && matchesRecommended(strike, "call", recommended) && "call") ||
-      (slot.put && matchesRecommended(strike, "put", recommended) && "put") ||
-      null;
+    const marks = highlightList(recommended);
+    const recommendedSides = (["call", "put"] as const).filter(
+      (side) =>
+        (side === "call" ? slot.call : slot.put) &&
+        marks.some((leg) => matchesRecommended(strike, side, leg, chainExpiry)),
+    );
     return {
       strike,
       call: slot.call,
       put: slot.put,
-      isRecommended: recSide !== null,
-      recommendedSide: recSide,
+      isRecommended: recommendedSides.length > 0,
+      recommendedSide: recommendedSides.length === 1 ? recommendedSides[0] : null,
+      recommendedSides: [...recommendedSides],
       itmSide: callItm ? "call" : putItm ? "put" : null,
       hasReject: legs.some((l) => l.verdict?.hard_reject === true),
       hasGateFailure: legs.some((l) => l.verdict?.verdict === "screened_out"),

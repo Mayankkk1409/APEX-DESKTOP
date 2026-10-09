@@ -18,6 +18,9 @@ export function CertificateLegList({ legs, label = "Legs", testId = "order-cert-
               {leg.qty} × {leg.symbol}
             </span>
             <span className="text-faint">{formatLegDetail(leg)}</span>
+            {leg.orderType ? (
+              <span data-testid="cert-leg-order-type">{leg.orderType}</span>
+            ) : null}
             {leg.premium != null ? (
               <span className="order-cert-leg-fill" data-testid="cert-leg-premium">
                 @ {leg.premium.toFixed(2)}

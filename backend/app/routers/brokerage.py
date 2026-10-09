@@ -30,6 +30,7 @@ from app.schemas.brokerage import (
     PortalUrlResponse,
     PositionsResponse,
     PositionOut,
+    BrokerageStatusResponse,
     RegisterUserResponse,
     SyncResponse,
     WebhookResponse,
@@ -251,6 +252,61 @@ async def _account_count(db: AsyncSession, connection_id: str) -> int:
     return int(count or 0)
 
 
+@router.get("/status", response_model=BrokerageStatusResponse)
+async def brokerage_status(
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> BrokerageStatusResponse:
+    """Live SnapTrade reachability plus this user's stored connection.
+
+    ``upstream`` is ``up`` only after SnapTrade's status call succeeds. Missing
+    partner credentials stay ``not_configured`` — they are not reported as healthy.
+    """
+    probe = await st.probe_upstream()
+    try:
+        connection = await _connection_for_user(db, user.id)
+    except (OperationalError, SQLAlchemyError) as exc:
+        raise _brokerage_db_error(exc) from exc
+    account_count = len(connection.accounts) if connection is not None else 0
+    return BrokerageStatusResponse(
+        configured=st.get_snaptrade_settings().configured,
+        upstream=str(probe["upstream"]),
+        http_status=probe.get("http_status"),
+        connection_status=connection.connection_status if connection is not None else None,
+        account_count=account_count,
+        host=str(probe["host"]),
+        missing=list(probe.get("missing") or []),
+    )
+
+
+async def _register_new_snaptrade_connection(db: AsyncSession, user: User) -> BrokerageConnection:
+    """Create a SnapTrade user and store the encrypted secret.
+
+    If that user id already exists and we have no local secret, delete it and
+    register again so a cleared brokerage link can open a fresh portal.
+    """
+    snap_user_id = f"apex-{user.id}"
+    try:
+        registered = await st.register_snaptrade_user(snap_user_id)
+    except Exception as exc:  # noqa: BLE001
+        if not st.is_existing_snaptrade_user(exc):
+            raise
+        await st.delete_snaptrade_user(snap_user_id)
+        registered = await st.register_snaptrade_user(snap_user_id)
+    connection = BrokerageConnection(
+        id=str(uuid4()),
+        user_id=user.id,
+        provider="snaptrade",
+        snaptrade_user_id=registered["userId"],
+        snaptrade_user_secret_encrypted=st.encrypt_user_secret(registered["userSecret"]),
+        connection_status="pending",
+    )
+    db.add(connection)
+    await db.commit()
+    await db.refresh(connection)
+    return connection
+
+
 @router.post("/register-user", response_model=RegisterUserResponse)
 async def register_user(
     request: Request,
@@ -264,23 +320,15 @@ async def register_user(
         raise _brokerage_db_error(exc) from exc
     if existing:
         await _audit(db, user_id=user.id, action="brokerage.register_user", result="exists", request=request)
+        await db.commit()
         return RegisterUserResponse(connection_status=existing.connection_status)
-    snap_user_id = f"apex-{user.id}"
     try:
-        registered = await st.register_snaptrade_user(snap_user_id)
+        connection = await _register_new_snaptrade_connection(db, user)
     except Exception as exc:  # noqa: BLE001
         st.log_safe_error("register_user", exc)
         await _audit(db, user_id=user.id, action="brokerage.register_user", result="error", request=request)
+        await db.commit()
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Failed to register SnapTrade user") from exc
-    connection = BrokerageConnection(
-        id=str(uuid4()),
-        user_id=user.id,
-        provider="snaptrade",
-        snaptrade_user_id=registered["userId"],
-        snaptrade_user_secret_encrypted=st.encrypt_user_secret(registered["userSecret"]),
-        connection_status="pending",
-    )
-    db.add(connection)
     await _audit(db, user_id=user.id, action="brokerage.register_user", result="ok", request=request)
     await db.commit()
     return RegisterUserResponse(connection_status=connection.connection_status)
@@ -295,9 +343,18 @@ async def connection_portal_url(
     settings: Settings = Depends(get_settings),
 ) -> PortalUrlResponse:
     _require_configured()
-    connection = await _connection_for_user(db, user.id)
+    try:
+        connection = await _connection_for_user(db, user.id)
+    except (OperationalError, SQLAlchemyError) as exc:
+        raise _brokerage_db_error(exc) from exc
     if not connection:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Register SnapTrade user first")
+        try:
+            connection = await _register_new_snaptrade_connection(db, user)
+        except Exception as exc:  # noqa: BLE001
+            st.log_safe_error("connection_portal_url", exc)
+            await _audit(db, user_id=user.id, action="brokerage.portal_url", result="error", request=request)
+            await db.commit()
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Failed to register SnapTrade user") from exc
     state = st.new_oauth_state(user.id)
     redis = await get_redis(settings)
     await redis.set(f"{OAUTH_STATE_PREFIX}{state}", user.id, ex=OAUTH_STATE_TTL)
@@ -474,12 +531,18 @@ async def account_balance(
     db: AsyncSession = Depends(get_db),
 ) -> AccountBalanceOut:
     user_id = user.id
-    _require_configured()
     connection = await _connection_for_user(db, user_id)
     if not connection:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No brokerage connection")
     account = await _account_for_user(db, user_id, account_id)
     account_pk = account.id
+    if not st.get_snaptrade_settings().configured:
+        cached = await _latest_balance(db, account_pk)
+        if cached:
+            await _audit(db, user_id=user_id, action="brokerage.balance_refresh", result="cached_unconfigured", request=request)
+            await db.commit()
+            return _balance_out(cached)
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "SnapTrade is not configured")
     secret = _decrypt_connection_secret(connection)
     try:
         balance = await st.fetch_balance(connection.snaptrade_user_id, secret, account_id)

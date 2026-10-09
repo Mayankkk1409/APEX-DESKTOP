@@ -241,3 +241,25 @@ def test_iv_series_not_flat_from_varying_option_bars() -> None:
     assert len(series) >= 3
     values = [round(v, 6) for _, v in series]
     assert len(set(values)) >= 2, "IV series must show day-to-day variation"
+
+
+def test_missing_iv_history_is_a_gap_not_an_hv_proxy() -> None:
+    contracts = [
+        OptionContract(symbol="AAPL261218C00100000", strike=100.0, side="call", iv=0.22),
+        OptionContract(symbol="AAPL261218P00100000", strike=100.0, side="put", iv=0.24),
+    ]
+    chain = OptionChain(
+        symbol="AAPL",
+        expiry="2026-12-18",
+        spot=100.0,
+        feed="indicative",
+        contracts=contracts,
+        status="live",
+        as_of="2026-10-05T15:00:00+00:00",
+    )
+    payload = build_volatility_payload(symbol="AAPL", bars=[], chain=chain, expiry="2026-12-18", spot=100.0)
+    assert payload["iv_rank"] is None
+    assert payload["iv_rank_gap"]
+    assert "not IV rank" in payload["iv_rank_gap"]
+    assert payload["feed"] == "indicative"
+    assert payload["quoted_at"] == "2026-10-05T15:00:00+00:00"

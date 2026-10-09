@@ -7,10 +7,12 @@ import { BrokerageConnectionPanel } from "../components/BrokerageConnectionPanel
 import { LegalFooter } from "../components/LegalFooter";
 import { LogoutButton } from "../components/LogoutButton";
 import { SettingsGearLink } from "../components/SettingsGearLink";
+import { useAccountOverallPnl } from "../hooks/useAccountOverallPnl";
 import { useBrokerage } from "../hooks/useBrokerage";
 import { formatOrderAccountLabel } from "../lib/orderFormat";
+import { fmtMoney } from "../lib/portfolioFormat";
 import {
-  AUTO_EXEC_WARNING_THRESHOLD,
+  AUTO_EXEC_DISCLAIMER,
   DEFAULT_USER_SETTINGS,
   patchUserSettings,
   readUserSettings,
@@ -33,6 +35,7 @@ export function Settings() {
   const qc = useQueryClient();
   const { user, setUser } = useSession();
   const brokerage = useBrokerage();
+  const accountPnl = useAccountOverallPnl();
   const portfolio = useQuery({
     queryKey: ["port"],
     queryFn: () => api.portfolio(),
@@ -56,17 +59,14 @@ export function Settings() {
         cash: brokerage.stats.balance,
         buying_power: brokerage.stats.buying_power,
         equity: brokerage.stats.portfolio_value,
-        day_pl: brokerage.stats.day_pnl,
       }
     : {
         cash: portfolio.data?.balance ?? user?.cash_balance ?? 0,
         buying_power: portfolio.data?.buying_power ?? user?.buying_power ?? 0,
         equity: portfolio.data?.portfolio_value ?? user?.portfolio_value ?? 0,
-        day_pl: portfolio.data?.day_pl ?? null,
       };
 
-  const starting = portfolio.data?.starting_balance ?? user?.starting_balance ?? stats.equity;
-  const totalPl = stats.equity - (starting || stats.equity);
+  const totalPl = accountPnl.total;
 
   function persist(patch: Partial<UserSettings>) {
     const next = patchUserSettings({ ...settings, ...patch });
@@ -83,6 +83,7 @@ export function Settings() {
       setStatusMsg("Paper balance updated (simulation only).");
       void qc.invalidateQueries({ queryKey: ["port"] });
       void qc.invalidateQueries({ queryKey: ["pnl-history"] });
+      void qc.invalidateQueries({ queryKey: ["overall-pnl"] });
     },
     onError: (e) => setStatusMsg((e as Error).message),
   });
@@ -94,8 +95,6 @@ export function Settings() {
     },
     onError: (e) => setStatusMsg((e as Error).message),
   });
-
-  const lowAutoExec = settings.autoExecMinScore < AUTO_EXEC_WARNING_THRESHOLD;
 
   return (
     <div className="min-h-screen" data-testid="settings-page">
@@ -155,9 +154,11 @@ export function Settings() {
             </div>
             <div>
               <dt className="text-subtle">Total P&amp;L</dt>
-              <dd className={`font-mono ${totalPl >= 0 ? "num-up" : "num-down"}`} data-testid="settings-pnl">
-                {totalPl >= 0 ? "+" : ""}
-                {totalPl.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+              <dd
+                className={`font-mono ${totalPl != null && totalPl > 0 ? "num-up" : totalPl != null && totalPl < 0 ? "num-down" : ""}`}
+                data-testid="settings-pnl"
+              >
+                {fmtMoney(totalPl)}
               </dd>
             </div>
           </dl>
@@ -211,11 +212,9 @@ export function Settings() {
               onChange={(e) => persist({ autoExecMinScore: Number(e.target.value) })}
             />
           </label>
-          {lowAutoExec && (
-            <p className="apex-alert apex-alert-warn" data-testid="settings-auto-exec-warning" role="alert">
-              Scores below 72 increase false-positive risk — auto-execution is not recommended.
-            </p>
-          )}
+          <p className="text-xs text-faint" data-testid="settings-auto-exec-disclaimer">
+            {AUTO_EXEC_DISCLAIMER}
+          </p>
 
           <label className="flex items-center gap-2 text-sm">
             <input

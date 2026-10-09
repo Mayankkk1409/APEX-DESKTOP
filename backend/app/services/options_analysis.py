@@ -18,11 +18,14 @@ from app.analysis.options_rules import (
     DEFAULT_THRESHOLDS,
     RuleThresholds,
     build_uoa_reference,
+    chain_quote_flags,
+    contract_clears_oi_and_volume,
     evaluate_chain,
 )
 from app.analysis.volatility import iv_rank_proxy
 from app.schemas.market import OptionChain, OptionContract
 from app.services.strategy_engine import select_strategy
+from app.strategies.registry import get_strategy_spec
 
 RecommendedContract = dict[str, Any]
 
@@ -80,7 +83,8 @@ def strategy_selection_bucket(
     vol_signal: str = "fair",
 ) -> tuple[Literal["buy", "sell"] | None, Literal["call", "put"] | None]:
     """Map the strategy playbook label to the §5 bucket and optional side filter."""
-    if "NO TRADE" in selected_strategy:
+    spec = get_strategy_spec(selected_strategy)
+    if spec is not None and spec.leg_count == 0:
         return None, None
     if "Iron Condor" in selected_strategy:
         return "sell", None
@@ -88,7 +92,7 @@ def strategy_selection_bucket(
         return "buy", "call"
     if "Bear Put" in selected_strategy:
         return "buy", "put"
-    if "APEX Strategy" in selected_strategy:
+    if "APEX Strategy" in selected_strategy or "Gamma Trampoline" in selected_strategy:
         return "buy", "put" if direction == "bearish" else "call"
     if "Benchmark Greeks" in selected_strategy:
         return "buy", "put" if direction == "bearish" else "call"
@@ -130,8 +134,7 @@ def infer_strategy_label(
     catalyst_active: bool = False,
 ) -> str:
     """Mirror scan_engine strategy selection so standalone analysis can pick the same contract."""
-    if not composite_threshold_met:
-        return "NO TRADE — Insufficient Conviction"
+    _ = composite_threshold_met
     return select_strategy(
         composite=composite if composite_threshold_met else 0,
         direction=direction,
@@ -189,7 +192,13 @@ def pick_recommended_contract(
     if not scored:
         return None
 
-    _, best = max(scored, key=lambda item: item[0])
+    liquid = [
+        item
+        for item in scored
+        if contract_clears_oi_and_volume(by_symbol.get(item[1].symbol) or {}, ctx.thresholds)
+    ]
+    pool = liquid if liquid else scored
+    _, best = max(pool, key=lambda item: item[0])
     occ = by_symbol.get(best.symbol)
     return {
         "symbol": ctx.symbol,
@@ -197,6 +206,7 @@ def pick_recommended_contract(
         "strike": best.strike,
         "side": best.side,
         "contract_id": best.symbol if occ else None,
+        "liquidity_gate_cleared": bool(liquid),
     }
 
 
@@ -304,7 +314,8 @@ def apply_execution_score_tiers(
         return payload
 
     strategy = selected_strategy
-    if tier == "caution" and "NO TRADE" in selected_strategy:
+    held = get_strategy_spec(selected_strategy)
+    if held is not None and held.leg_count == 0:
         strategy = infer_strategy_label(direction, vol_signal, composite_threshold_met=True)
 
     return apply_recommended_contract(
@@ -395,6 +406,7 @@ def build_chain_analysis(
         },
         "contracts": rows,
         "summary": summary,
+        "ledger_flags": summary.get("ledger_flags") or [],
         "cards": cards,
         "narrative": cards[0]["body"] if cards else "",
         "recommendedContract": None,
@@ -404,20 +416,24 @@ def build_chain_analysis(
     resolved_direction = direction or str(tech.get("direction") or "neutral")
     resolved_vol = vol_signal or "fair"
     if atm_iv and hv:
-        gap = atm_iv - hv
-        if gap > thresholds.iv_hv_rich_pts:
-            resolved_vol = "sell_premium"
-        elif gap < -thresholds.iv_hv_rich_pts:
-            resolved_vol = "buy_premium"
-    strategy = selected_strategy or infer_strategy_label(
-        resolved_direction,
-        resolved_vol,
-        rsi=tech.get("rsi"),
-        iv=atm_iv,
-        hv=hv,
-        ivr=iv_rank,
-        composite_threshold_met=True,
-    )
+        from app.analysis.gate_config import assess_vol_regime
+
+        view = assess_vol_regime(iv=atm_iv, hv=hv, iv_rank=iv_rank)
+        resolved_vol = {"sell premium": "sell_premium", "buy premium": "buy_premium", "fair": "fair"}[view.label]
+    if not selected_strategy:
+        return payload
+    strategy = selected_strategy
+    held = get_strategy_spec(selected_strategy)
+    if held is not None and held.leg_count == 0:
+        strategy = infer_strategy_label(
+            resolved_direction,
+            resolved_vol,
+            rsi=tech.get("rsi"),
+            iv=atm_iv,
+            hv=hv,
+            ivr=iv_rank,
+            composite_threshold_met=True,
+        )
     return apply_recommended_contract(
         payload,
         selected_strategy=strategy,
@@ -560,6 +576,14 @@ def _summary(
         "vega_cap_blocked": [v.symbol for v in verdicts if "vega_cap_blocked" in v.flags],
         "gamma_flagged": [v.symbol for v in verdicts if "gamma_risk_7dte" in v.flags],
         "greeks_available": sum(1 for c in contracts if c.delta is not None),
+        "ledger_flags": chain_quote_flags(
+            contracts,
+            atm_iv=ctx.atm_iv,
+            spot=ctx.spot,
+            feed=chain.feed,
+            source=chain.source,
+            timestamp=chain.as_of,
+        ),
         "quotes_two_sided": sum(1 for c in contracts if c.bid is not None and c.ask is not None),
         "feed": chain.feed,
     }
@@ -733,6 +757,7 @@ def _empty_payload(
             "single_sided": True,
             "verdict_counts": {},
             "gate_failures": {},
+            "ledger_flags": [],
             "gate_unknown": {},
             "hard_rejects": [],
             "top_buy_candidates": [],
@@ -1348,15 +1373,15 @@ def _cards(
                 else "ATM implied volatility is unavailable on this chain, so no IV verdict is claimed."
             ),
             (
-                f"Documented framework: IV below HV by more than 10 points means options are cheap and buying premium is "
-                f"favoured; within 5 points is fair value and defined-risk spreads apply; above HV by more than 10 points "
+                f"Documented framework: IV below HV by more than 5 vol points means options are cheap and buying premium is "
+                f"favoured; within plus or minus 5 is fair; above HV by more than 5 vol points "
                 f"means options are rich and selling premium is favoured. Current gap of "
                 f"{_f(((ctx.atm_iv or 0) - (ctx.hv or 0)) * 100)} points therefore reads as "
                 + (
                     "RICH — sell premium."
-                    if (ctx.atm_iv or 0) - (ctx.hv or 0) > 0.10
+                    if (ctx.atm_iv or 0) - (ctx.hv or 0) > 0.05
                     else "CHEAP — buy premium."
-                    if (ctx.atm_iv or 0) - (ctx.hv or 0) < -0.10
+                    if (ctx.atm_iv or 0) - (ctx.hv or 0) < -0.05
                     else "FAIR VALUE — defined-risk spreads and diagonals rather than naked directional premium."
                 )
                 if ctx.atm_iv is not None and ctx.hv

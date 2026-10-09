@@ -1,7 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
+import { useEffect } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
 import { humanizeLabel } from "../lib/humanizeLabel";
-import type { SentimentArticle, SentimentLayer } from "../types";
+import { clearNewsRetry, isNewsRateLimitMessage, newsRetryDelay, noteNewsRateLimit, scrubRateLimitCopy, visibleNewsError } from "../lib/newsFeed";
+import type { SentimentLayer } from "../types";
 
 function dash(v: string | number | null | undefined): string {
   if (v === null || v === undefined || v === "") return "—";
@@ -43,13 +45,6 @@ function fmtPublished(at: string | null | undefined): string {
   return at.slice(0, 16).replace("T", " ");
 }
 
-function openArticle(article: SentimentArticle) {
-  const url = article.url?.trim();
-  if (url) {
-    window.open(url, "_blank", "noopener,noreferrer");
-  }
-}
-
 export function SentimentScan({
   symbol,
   expiry,
@@ -59,22 +54,63 @@ export function SentimentScan({
   expiry: string;
   initial?: SentimentLayer | Record<string, unknown> | null;
 }) {
+  const qc = useQueryClient();
+  const newsKey = `deep:${symbol}:${expiry || ""}`;
   const q = useQuery({
     queryKey: ["sentiment-deep", symbol, expiry || ""],
-    queryFn: () => api.sentimentDeep(symbol, expiry || undefined),
+    queryFn: async () => {
+      const next = (await api.sentimentDeep(symbol, expiry || undefined)) as SentimentLayer;
+      const newsError = next.components?.news?.error;
+      if (!isNewsRateLimitMessage(newsError)) {
+        clearNewsRetry(newsKey);
+        return next;
+      }
+      noteNewsRateLimit(newsKey);
+      const previous = qc.getQueryData<SentimentLayer>(["sentiment-deep", symbol, expiry || ""]);
+      const previousArticles = previous?.components?.news?.articles;
+      if (previousArticles?.length && previous) {
+        return {
+          ...next,
+          narrative: scrubRateLimitCopy(previous.narrative || next.narrative),
+          components: {
+            ...next.components,
+            news: { ...previous.components.news, error: null },
+          },
+        };
+      }
+      return {
+        ...next,
+        narrative: scrubRateLimitCopy(next.narrative),
+        components: {
+          ...next.components,
+          news: { ...next.components.news, error: null, status: "empty" },
+        },
+      };
+    },
     enabled: Boolean(symbol),
-    staleTime: 30_000,
+    staleTime: 60_000,
+    retry: (failureCount, error) => !isNewsRateLimitMessage((error as Error)?.message) && failureCount < 1,
+    refetchInterval: () => newsRetryDelay(newsKey),
     initialData: initial && "components" in (initial as object) ? (initial as SentimentLayer) : undefined,
   });
 
   const data = (q.data ?? initial) as SentimentLayer | undefined;
+  const rawNewsError = data?.components?.news?.error;
+  useEffect(() => {
+    const message = (q.error as Error | undefined)?.message;
+    if (isNewsRateLimitMessage(rawNewsError) || isNewsRateLimitMessage(message)) noteNewsRateLimit(newsKey);
+  }, [rawNewsError, newsKey, q.error]);
   if (!data || !data.components) {
+    const failure = q.isError ? visibleNewsError((q.error as Error)?.message) : null;
+    const rateLimited = q.isError && isNewsRateLimitMessage((q.error as Error)?.message);
     return (
       <section className="sf-stage" data-testid="sentiment-stage" data-state="loading">
         <p className="sf-empty">
-          {q.isError
-            ? `Sentiment request failed: ${(q.error as Error)?.message ?? "unknown error"}.`
-            : `Loading sentiment for ${symbol}…`}
+          {failure
+            ? `Sentiment request failed: ${failure}.`
+            : rateLimited
+              ? `No recent news for ${symbol} from Alpaca News.`
+              : `Loading sentiment for ${symbol}…`}
         </p>
       </section>
     );
@@ -85,6 +121,7 @@ export function SentimentScan({
   const displayScore =
     data.score_0_100 != null && !Number.isNaN(data.score_0_100) ? Math.round(data.score_0_100) : null;
   const news = data.components.news;
+  const newsError = visibleNewsError(news.error);
   const flow = data.components.options_flow;
   const pc = data.components.put_call;
   const alert = data.earnings_alert;
@@ -130,7 +167,7 @@ export function SentimentScan({
         </div>
         <div className="sf-gauge-rationale">
           <p className="sf-narrative" data-testid="sentiment-synthesis">
-            {data.narrative}
+            {scrubRateLimitCopy(data.narrative)}
           </p>
         </div>
       </div>
@@ -143,6 +180,7 @@ export function SentimentScan({
         >
           <span className="sf-alert-kicker">{alert.active ? "Earnings alert" : "Earnings context"}</span>
           <p>{alert.message}</p>
+          {alert.source ? <p className="sf-panel-note">{alert.source}</p> : null}
         </div>
       ) : null}
 
@@ -189,18 +227,37 @@ export function SentimentScan({
         <h2>
           News <span>{news.count}</span>
         </h2>
+        <p className="sf-panel-note">
+          {(news.source || "Alpaca News")} · {news.method || "lexicon_v1"}
+        </p>
         {!news.articles?.length ? (
-          <p className="sf-empty-inline">{news.error || "No news articles for this symbol."}</p>
+          <p className="sf-empty-inline" data-testid="sentiment-news-empty">
+            {newsError ? (
+              <>
+                {newsError.endsWith(".") ? newsError : `${newsError}.`}{" "}
+                <button type="button" className="sf-news-link" data-testid="sentiment-news-retry" onClick={() => q.refetch()}>
+                  Retry
+                </button>
+              </>
+            ) : (
+              `No recent news for ${symbol} from Alpaca News.`
+            )}
+          </p>
         ) : (
           <ul className="sf-news-list">
             {news.articles.map((a, i) => (
               <li key={`${a.published_at}-${i}`}>
                 <div className="sf-news-main">
-                  <button type="button" className="sf-news-link" onClick={() => openArticle(a)}>
-                    {a.headline || "Untitled"}
-                  </button>
+                  {a.url ? (
+                    <a className="sf-news-link" href={a.url} target="_blank" rel="noopener noreferrer">
+                      {a.headline || "Headline unavailable"}
+                    </a>
+                  ) : (
+                    <span className="sf-news-link">{a.headline || "Headline unavailable"}</span>
+                  )}
                 </div>
                 <div className="sf-news-meta">
+                  <span>{a.source || news.source || "—"}</span>
                   <span>{fmtPublished(a.published_at)}</span>
                 </div>
               </li>

@@ -40,8 +40,14 @@ function row(strike: number, side: "call" | "put"): ChainContractRow {
 }
 
 describe("options chain score tier highlighting", () => {
-  it("does not mark a recommended row when tier is blocked", () => {
+  it("still marks the supplied leg when the score is in the blocked band", () => {
     expect(scoreTier(45)).toBe("blocked");
+    const ladder = buildLadder([row(100, "call"), row(100, "put")], 100, recommended);
+    expect(ladder.find((r) => r.strike === 100)?.isRecommended).toBe(true);
+    expect(ladder.find((r) => r.strike === 100)?.recommendedSide).toBe("call");
+  });
+
+  it("does not invent a mark when no leg or strike was supplied", () => {
     const ladder = buildLadder([row(100, "call"), row(100, "put")], 100, null);
     expect(ladder.some((r) => r.isRecommended)).toBe(false);
   });

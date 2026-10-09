@@ -3,7 +3,7 @@ import pytest
 from app.config import get_settings
 from app.redis_client import reset_redis_for_tests
 from app.security import generate_otp
-from app.services.otp import invalidate_otp, issue_otp, verify_otp
+from app.services.otp import invalidate_login_code, invalidate_otp, issue_otp, verify_otp
 
 
 @pytest.mark.asyncio
@@ -26,6 +26,16 @@ async def test_otp_invalidates_previous() -> None:
     second = await issue_otp(settings, "trader")
     assert await verify_otp(settings, "trader", first) is False
     assert await verify_otp(settings, "trader", second) is True
+
+
+@pytest.mark.asyncio
+async def test_failed_older_send_does_not_erase_the_newer_code() -> None:
+    reset_redis_for_tests()
+    settings = get_settings()
+    older = await issue_otp(settings, "trader")
+    newer = await issue_otp(settings, "trader")
+    await invalidate_login_code(settings, "trader", code=older)
+    assert await verify_otp(settings, "trader", newer) is True
 
 
 @pytest.mark.asyncio

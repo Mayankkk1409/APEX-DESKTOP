@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, timezone
 from typing import Any, Literal
 
@@ -12,17 +13,53 @@ from app.analysis.layers import (
     DEFAULT_AUTO_EXEC_THRESHOLD,
     EXECUTION_SCORE_BLOCKED_MAX,
 )
+from app.analysis.gate_config import (
+    CREDIT_STRUCTURES,
+    IV_MISMATCH_VOL_POINTS,
+    IV_RANK_CHEAP_BELOW,
+    IV_RANK_RICH_ABOVE,
+    LONG_VEGA_RICH_PENALTY,
+    NOT_EXECUTABLE,
+    PLAIN_LONG_PREMIUM,
+    assess_vol_regime,
+    direction_margin,
+    direction_margin_min,
+    earnings_before_expiry,
+    entry_composite_min,
+    theta_max_pct_per_day,
+    exit_composite_min,
+    hysteresis_action,
+    iv_below_hv,
+    mids_are_exact_double,
+    rule1_theta_failures,
+    rule2_short_delta_max,
+)
+from app.analysis.options_rules import classify_quote_freshness, daily_theta_per_share
+from app.services.executability import (
+    can_auto_execute,
+    eligibility_sentence,
+    order_candidates_by_executability,
+    quote_age_phrase,
+    split_block_notes,
+)
 from app.services.strategy_recommendation import (
+    DEFINED_RISK_PLAYBOOK,
     MarketSnapshot,
+    StrategyRecommendation,
     TechnicalAnalysisResultRef,
+    earnings_position_note,
+    format_iv_rank,
+    format_iv_rank_with_reason,
+    format_vol_percent,
+    is_defined_risk_strategy,
     recommend_strategy,
+    record_ledger,
+    selection_rationale_for,
+    strategy_vega_sign,
 )
 from app.strategies.payoffs import apex_strategy_payoff, calendar_spread_payoff, long_straddle_payoff
 from app.strategies.registry import STRATEGY_REGISTRY, get_strategy_spec, resolve_strategy_id
-from app.services.strategy_recommendation import selection_rationale_for
 from app.strategies.validator import assert_strategy_handler, validate_strategy_output
-
-NOT_TRADEABLE_COPY = "Not tradeable in current situation"
 
 
 def _execution_tier(
@@ -76,19 +113,23 @@ PLAYBOOK: dict[str, dict[str, str]] = {
         ),
     },
     APEX_STRATEGY_NAME: {
-        "summary": "APEX proprietary catalyst structure: wide OTM strikes across front and back expirations.",
+        "summary": (
+            "A double calendar sells the nearer call and put and buys the same strikes in the later expiration. "
+            "Gamma Trampoline™ is that structure only when the earnings gates pass."
+        ),
         "execution": (
-            "Step 1 — Buy back-week OTM call (Strike A) and OTM put (Strike B). "
-            "Step 2 — Sell front-week call and put at the same strikes to subsidize long gamma. "
-            "Front expiry should be the day after the catalyst; back expiry ~2 weeks later."
+            "Enter all four legs together as one limit at the net mid. "
+            "Send the buys with the sells in that combo. A rejected combo does not leave a naked short."
         ),
     },
     "APEX Benchmark Greeks Strategy": {
-        "summary": "Proprietary long-premium expression when Δ is high, Θ is low, and IV < HV (§9.2 Rule 1).",
+        "summary": (
+            "The APEX Benchmark Greeks Strategy is a rules-based framework that uses an option's Greeks to decide "
+            "when to buy options for directional exposure and when to sell options for premium income."
+        ),
         "execution": (
-            "Buy the recommended contract with Δ ≥ 0.55 and daily Θ < 0.05. "
-            "APEX Δ/Θ ratio must exceed 10; spread < 8% of mid. "
-            "Hold through the directional thesis; exit on SuperTrend flip or composite drop below 72."
+            "Rule 1 buys one call or one put when every buy gate passes. "
+            "Rule 2 sells a defined-risk credit structure when every sell gate passes."
         ),
     },
     "Married Put": {
@@ -113,14 +154,6 @@ PLAYBOOK: dict[str, dict[str, str]] = {
     "Long Straddle": {
         "summary": "Long ATM call and put when IV is cheap and a large move is expected.",
         "execution": "Buy ATM call and ATM put same expiry. Exit on expansion or time stop.",
-    },
-    "NO TRADE — Insufficient Conviction": {
-        "summary": "Composite score below the 72 execution threshold — monitor only.",
-        "execution": "No new positions. Re-run scan when technical alignment and IV regime improve.",
-    },
-    "NO TRADE — Wait for IV Crush": {
-        "summary": "Extreme IV overhang — edge is destroyed by premium crush risk.",
-        "execution": "Stand aside until front-month IV normalizes toward HV.",
     },
 }
 
@@ -189,6 +222,14 @@ def compute_strategy_metrics(
     iv: float | None = None,
     ticker: str = "",
     contract_multiplier: int = 100,
+    shares_held: int = 0,
+    shares_encumbered: int = 0,
+    shares_short: int = 0,
+    share_avg_cost: float | None = None,
+    stock_ask: float | None = None,
+    component_contracts: list[dict[str, Any]] | None = None,
+    component_ticker: str | None = None,
+    hv: float | None = None,
 ) -> dict[str, Any]:
     """Return max loss, max profit, net debit/credit, breakevens for the named strategy."""
     empty = {
@@ -200,11 +241,14 @@ def compute_strategy_metrics(
         "legs": [],
         "per_contract_multiplier": contract_multiplier,
     }
-    if "NO TRADE" in strategy_name or not contracts:
+    spec_gate = get_strategy_spec(strategy_name)
+    if not contracts or (spec_gate is not None and (spec_gate.risk_type == "advisory" or spec_gate.leg_count == 0)):
         return empty
 
+    from app.services.stock_leg import multiplier_from_contracts
     from app.strategies.metrics_builder import from_display_name
 
+    contract_multiplier = multiplier_from_contracts(contracts, explicit=contract_multiplier)
     registry_metrics = from_display_name(
         strategy_name,
         spot=spot or 0,
@@ -216,6 +260,14 @@ def compute_strategy_metrics(
         ticker=ticker,
         contract_multiplier=contract_multiplier,
         recommended=recommended,
+        shares_held=shares_held,
+        shares_encumbered=shares_encumbered,
+        shares_short=shares_short,
+        share_avg_cost=share_avg_cost,
+        stock_ask=stock_ask,
+        component_contracts=component_contracts,
+        component_ticker=component_ticker,
+        hv=hv,
     )
     if registry_metrics is not None and registry_metrics.get("legs") is not None:
         if registry_metrics.get("validation_blocked"):
@@ -603,11 +655,11 @@ def compute_strategy_metrics(
         if len(legs) != 4:
             metrics.update(
                 {
-                    "legs": legs,
+                    "legs": [],
                     "validation_blocked": True,
                     "validation_error": (
-                        "APEX Strategy requires 4 legs: sell front-week call/put and buy back-week "
-                        "call/put at matching OTM strikes"
+                        "APEX Strategy requires all four legs: buy the back-week call, buy the back-week put, "
+                        "sell the front-week call, and sell the front-week put."
                     ),
                 }
             )
@@ -682,7 +734,7 @@ def compute_strategy_metrics(
     return metrics
 
 
-def select_strategy(
+def strategy_decision(
     *,
     composite: float,
     direction: str,
@@ -703,8 +755,16 @@ def select_strategy(
     auto_exec_threshold: float = DEFAULT_AUTO_EXEC_THRESHOLD,
     apex_input: Any = None,
     back_month_available: bool = False,
-) -> StrategyName:
-    """Eligibility matrix from Full Document §9.1 — deterministic rule-based selection."""
+    catalyst_days: int | None = None,
+    earnings_date_confirmed: bool | None = None,
+    risk_profile: str = "moderate",
+    structure_limits: frozenset[str] | None = None,
+    rule_context: dict[str, Any] | None = None,
+    sentiment_bias: str | None = None,
+    executable_by_name: dict[str, bool] | None = None,
+    event_span: dict[str, Any] | None = None,
+) -> StrategyRecommendation:
+    """One Best Match. Risk notes stay beside the structure and do not replace it."""
     from app.services.apex_strategy import ApexStrategyInput
 
     market = MarketSnapshot(
@@ -734,10 +794,100 @@ def select_strategy(
         apex_input=apex_input if isinstance(apex_input, ApexStrategyInput) else None,
         auto_exec_threshold=auto_exec_threshold,
         back_month_available=back_month_available,
+        catalyst_days=catalyst_days,
+        earnings_date_confirmed=earnings_date_confirmed,
+        risk_profile=risk_profile,
+        structure_limits=structure_limits,
+        rule_context=rule_context,
+        sentiment_bias=sentiment_bias,
+        event_span=event_span,
     )
-    if rec.best_match == "No Trade / Insufficient Conviction":
-        return "NO TRADE — Insufficient Conviction"
-    return rec.best_match
+    return _prefer_executable_match(rec, executable_by_name)
+
+
+def _prefer_executable_match(
+    rec: StrategyRecommendation,
+    executable_by_name: dict[str, bool] | None,
+) -> StrategyRecommendation:
+    """A failing candidate does not stay ahead of an executable one with a close score.
+
+    With no per-name flags the recommendation is unchanged. When every name fails,
+    the best-ranked real strategy stays in place.
+    """
+    if not executable_by_name:
+        return rec
+    ordered = order_candidates_by_executability(rec.candidates, executable_by_name)
+    rec.candidates = ordered
+    viable = [c for c in ordered if c.defined_risk and c.eligible and executable_by_name.get(c.name, False)]
+    if not viable:
+        return rec
+    winner = viable[0]
+    if winner.name == rec.best_match:
+        return rec
+    current = next((c for c in ordered if c.name == rec.best_match), None)
+    if current is not None and executable_by_name.get(current.name, False):
+        return rec
+    rec.best_match = winner.name
+    rec.leg_structure = winner.name
+    return rec
+
+
+def select_strategy(
+    *,
+    composite: float,
+    direction: str,
+    vol_signal: str,
+    rsi: float | None = None,
+    iv: float | None = None,
+    hv: float | None = None,
+    ivr: float | None = None,
+    tech_score: float | None = None,
+    sentiment_score: float | None = None,
+    catalyst_active: bool = False,
+    delta_theta_ratio: float | None = None,
+    symbol: str = "",
+    spot: float | None = None,
+    spread_pct: float | None = None,
+    data_fresh: bool = True,
+    confirmed_pattern_count: int = 0,
+    auto_exec_threshold: float = DEFAULT_AUTO_EXEC_THRESHOLD,
+    apex_input: Any = None,
+    back_month_available: bool = False,
+    catalyst_days: int | None = None,
+    earnings_date_confirmed: bool | None = None,
+    risk_profile: str = "moderate",
+    structure_limits: frozenset[str] | None = None,
+    rule_context: dict[str, Any] | None = None,
+    sentiment_bias: str | None = None,
+) -> StrategyName:
+    """Eligibility matrix from Full Document §9.1 — deterministic rule-based selection."""
+    return strategy_decision(
+        composite=composite,
+        direction=direction,
+        vol_signal=vol_signal,
+        rsi=rsi,
+        iv=iv,
+        hv=hv,
+        ivr=ivr,
+        tech_score=tech_score,
+        sentiment_score=sentiment_score,
+        catalyst_active=catalyst_active,
+        delta_theta_ratio=delta_theta_ratio,
+        symbol=symbol,
+        spot=spot,
+        spread_pct=spread_pct,
+        data_fresh=data_fresh,
+        confirmed_pattern_count=confirmed_pattern_count,
+        auto_exec_threshold=auto_exec_threshold,
+        apex_input=apex_input,
+        back_month_available=back_month_available,
+        catalyst_days=catalyst_days,
+        earnings_date_confirmed=earnings_date_confirmed,
+        risk_profile=risk_profile,
+        structure_limits=structure_limits,
+        rule_context=rule_context,
+        sentiment_bias=sentiment_bias,
+    ).best_match
 
 
 def _risk_score(composite: float, chain_analysis: dict[str, Any]) -> float:
@@ -1052,6 +1202,8 @@ def _volatility_apex_section(
     iv_rank = vol_layer.get("iv_rank")
     iv_pct = vol_layer.get("iv_percentile")
     signal = vol_layer.get("signal") or "fair"
+    regime_view = assess_vol_regime(iv=iv, hv=hv, iv_rank=iv_rank, vol_signal=str(signal))
+    signal_label = regime_view.display
     em = vol_layer.get("expected_move") or {}
     em_pct = em.get("percent")
     em_dollar = em.get("dollar")
@@ -1069,12 +1221,14 @@ def _volatility_apex_section(
         "buy_premium ≈ 80 (IV cheap — favor long vol), sell_premium ≈ 72 (IV rich — favor credits), "
         "fair ≈ 55 (no strong vol edge)."
     )
-    if iv is not None and hv is not None:
-        measured += f" ATM / contract IV {_apex_fmt(iv, 3)} vs 30D HV {_apex_fmt(hv, 3)}."
+    iv_pct = format_vol_percent(iv)
+    hv_pct = format_vol_percent(hv)
+    if iv_pct and hv_pct:
+        measured += f" ATM / contract IV {iv_pct} vs 30D HV {hv_pct}."
 
     score_meaning = (
-        f"Volatility component score {vol_score}/100 ({band}) with signal '{signal}'. "
-        f"IV Rank {_apex_fmt(iv_rank, 1)} / percentile {_apex_fmt(iv_pct, 1)}. "
+        f"Volatility component score {vol_score}/100 ({band}) with signal '{signal_label}'. "
+        f"IV Rank {format_iv_rank_with_reason(iv_rank, vol_layer.get('iv_rank_gap') if isinstance(vol_layer.get('iv_rank_gap'), str) else None)} / percentile {_apex_fmt(iv_pct, 1)}. "
         f"This score does not predict direction — it tells you which strategy families §9.1 should prefer "
         f"(debit vs credit vs neutral)."
     )
@@ -1087,17 +1241,16 @@ def _volatility_apex_section(
 
     weight_para = (
         f"Weighted contribution: {contribution} points ({int(weight * 100)}% weight — largest after "
-        "technicals). Volatility regime often determines whether §9.1 selects iron condors versus bull "
-        "call spreads; misalignment here is a common reason composite clears 72 but strategy still reads "
-        "'NO TRADE — Wait for IV Crush' when IV >> HV."
+        "technicals). Volatility regime often determines whether the playbook prefers iron condors or debit spreads. "
+        "IV versus HV is a scoring input and a risk note. It does not replace the recommended structure."
     )
 
-    if signal == "buy_premium":
+    if regime_view.short == "buy premium":
         action = (
             "Actionable view: IV is relatively cheap — favor long premium, debit spreads, and structures "
             "that benefit from vol expansion; avoid naked short vol unless hedged."
         )
-    elif signal == "sell_premium":
+    elif regime_view.short == "sell premium":
         action = (
             "Actionable view: IV is rich versus HV — favor credit spreads, iron condors, and short strangles "
             "with defined risk; be cautious adding long gamma unless catalyst justifies it."
@@ -1111,9 +1264,16 @@ def _volatility_apex_section(
     breakdown = [
         {"label": "IV", "value": iv, "note": "ATM or recommended contract"},
         {"label": "HV (30D)", "value": hv, "note": "Realized on captured daily window"},
-        {"label": "IV Rank", "value": iv_rank, "note": "0–100 vs IV history"},
-        {"label": "IV Percentile", "value": iv_pct, "note": "Historical percentile"},
-        {"label": "Signal", "value": signal, "note": "buy_premium / sell_premium / fair"},
+        {
+            "label": "IV Rank",
+            "value": format_iv_rank_with_reason(
+                iv_rank,
+                vol_layer.get("iv_rank_gap") if isinstance(vol_layer.get("iv_rank_gap"), str) else None,
+            ),
+            "note": "0–100 vs IV history, or the reason the rank is missing",
+        },
+        {"label": "IV Percentile", "value": vol_layer.get("iv_percentile"), "note": "Historical percentile"},
+        {"label": "Signal", "value": signal_label, "note": "IV much below HV / fair / IV much above HV"},
         {"label": "Expected move", "value": f"±{_apex_fmt(em_pct, 1)}%", "note": f"${_apex_fmt(em_dollar)} at {dte or '—'} DTE"},
         {"label": "Weighted contribution", "value": contribution, "note": f"{int(weight * 100)}% of composite"},
     ]
@@ -1135,10 +1295,36 @@ def _volatility_apex_section(
 
 def _sentiment_apex_section(
     *,
-    sentiment_score: float,
+    sentiment_score: float | None,
     weight: float,
     sentiment_layer: dict[str, Any],
 ) -> dict[str, Any]:
+    components = sentiment_layer.get("components") or {}
+    news = components.get("news") or {}
+    if sentiment_score is None:
+        reason = news.get("error") or "Live news and options flow did not produce a score."
+        section_body = _apex_section_payload(
+            paragraphs=[
+                "Sentiment is omitted from this composite. No neutral score is substituted when the live feed is empty.",
+                str(reason),
+            ],
+            interpretation=(
+                "Actionable view: ignore sentiment until a live score exists. Do not treat a missing read as neutral."
+            ),
+            breakdown=[
+                {"label": "0–100 scale", "value": None, "note": "Unavailable"},
+                {"label": "News source", "value": news.get("source"), "note": news.get("as_of") or news.get("status")},
+            ],
+        )
+        return {
+            "id": "sentiment",
+            "title": "Sentiment",
+            "score": None,
+            "weight": 0.0,
+            "weighted_contribution": 0.0,
+            **section_body,
+        }
+    assert sentiment_score is not None
     components = sentiment_layer.get("components") or {}
     news = components.get("news") or {}
     flow = components.get("options_flow") or {}
@@ -1343,7 +1529,7 @@ def _risk_apex_section(
     )
 
     score_meaning = (
-        f"Risk synthesis score {risk_score}/100 ({band}). Composite {composite}/100 → tier '{tier}'. "
+        f"Risk synthesis score {risk_score}/100 ({band}). Composite {float(composite):.1f}/100 → tier '{tier}'. "
         "This score summarizes whether the book should automate entry — not whether the trade idea is "
         "interesting on chart alone."
     )
@@ -1407,7 +1593,7 @@ def build_apex_score_layer(
     tech_score: float,
     vol_score: float,
     greek_score: float,
-    sentiment_score: float,
+    sentiment_score: float | None,
     fund_score: float,
     risk_score: float,
     technical_narrative: str,
@@ -1419,97 +1605,78 @@ def build_apex_score_layer(
     technical_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     weights = dict(APEX_COMPOSITE_WEIGHTS)
-    # Map encyclopedia keys to section builders (legacy section ids preserved for API)
-    section_weights = {
-        "technicals": weights["technical"],
-        "options": weights["options_iv"],
-        "liquidity": weights["liquidity"],
-        "catalyst_fundamental": weights["catalyst_fundamental"],
-        "payoff_risk": weights["payoff_risk"],
-        "cross_tf": weights["cross_tf"],
-        "data_freshness": weights["data_freshness"],
-    }
-    liquidity_score = float(chain_analysis.get("summary", {}).get("liquidity_score") or greek_score)
-    cross_tf_score = float(technical_context.get("cross_tf_score") or tech_score) if technical_context else tech_score
-    data_freshness_score = float(chain_analysis.get("data_freshness_score") or 85.0)
-    payoff_risk_score = risk_score
-    catalyst_fund_score = fund_score
     sections = [
         _technicals_apex_section(
             tech_score=tech_score,
-            weight=section_weights["technicals"],
+            weight=weights["technicals"],
             direction=direction,
             technical_narrative=technical_narrative,
             technical_context=technical_context,
         ),
         _options_apex_section(
             greek_score=greek_score,
-            weight=section_weights["options"],
+            weight=weights["options"],
             chain_analysis=chain_analysis,
         ),
         _volatility_apex_section(
             vol_score=vol_score,
-            weight=section_weights["options"] * 0.5,
+            weight=weights["volatility"],
             vol_layer=vol_layer,
         ),
         _sentiment_apex_section(
             sentiment_score=sentiment_score,
-            weight=section_weights["catalyst_fundamental"] * 0.5,
+            weight=weights["sentiment"],
             sentiment_layer=sentiment_layer,
         ),
         _fundamentals_apex_section(
-            fund_score=catalyst_fund_score,
-            weight=section_weights["catalyst_fundamental"] * 0.5,
+            fund_score=fund_score,
+            weight=weights["fundamentals"],
             fundamentals_layer=fundamentals_layer,
         ),
         _risk_apex_section(
-            risk_score=payoff_risk_score,
+            risk_score=risk_score,
             composite=composite,
             chain_analysis=chain_analysis,
         ),
     ]
 
-    tech_contrib = round(tech_score * section_weights["technicals"], 1)
-    opt_contrib = round(greek_score * section_weights["options"], 1)
-    liq_contrib = round(liquidity_score * section_weights["liquidity"], 1)
-    cat_contrib = round(catalyst_fund_score * section_weights["catalyst_fundamental"], 1)
-    payoff_contrib = round(payoff_risk_score * section_weights["payoff_risk"], 1)
-    cross_contrib = round(cross_tf_score * section_weights["cross_tf"], 1)
-    fresh_contrib = round(data_freshness_score * section_weights["data_freshness"], 1)
-    vol_contrib = round(vol_score * section_weights["options"] * 0.5, 1)
-    sent_contrib = round(sentiment_score * section_weights["catalyst_fundamental"] * 0.5, 1)
-    fund_contrib = round(fund_score * section_weights["catalyst_fundamental"] * 0.5, 1)
+    applied = ((technical_context or {}).get("composite_breakdown") or {}).get("weights") or weights
+    tech_contrib = round(tech_score * applied["technicals"], 1)
+    opt_contrib = round(greek_score * applied["options"], 1)
+    vol_contrib = round(vol_score * applied["volatility"], 1)
+    sent_contrib = 0.0 if sentiment_score is None else round(sentiment_score * applied["sentiment"], 1)
+    fund_contrib = round(fund_score * applied["fundamentals"], 1)
+    sent_label = "unavailable (omitted)" if sentiment_score is None else f"{sentiment_score} ({sent_contrib} pts)"
     clears = composite >= COMPOSITE_THRESHOLD_FULL_DOC
 
     synthesis_parts = [
         (
-            f"APEX Composite Score {composite}/100 synthesizes weighted pillars: "
-            f"technicals {tech_score} ({tech_contrib} pts), options/IV {greek_score} ({opt_contrib} pts), "
-            f"liquidity {liquidity_score:.0f} ({liq_contrib} pts), catalyst/fundamental {catalyst_fund_score:.0f} ({cat_contrib} pts), "
-            f"payoff/risk {payoff_risk_score:.0f} ({payoff_contrib} pts), cross-TF {cross_tf_score:.0f} ({cross_contrib} pts), "
-            f"data freshness {data_freshness_score:.0f} ({fresh_contrib} pts)."
+            f"APEX Composite Score {float(composite):.1f}/100 synthesizes weighted pillars: "
+            f"technicals {tech_score} ({tech_contrib} pts), volatility {vol_score} ({vol_contrib} pts), "
+            f"Greeks quality {greek_score} ({opt_contrib} pts), sentiment {sent_label}, "
+            f"fundamentals {fund_score} ({fund_contrib} pts). Risk is advisory and weighted 0."
         ),
         (
             f"Full Document §8 execution threshold is ≥ {COMPOSITE_THRESHOLD_FULL_DOC}; auto-exec default "
             f"threshold is {DEFAULT_AUTO_EXEC_THRESHOLD}. Directional bias on this scan is {direction}. "
-            f"Composite formula: 35% technical + 20% options/IV + 15% liquidity + 10% catalyst/fundamental "
-            f"+ 10% payoff/risk + 5% cross-TF + 5% data freshness."
+            f"Composite formula: 30% technicals + 25% volatility + 20% Greeks quality + 15% sentiment "
+            f"+ 10% fundamentals."
         ),
     ]
     if clears:
         synthesis_parts.append(
-            "Threshold met — composite clears the execution gate. Proceed to strategy selection (§9.1) "
-            "and confirm chain recommended contract, risk tier, and live spreads before order entry."
+            "Composite is recorded. The saved auto-execution minimum decides acknowledgement versus "
+            "manual placement. Confirm the recommended structure and live spreads before order entry."
         )
     else:
         synthesis_parts.append(
-            "Below execution threshold — insufficient conviction for automated playbook selection. "
-            "Monitor for improved alignment across technicals and vol, or reduced spread failures on the chain."
+            "Composite is recorded for review. The recommended structure on the strategy slide stays visible; "
+            "the saved auto-execution minimum decides acknowledgement versus manual placement."
         )
 
     synthesis_interpretation = (
-        "Hold execution until composite ≥ 72 with clean §5 gates unless operating manual half-size in the "
-        "caution band with explicit risk acceptance."
+        "The saved auto-execution minimum decides acknowledgement versus manual placement. "
+        "The recommended structure stays visible either way."
         if not clears
         else "Execution permitted by score — complete risk review checkbox and size 2–5% account risk per structure."
     )
@@ -1549,6 +1716,1671 @@ def _anchor_from_metrics_legs(
     }
 
 
+def _scan_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if number != number or number in {float("inf"), float("-inf")}:
+        return None
+    return number
+
+
+def _same_expiry(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_exp = left.get("expiry")
+    right_exp = right.get("expiry")
+    if not left_exp or not right_exp:
+        return True
+    return str(left_exp) == str(right_exp)
+
+
+def _strike(leg: dict[str, Any]) -> float | None:
+    raw = leg.get("strike")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    return float(raw)
+
+
+def _structure_label(strategy_name: str, metrics: dict[str, Any]) -> str:
+    """Shares already held make a long put a protective put. The registry name stays Married Put."""
+    if strategy_name != "Married Put":
+        return strategy_name
+    covered = bool(metrics.get("equity_covered_by_holdings"))
+    for leg in metrics.get("legs") or []:
+        if isinstance(leg, dict) and leg.get("side") == "stock" and (leg.get("already_held") or covered):
+            return "Protective Put"
+    return strategy_name
+
+
+def structure_name_from_legs(legs: list[dict[str, Any]] | None) -> str | None:
+    """Map built option legs to an existing registry display name."""
+    rows = [leg for leg in (legs or []) if isinstance(leg, dict)]
+    stock = [leg for leg in rows if leg.get("side") == "stock"]
+    opts = [leg for leg in rows if leg.get("side") in {"call", "put"}]
+    if len(stock) == 1 and len(opts) == 1:
+        opt = opts[0]
+        if opt.get("action") == "buy" and opt.get("side") == "put":
+            return "Married Put"
+    if len(opts) == 1:
+        opt = opts[0]
+        action = str(opt.get("action") or "").lower()
+        side = opt.get("side")
+        if action == "buy" and side == "call":
+            return "Long Call"
+        if action == "buy" and side == "put":
+            return "Long Put"
+        if action == "sell" and side == "call":
+            return "Naked Call"
+        if action == "sell" and side == "put":
+            return "Naked Put"
+        return None
+    if len(opts) == 2 and _same_expiry(opts[0], opts[1]):
+        return _two_leg_name(opts[0], opts[1])
+    if len(opts) == 4 and len({str(leg.get("expiry") or "") for leg in opts}) <= 1:
+        return _iron_condor_name(opts)
+    return None
+
+
+def _two_leg_name(left: dict[str, Any], right: dict[str, Any]) -> str | None:
+    if left.get("side") != right.get("side"):
+        left_strike = _strike(left)
+        right_strike = _strike(right)
+        if (
+            left.get("action") == right.get("action") == "buy"
+            and left_strike is not None
+            and right_strike is not None
+            and abs(left_strike - right_strike) < 0.01
+        ):
+            return "Long Straddle"
+        return None
+    sell = left if left.get("action") == "sell" else right if right.get("action") == "sell" else None
+    buy = left if left.get("action") == "buy" else right if right.get("action") == "buy" else None
+    if sell is None or buy is None:
+        return None
+    sell_strike = _strike(sell)
+    buy_strike = _strike(buy)
+    if sell_strike is None or buy_strike is None or abs(sell_strike - buy_strike) < 0.01:
+        return None
+    side = left.get("side")
+    if side == "put" and sell_strike > buy_strike:
+        return "Bull Put Spread (credit)"
+    if side == "put" and sell_strike < buy_strike:
+        return "Bear Put Spread"
+    if side == "call" and buy_strike < sell_strike:
+        return "Bull Call Spread"
+    if side == "call" and sell_strike < buy_strike:
+        return "Bear Call Spread (credit)"
+    return None
+
+
+def _iron_condor_name(opts: list[dict[str, Any]]) -> str | None:
+    puts = [leg for leg in opts if leg.get("side") == "put"]
+    calls = [leg for leg in opts if leg.get("side") == "call"]
+    if len(puts) != 2 or len(calls) != 2:
+        return None
+    put_name = _two_leg_name(puts[0], puts[1])
+    call_name = _two_leg_name(calls[0], calls[1])
+    if put_name == "Bull Put Spread (credit)" and call_name == "Bear Call Spread (credit)":
+        return "Short Iron Condor"
+    return None
+
+
+def factual_structure_copy(legs: list[dict[str, Any]] | None) -> str:
+    """Short description from the legs: action, strike, side, and expiry."""
+    rows = [leg for leg in (legs or []) if isinstance(leg, dict)]
+    stock = [leg for leg in rows if leg.get("side") == "stock"]
+    opts = [leg for leg in rows if leg.get("side") in {"call", "put"}]
+    if not stock and not opts:
+        return "Option legs were not resolved for this scan."
+    bits: list[str] = []
+    for leg in stock:
+        action = str(leg.get("action") or "trade").capitalize()
+        shares = leg.get("quantity") or 100
+        held = " already held" if leg.get("already_held") else ""
+        bits.append(f"{action} {shares:g} shares{held}")
+    for leg in opts:
+        action = str(leg.get("action") or "trade").capitalize()
+        strike = _strike(leg)
+        side = leg.get("side")
+        qty = leg.get("quantity") or 1
+        under = leg.get("underlying")
+        under_txt = f" on {under}" if under else ""
+        noun = f"the {side}" if strike is None else f"the {float(strike):g} {side}"
+        if qty != 1:
+            bits.append(f"{action} {qty:g} of {noun}{under_txt}")
+        else:
+            bits.append(f"{action} {noun}{under_txt}")
+    if len(bits) == 1:
+        sentence = bits[0]
+    elif len(bits) == 2:
+        sentence = f"{bits[0]} and {bits[1]}"
+    else:
+        sentence = ", ".join(bits[:-1]) + f", and {bits[-1]}"
+    expiries: list[str] = []
+    for leg in opts:
+        exp = leg.get("expiry")
+        if exp and str(exp) not in expiries:
+            expiries.append(str(exp))
+    if len(expiries) == 1:
+        sentence += f", expiring {expiries[0]}"
+    elif len(expiries) > 1:
+        sentence += f", expiring {expiries[0]} and {expiries[1]}"
+    return sentence + "."
+
+
+_REMAINING_LONG_LEG = (
+    "Payoff depends on the remaining long leg. No closed-form max profit is shown."
+)
+
+
+def classify_legs(legs: list[dict[str, Any]] | None) -> str | None:
+    """Leg geometry the card must describe. Independent of the strategy title."""
+    rows = [leg for leg in (legs or []) if isinstance(leg, dict)]
+    stock = [leg for leg in rows if leg.get("side") == "stock"]
+    opts = [leg for leg in rows if leg.get("side") in {"call", "put"}]
+    if stock and opts:
+        return "equity_overlay"
+    if not opts:
+        return None
+    expiries = {str(leg.get("expiry")) for leg in opts if leg.get("expiry")}
+    if len(expiries) > 1:
+        sides = {leg.get("side") for leg in opts}
+        if len(opts) == 2 and len(sides) == 1:
+            strikes = {_strike(leg) for leg in opts}
+            strikes.discard(None)
+            if len(strikes) == 1:
+                return "calendar"
+            return "diagonal"
+        return "multi_expiry"
+    quantities: list[float] = []
+    for leg in opts:
+        raw = leg.get("quantity") if leg.get("quantity") is not None else 1
+        try:
+            quantities.append(float(raw))
+        except (TypeError, ValueError):
+            quantities.append(1.0)
+    if any(qty != 1 for qty in quantities):
+        return "ratio"
+    if len(opts) == 1:
+        action = str(opts[0].get("action") or "").lower()
+        side = opts[0].get("side")
+        if action == "buy" and side == "call":
+            return "long_call"
+        if action == "buy" and side == "put":
+            return "long_put"
+        if action == "sell" and side == "call":
+            return "short_call"
+        if action == "sell" and side == "put":
+            return "short_put"
+        return None
+    if len(opts) == 2:
+        named = _two_leg_name(opts[0], opts[1])
+        return {
+            "Bull Put Spread (credit)": "bull_put_credit",
+            "Bear Put Spread": "bear_put_debit",
+            "Bull Call Spread": "bull_call_debit",
+            "Bear Call Spread (credit)": "bear_call_credit",
+            "Long Straddle": "long_straddle",
+        }.get(named or "")
+    if len(opts) == 3:
+        return "butterfly"
+    if len(opts) == 4:
+        named = _iron_condor_name(opts)
+        if named == "Short Iron Condor":
+            short_put = _strike(next(leg for leg in opts if leg.get("side") == "put" and leg.get("action") == "sell"))
+            short_call = _strike(next(leg for leg in opts if leg.get("side") == "call" and leg.get("action") == "sell"))
+            # Shared short strike is an iron butterfly, not a condor with a body.
+            if short_put is not None and short_call is not None and abs(short_put - short_call) < 0.01:
+                return "butterfly"
+            return "short_iron_condor"
+        puts = [leg for leg in opts if leg.get("side") == "put"]
+        calls = [leg for leg in opts if leg.get("side") == "call"]
+        if len(puts) == 2 and len(calls) == 2:
+            put_name = _two_leg_name(puts[0], puts[1])
+            call_name = _two_leg_name(calls[0], calls[1])
+            if put_name == "Bear Put Spread" and call_name == "Bull Call Spread":
+                return "long_iron_condor"
+        return "four_leg"
+    return None
+
+
+def _copy_conflicts(text: str, family: str | None) -> bool:
+    """True when playbook prose describes a different structure than the legs."""
+    lowered = text.lower()
+    if "no " + "trade" in lowered or "stand " + "aside" in lowered:
+        return True
+    if not family:
+        return False
+    describes_long_call = any(
+        phrase in lowered
+        for phrase in (
+            "long call",
+            "buy a call",
+            "buy the recommended contract",
+            "debit spread that profits from a moderate rise",
+        )
+    )
+    if family == "bull_put_credit" and (describes_long_call or ("call" in lowered and "put" not in lowered)):
+        return True
+    if family == "bear_put_debit" and describes_long_call:
+        return True
+    if family == "long_put" and describes_long_call:
+        return True
+    if family == "bear_call_credit" and "bull put" in lowered:
+        return True
+    if family == "long_call" and ("bull put" in lowered or "credit spread expressing mild bullish" in lowered):
+        return True
+    return False
+
+
+def _grounded_copy(family: str | None, legs: list[dict[str, Any]] | None) -> tuple[str, str] | None:
+    """Definition, use, and management written from the legs."""
+    if not family:
+        return None
+    factual = factual_structure_copy(legs)
+    if family == "bull_put_credit":
+        return (
+            "A bull put credit spread sells a higher-strike put and buys a lower-strike put in the same expiration. "
+            "It is used for a mild bullish outlook. Maximum profit is the credit times the contract multiplier. "
+            "Maximum loss is the strike width minus the credit, times the multiplier. "
+            "The breakeven is the short strike minus the credit.",
+            f"{factual} The short put is the higher strike and the long put is the lower strike. "
+            "Close or roll if the underlying trades through the short strike before expiration.",
+        )
+    if family == "bull_call_debit":
+        return (
+            "A bull call debit spread buys a lower-strike call and sells a higher-strike call in the same expiration. "
+            "It is used for a moderate rise with capped risk. Maximum loss is the debit times the contract multiplier. "
+            "Maximum profit is the strike width minus the debit, times the multiplier. "
+            "The breakeven is the long strike plus the debit.",
+            f"{factual} Close the spread if the directional thesis fails before expiration.",
+        )
+    if family == "bear_put_debit":
+        return (
+            "A bear put debit spread buys a higher-strike put and sells a lower-strike put in the same expiration. "
+            "It is used for a moderate decline with capped risk. Maximum loss is the debit times the contract multiplier. "
+            "Maximum profit is the strike width minus the debit, times the multiplier. "
+            "The breakeven is the long strike minus the debit.",
+            f"{factual} Close the spread if the directional thesis fails before expiration.",
+        )
+    if family == "bear_call_credit":
+        return (
+            "A bear call credit spread sells a lower-strike call and buys a higher-strike call in the same expiration. "
+            "It is used for a mild bearish outlook. Maximum profit is the credit times the contract multiplier. "
+            "Maximum loss is the strike width minus the credit, times the multiplier. "
+            "The breakeven is the short strike plus the credit.",
+            f"{factual} The short call is the lower strike and the long call is the higher strike. "
+            "Close or roll if the underlying trades through the short strike before expiration.",
+        )
+    if family == "long_call":
+        return (
+            "A long call is the right to buy the underlying at the strike. "
+            "It is used when the outlook is bullish. Maximum loss is the premium times the contract multiplier. "
+            "Maximum profit is unlimited above the breakeven. The breakeven is the strike plus the premium.",
+            f"{factual} Exit if the directional thesis fails, or before expiration once the premium no longer matches the thesis.",
+        )
+    if family == "long_put":
+        return (
+            "A long put is the right to sell the underlying at the strike. "
+            "It is used when the outlook is bearish. Maximum loss is the premium times the contract multiplier. "
+            "Maximum profit is the strike minus the premium, times the multiplier, because the underlying cannot trade below zero. "
+            "The breakeven is the strike minus the premium.",
+            f"{factual} Exit if the directional thesis fails, or before expiration once the premium no longer matches the thesis.",
+        )
+    if family == "short_call":
+        return (
+            "A naked short call sells a call with no hedge. Profit is limited to the premium received. "
+            "Loss is unlimited if the underlying rises. The card shows Unlimited for max loss.",
+            f"{factual} This structure is undefined risk and is not an auto-execution candidate.",
+        )
+    if family == "short_put":
+        return (
+            "A naked short put sells a put with no hedge. Profit is limited to the premium received. "
+            "Loss is shown as Unlimited. The card does not substitute a finite stand-in for that loss.",
+            f"{factual} This structure is undefined risk and is not an auto-execution candidate.",
+        )
+    if family == "short_iron_condor":
+        return (
+            "A short iron condor sells an out-of-the-money put spread and an out-of-the-money call spread for a net credit. "
+            "It is used when the outlook is range-bound. Maximum profit is the credit times the contract multiplier. "
+            "Maximum loss is the wider wing minus the credit, times the multiplier.",
+            f"{factual} Close or roll if the underlying trades through either short strike before expiration.",
+        )
+    if family == "long_iron_condor":
+        return (
+            "A long iron condor buys the inner strikes and sells the outer strikes for a net debit. "
+            "It is used when a move outside the body is expected. Maximum loss is the debit times the contract multiplier. "
+            "Maximum profit is the wider wing minus the debit, times the multiplier.",
+            f"{factual} Close the structure if the expected move does not develop before expiration.",
+        )
+    if family == "long_straddle":
+        return (
+            "A long straddle buys a call and a put at the same strike and expiration. "
+            "It is used when a large move is expected and direction is not chosen. "
+            "Maximum loss is the combined premium times the contract multiplier. Maximum profit is unlimited.",
+            f"{factual} Exit on a large move or before expiration if the premium has been spent.",
+        )
+    if family in {"calendar", "diagonal"}:
+        lead = {
+            "calendar": "A calendar sells the nearer expiration and buys the later expiration at the same strike. It is used when the outlook is roughly neutral and the near-dated option decays first.",
+            "diagonal": "A diagonal buys a longer-dated option and sells a nearer-dated option at a different strike. It is used for a directional bias with the short option expiring first.",
+        }[family]
+        return (
+            f"{lead} At front expiry the short leg is intrinsic and the long leg is repriced with Black-Scholes. "
+            "Maximum profit and the breakevens come from that grid and depend on the back-leg IV assumption.",
+            f"{factual} Manage the short option before it expires.",
+        )
+    if family in {"butterfly", "ratio", "multi_expiry", "four_leg"}:
+        lead = {
+            "butterfly": "A butterfly combines a short body with long wings, or the reverse, at three strikes. It is used for a view that price finishes near the body.",
+            "ratio": "A ratio uses unequal quantities of long and short options. One side of the payoff is not a simple vertical.",
+            "multi_expiry": "This structure uses options in more than one expiration.",
+            "four_leg": "This structure uses four option legs in one expiration.",
+        }[family]
+        return (
+            f"{lead} {_REMAINING_LONG_LEG}",
+            f"{factual} Manage the short option before it expires. The remaining long leg is a separate position after that.",
+        )
+    if family == "equity_overlay":
+        return (
+            "This structure pairs stock with one or more options. The option payoff is only part of the position.",
+            factual,
+        )
+    return None
+
+
+def _apex_leg_sentence(legs: list[dict[str, Any]]) -> str:
+    bits: list[str] = []
+    for leg in legs:
+        action = str(leg.get("action") or "trade").capitalize()
+        side = leg.get("side")
+        strike = _strike(leg)
+        expiry = leg.get("expiry") or "—"
+        mid = leg.get("mid")
+        price = f" at ${float(mid):.2f}" if isinstance(mid, (int, float)) else ""
+        symbol = leg.get("symbol") or ""
+        qty = leg.get("quantity") or 1
+        strike_txt = f"{float(strike):g}" if strike is not None else "—"
+        bits.append(
+            f"{action} {qty:g} {side} strike {strike_txt} expiring {expiry}{price} ({symbol})"
+        )
+    return "; ".join(bits) + "."
+
+
+def _named_geometry_copy(strategy_name: str, legs: list[dict[str, Any]] | None) -> tuple[str, str] | None:
+    """Name-specific copy once the legs actually match that structure."""
+    factual = factual_structure_copy(legs)
+    if strategy_name in {"APEX Strategy", "Gamma Trampoline™"}:
+        from app.strategies.knowledge_base import GAMMA_CLASSIFIER, GAMMA_HOW, GAMMA_SCENARIOS, GAMMA_SUMMARY
+        from app.strategies.validator import apex_structure_reason
+
+        rows = [leg for leg in (legs or []) if isinstance(leg, dict)]
+        if apex_structure_reason(rows) is None and len(rows) == 4:
+            detail = _apex_leg_sentence(rows)
+            if strategy_name == "Gamma Trampoline™":
+                return (
+                    f"{GAMMA_SUMMARY} {GAMMA_SCENARIOS} {detail}",
+                    f"{GAMMA_HOW} {detail}",
+                )
+            return (
+                "A double calendar sells the nearer expiration and buys the later expiration at the same strikes "
+                "on each side. " + GAMMA_CLASSIFIER + " " + detail,
+                detail,
+            )
+    if strategy_name == "APEX Benchmark Greeks Strategy":
+        from app.strategies.knowledge_base import BENCHMARK_SUMMARY, RULE1_HOW
+
+        rows = [leg for leg in (legs or []) if isinstance(leg, dict) and leg.get("side") in {"call", "put"}]
+        if len(rows) == 1 and rows[0].get("action") == "buy":
+            return (BENCHMARK_SUMMARY, RULE1_HOW)
+    rows = [leg for leg in (legs or []) if isinstance(leg, dict)]
+    stock = [leg for leg in rows if leg.get("side") == "stock"]
+    opts = [leg for leg in rows if leg.get("side") in {"call", "put"}]
+    if strategy_name == "Wheel Strategy":
+        if len(stock) == 0 and len(opts) == 1 and opts[0].get("action") == "sell" and opts[0].get("side") == "put":
+            return (
+                "The wheel opens as a cash-secured short put. Cash is set aside to buy the shares if assigned. "
+                "Profit is the premium times the contract multiplier. Loss, if the shares are put to the account and go to zero, "
+                "is the strike minus the premium, times the multiplier. "
+                "The covered-call stage is not included because shares are not already held.",
+                f"{factual} This is not a naked put and it is not a vertical spread.",
+            )
+        if (
+            len(stock) == 1
+            and stock[0].get("already_held")
+            and len(opts) == 1
+            and opts[0].get("action") == "sell"
+            and opts[0].get("side") == "call"
+        ):
+            return (
+                "This is the covered-call stage of the wheel. The short call is sold against shares already held. "
+                "The cash-secured put is the opening stage and is not added while those shares are held.",
+                factual,
+            )
+    if strategy_name == "Synthetic Call" and len(stock) == 1 and stock[0].get("action") == "buy" and len(opts) == 1 and opts[0].get("side") == "put" and opts[0].get("action") == "buy":
+        return (
+            "A synthetic call is long stock plus a long put. Profit is unlimited above the breakeven. "
+            "Loss is limited to the stock price minus the put strike, plus the put premium, times the contract multiplier.",
+            f"{factual} The structure is not a long call paired with a short put.",
+        )
+    if strategy_name == "Synthetic Put" and len(stock) == 1 and stock[0].get("action") == "sell" and len(opts) == 1 and opts[0].get("side") == "call" and opts[0].get("action") == "buy":
+        return (
+            "A synthetic put is short stock plus a long call. Profit is capped because the stock cannot trade below zero. "
+            "The long call caps the loss if the stock rises.",
+            f"{factual} The structure is not a long put paired with a short call.",
+        )
+    if strategy_name == "Synthetic Straddle" and len(stock) == 1 and stock[0].get("action") == "buy" and len(opts) == 1 and opts[0].get("side") == "put" and opts[0].get("action") == "buy" and (opts[0].get("quantity") or 1) >= 2:
+        return (
+            "A synthetic straddle is long stock plus two long puts at the same strike. "
+            "Profit is unlimited if the stock rises. Loss at the strike is finite.",
+            f"{factual} The structure is not a long call and a long put without stock.",
+        )
+    if strategy_name == "Vega Neutral Spread" and len(opts) == 2 and len({str(leg.get("expiry")) for leg in opts}) > 1 and len({_strike(leg) for leg in opts}) == 1:
+        return (
+            "A vega-neutral spread buys and sells the same strike in two expirations, with quantities set so the vegas offset. "
+            "It is not a same-expiry vertical. No closed-form max profit is shown.",
+            factual,
+        )
+    if strategy_name == "Poor Man's Covered Call" and len(opts) == 2 and len({str(leg.get("expiry")) for leg in opts}) > 1:
+        long_call = next((leg for leg in opts if leg.get("action") == "buy" and leg.get("side") == "call"), None)
+        short_call = next((leg for leg in opts if leg.get("action") == "sell" and leg.get("side") == "call"), None)
+        if long_call and short_call and str(long_call.get("expiry")) != str(short_call.get("expiry")):
+            return (
+                "A poor man's covered call is a diagonal: long a far-dated in-the-money call and short a nearer out-of-the-money call. "
+                "Payoff depends on the remaining long leg. No closed-form max profit is shown.",
+                factual,
+            )
+    if strategy_name == "Dispersion Trade" and len(opts) == 2 and {leg.get("underlying") for leg in opts} - {None} and len({leg.get("underlying") for leg in opts}) >= 2:
+        return (
+            "A dispersion trade sells an at-the-money call on one underlying and buys an at-the-money call on a second underlying. "
+            "It is not a one-name vertical. No closed-form max profit is shown.",
+            factual,
+        )
+    return None
+
+
+def _structure_copy(
+    strategy_name: str,
+    legs: list[dict[str, Any]] | None,
+    *,
+    benchmark_rule: str | None = None,
+) -> tuple[str, str]:
+    """Describe the legs. A playbook line is kept only when it matches that geometry."""
+    if benchmark_rule == "rule2" and strategy_name in {
+        "Short Iron Condor",
+        "Bull Put Spread (credit)",
+        "Bear Call Spread (credit)",
+    }:
+        from app.strategies.knowledge_base import BENCHMARK_SUMMARY, RULE2_HOW
+
+        detail = factual_structure_copy(legs)
+        return (f"{BENCHMARK_SUMMARY} {RULE2_HOW}", detail)
+    named = _named_geometry_copy(strategy_name, legs)
+    if named:
+        return named
+    family = classify_legs(legs)
+    grounded = _grounded_copy(family, legs)
+    playbook = PLAYBOOK.get(strategy_name) or {}
+    pb_summary = str(playbook.get("summary") or "").strip()
+    pb_exec = str(playbook.get("execution") or "").strip()
+    if _copy_conflicts(f"{pb_summary} {pb_exec}", family):
+        pb_summary, pb_exec = "", ""
+    factual = factual_structure_copy(legs)
+    if grounded:
+        summary, execution = grounded
+        if "LEAPS" in strategy_name:
+            summary = f"{summary} The expiration is more than a year out."
+        if strategy_name in {"Deep ITM Call", "Deep ITM Put"}:
+            summary = f"{summary} The strike is deep in the money, not at the money."
+        if pb_exec and pb_exec not in execution:
+            execution = f"{execution} {pb_exec}"
+        return summary, execution
+    summary = pb_summary or factual
+    execution = pb_exec or factual
+    return summary, execution
+
+
+def _executable_name(strategy_name: str, *, direction: str, leg_structure: str | None) -> str:
+    spec = get_strategy_spec(strategy_name)
+    if spec is None or (spec.risk_type != "advisory" and spec.leg_count > 0):
+        if spec is not None or strategy_name:
+            if spec is None and strategy_name:
+                return strategy_name
+            if spec is not None and spec.leg_count > 0 and spec.risk_type != "advisory":
+                return strategy_name
+    if leg_structure:
+        held = get_strategy_spec(leg_structure)
+        if held is not None and held.leg_count > 0 and held.risk_type != "advisory":
+            return leg_structure
+    if direction == "bearish":
+        return "Bear Put Spread"
+    if direction == "neutral":
+        return "Long Straddle"
+    return "Bull Call Spread"
+
+
+def _vol_citation(vol_layer: dict[str, Any]) -> str | None:
+    """Cite IV and HV as percentages when the scan already supplied them."""
+    iv = format_vol_percent(vol_layer.get("iv"))
+    hv = format_vol_percent(vol_layer.get("hv"))
+    if iv and hv:
+        return f"IV {iv} versus HV {hv}."
+    if iv:
+        return f"IV {iv}."
+    if hv:
+        return f"HV {hv}."
+    return None
+
+
+_SPREAD_CHECK = re.compile(
+    r"bid/ask spread is (\d+(?:\.\d+)?)% of mid, not below (\d+(?:\.\d+)?)%"
+    r"(?:\. Estimated slippage is \$(\d+(?:\.\d+)?)\.)?",
+    re.IGNORECASE,
+)
+
+
+def _trader_vol_sentence(regime_view: Any, vol_layer: dict[str, Any], iv_rank_text: str) -> str:
+    """One IV-versus-HV line. The textbook rule stays on the regime object, not the card."""
+    atm = vol_layer.get("atm_iv") if vol_layer.get("atm_iv") is not None else vol_layer.get("iv")
+    iv_txt = format_vol_percent(atm)
+    hv_txt = format_vol_percent(vol_layer.get("hv"))
+    rank = f"IV rank {iv_rank_text}."
+    if not iv_txt or not hv_txt:
+        return rank
+    pair = f"IV {iv_txt} versus HV {hv_txt}"
+    display = regime_view.display
+    points = regime_view.iv_minus_hv_pts
+    band = float(IV_MISMATCH_VOL_POINTS)
+    if (
+        regime_view.short == "sell premium"
+        and not regime_view.tie_break
+        and isinstance(points, (int, float))
+    ):
+        return (
+            f"{pair} is rich at {float(points):.2f} vol points versus the {band:.0f} vol point band, {display}. {rank}"
+        )
+    if (
+        regime_view.short == "buy premium"
+        and not regime_view.tie_break
+        and isinstance(points, (int, float))
+    ):
+        return (
+            f"{pair} is cheap at {abs(float(points)):.2f} vol points versus the {band:.0f} vol point band, {display}. {rank}"
+        )
+    if regime_view.tie_break and regime_view.iv_rank is not None and regime_view.short in {"sell premium", "buy premium"}:
+        # Rank breaks a tie only inside the ±5 band. A wider gap is the primary signal.
+        if isinstance(points, (int, float)) and abs(float(points)) > band:
+            gap = float(points)
+            # The ledger stores the signed gap. A cheap print uses IV, HV, and the band.
+            if gap < -band:
+                return f"{pair} is cheap versus the {band:.0f} vol point band. {rank}"
+            return (
+                f"{pair} is rich at {gap:.2f} vol points versus the {band:.0f} vol point band. {rank}"
+            )
+        word = "rich" if regime_view.short == "sell premium" else "cheap"
+        line = IV_RANK_RICH_ABOVE if word == "rich" else IV_RANK_CHEAP_BELOW
+        shown = format_iv_rank(regime_view.iv_rank)
+        return (
+            f"{pair}, {display}. IV rank {shown} is {word} versus the {line:.0f} threshold, so IV rank breaks the tie."
+        )
+    return f"{pair}, {display}. {rank}"
+
+
+def _trader_check_phrase(note: str) -> str:
+    """One failed check in trader words, using the figures already on the note."""
+    spread = _SPREAD_CHECK.search(note)
+    if spread:
+        phrase = f"wide spread {spread.group(1)}% of mid, above the {spread.group(2)}% cap"
+        if spread.group(3):
+            phrase += f", slippage ${spread.group(3)}"
+        return phrase
+    lowered = note.lower()
+    if "quote not current" in lowered or "stale" in lowered or "suspect" in lowered:
+        return "quote not current"
+    return note.strip().rstrip(".")
+
+
+def _trader_failed_checks(block_notes: list[str]) -> str:
+    phrases: list[str] = []
+    for note in block_notes:
+        phrase = _trader_check_phrase(note)
+        if phrase and phrase not in phrases:
+            phrases.append(phrase)
+    if not phrases:
+        phrases.append("a pre-trade check failed")
+    return "Failed checks: " + "; ".join(phrases) + "."
+
+
+def _payoff_sentence(metrics: dict[str, Any]) -> str | None:
+    """Credit or debit, max loss, and max gain from the scan. No invented P&L."""
+    if not isinstance(metrics, dict):
+        return None
+    bits: list[str] = []
+    net = metrics.get("net_debit_credit")
+    net_type = metrics.get("net_type")
+    if isinstance(net, (int, float)) and not isinstance(net, bool) and net_type in {"credit", "debit"}:
+        bits.append(f"{str(net_type).capitalize()} ${abs(float(net)):.2f}")
+    loss = metrics.get("max_loss")
+    if isinstance(loss, (int, float)) and not isinstance(loss, bool):
+        bits.append(f"max loss ${abs(float(loss)):.2f}")
+    elif metrics.get("max_loss_unlimited_allowed"):
+        bits.append("max loss unlimited")
+    if metrics.get("payoff_depends_on_remaining_leg"):
+        bits.append("max gain depends on the remaining long leg")
+    else:
+        profit = metrics.get("max_profit")
+        if isinstance(profit, (int, float)) and not isinstance(profit, bool):
+            bits.append(f"max gain ${float(profit):.2f}")
+        elif metrics.get("max_profit_unlimited_allowed"):
+            bits.append("max gain unlimited")
+    if not bits:
+        return None
+    return "Payoff: " + ", ".join(bits) + "."
+
+
+def _outlook_for(strategy_name: str, direction: str) -> str:
+    bias = DEFINED_RISK_PLAYBOOK.get(strategy_name, {}).get("bias")
+    if bias in {"bullish", "bearish", "neutral"}:
+        return str(bias)
+    return direction
+
+
+def _threshold_token(value: float) -> str:
+    rounded = round(float(value), 1)
+    if rounded == int(rounded):
+        return str(int(rounded))
+    return f"{rounded:g}"
+
+
+def align_exit_copy(execution: str, threshold: float) -> str:
+    """Printed exit is the hysteresis exit line, which sits below the entry line."""
+    _ = threshold
+    token = _threshold_token(exit_composite_min())
+    return execution.replace("composite drop below 72", f"composite drop below {token}")
+
+
+def printed_exit_level(execution: str) -> float | None:
+    match = re.search(r"composite drop below (\d+(?:\.\d+)?)", execution)
+    if not match:
+        return None
+    return float(match.group(1))
+
+
+def _cites_rule1(text: str) -> bool:
+    theta = "0.05" in text and ("Θ" in text or "theta" in text.lower())
+    ratio = "Δ/Θ" in text or "delta/theta" in text.lower()
+    return theta and ratio
+
+
+def _cites_spread_rule(text: str) -> bool:
+    lowered = text.lower()
+    return "8%" in text and "mid" in lowered and "spread" in lowered
+
+
+def _row_mid(row: dict[str, Any]) -> float | None:
+    bid, ask = row.get("bid"), row.get("ask")
+    if isinstance(bid, (int, float)) and isinstance(ask, (int, float)) and bid > 0 and ask > 0:
+        return (float(bid) + float(ask)) / 2.0
+    mid = row.get("mid")
+    if isinstance(mid, (int, float)) and mid > 0:
+        return float(mid)
+    return None
+
+
+def _contract_for_leg(leg: dict[str, Any], contracts: list[dict[str, Any]]) -> dict[str, Any]:
+    symbol = str(leg.get("symbol") or "")
+    for row in contracts:
+        if symbol and row.get("symbol") == symbol:
+            return row
+    strike = leg.get("strike")
+    side = leg.get("side")
+    leg_exp = str(leg.get("expiry") or "")[:10]
+    for row in contracts:
+        if not (side and row.get("side") == side and strike is not None and row.get("strike") is not None):
+            continue
+        if abs(float(row["strike"]) - float(strike)) >= 0.01:
+            continue
+        row_symbol = str(row.get("symbol") or "")
+        # A same strike on another expiry is a different contract. Using it
+        # makes the ±5 vol-point check look like a stale quote.
+        if symbol and row_symbol and row_symbol != symbol:
+            continue
+        row_exp = str(row.get("expiry") or "")[:10]
+        if leg_exp and row_exp and row_exp != leg_exp:
+            continue
+        return row
+    return leg
+
+
+def rule1_buy_failures(
+    legs: list[dict[str, Any]],
+    contracts: list[dict[str, Any]],
+    *,
+    hv: Any = None,
+    mode: str | None = None,
+    check_iv_below_hv: bool = False,
+) -> list[str]:
+    """Rule 1 misses for buy legs. Theta mode comes from settings unless a test passes one.
+
+    IV below HV is a Rule 1 gate. Callers turn it on only for Rule 1 strategy names.
+    """
+    failures: list[str] = []
+    checked = False
+    for leg in legs:
+        if str(leg.get("action") or "") != "buy" or leg.get("side") not in {"call", "put"}:
+            continue
+        checked = True
+        source = _contract_for_leg(leg, contracts)
+        mid = _row_mid(source) or _row_mid(leg)
+        delta = source.get("delta")
+        if delta is None:
+            delta = leg.get("delta")
+        theta = daily_theta_per_share(
+            source.get("theta") if source.get("theta") is not None else leg.get("theta"),
+            mid=mid,
+            multiplier=source.get("multiplier") or leg.get("multiplier") or 100,
+        )
+        if not isinstance(delta, (int, float)) or isinstance(delta, bool) or theta is None:
+            failures.append("buy delta or daily theta is missing, so Rule 1 cannot pass")
+            continue
+        theta_fail, _notes = rule1_theta_failures(
+            delta=float(delta),
+            theta_per_share=float(theta),
+            premium=mid,
+            mode=mode,
+        )
+        failures.extend(theta_fail)
+        bid, ask = source.get("bid"), source.get("ask")
+        if (
+            isinstance(bid, (int, float))
+            and not isinstance(bid, bool)
+            and isinstance(ask, (int, float))
+            and not isinstance(ask, bool)
+            and bid > 0
+            and ask > 0
+        ):
+            mid_px = (float(bid) + float(ask)) / 2.0
+            if mid_px > 0 and (float(ask) - float(bid)) / mid_px >= 0.08:
+                pct = (float(ask) - float(bid)) / mid_px
+                failures.append(f"bid/ask spread is {pct * 100:.1f}% of mid, not below 8%")
+        if check_iv_below_hv:
+            contract_iv = source.get("iv")
+            if contract_iv is None:
+                contract_iv = leg.get("iv")
+            below = iv_below_hv(contract_iv, hv)
+            if below is False:
+                failures.append("contract IV is not below HV")
+            elif below is None and hv is not None:
+                failures.append("contract IV is missing, so IV below HV cannot pass")
+    if not checked:
+        failures.append("no buy leg was available to grade against Rule 1")
+    return failures
+
+
+def _leg_spread_pct(source: dict[str, Any]) -> float | None:
+    bid, ask = source.get("bid"), source.get("ask")
+    if not (
+        isinstance(bid, (int, float))
+        and not isinstance(bid, bool)
+        and isinstance(ask, (int, float))
+        and not isinstance(ask, bool)
+        and float(bid) > 0
+        and float(ask) > 0
+    ):
+        return None
+    mid = (float(bid) + float(ask)) / 2.0
+    if mid <= 0:
+        return None
+    return (float(ask) - float(bid)) / mid
+
+
+def _quote_meta(source: dict[str, Any], leg: dict[str, Any]) -> dict[str, Any] | None:
+    for row in (source, leg):
+        if not isinstance(row, dict):
+            continue
+        raw = row.get("quote_meta") or row.get("quoteMeta")
+        if isinstance(raw, dict):
+            return raw
+    return None
+
+
+def _quote_is_stale_failure(
+    source: dict[str, Any],
+    leg: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Stale during the session. A last close with a timestamp is not a failure.
+
+    A missing timestamp is stale even when the session is closed. The 300s cap stays.
+    """
+    quoted = None
+    if isinstance(source, dict):
+        quoted = source.get("quote_as_of") or source.get("as_of")
+    if not quoted and isinstance(leg, dict):
+        quoted = leg.get("quote_as_of") or leg.get("as_of")
+    if quoted is None or not str(quoted).strip():
+        return True
+    meta = _quote_meta(source, leg)
+    if meta is not None and meta.get("staleReason") == "last_close":
+        return False
+    clock = now or datetime.now(timezone.utc)
+    is_stale, reason = classify_quote_freshness(quoted_at=quoted, now=clock)
+    if reason == "last_close":
+        return False
+    if meta is not None and meta.get("isStale") is True:
+        return True
+    return bool(is_stale)
+
+
+def suspect_quote_failures(
+    legs: list[dict[str, Any]],
+    contracts: list[dict[str, Any]],
+    *,
+    spot: float | None,
+    now: datetime | None = None,
+) -> list[str]:
+    """Flag a mid whose implied vol is more than 5 points from the chain IV, a stale quote, or a 2:1 mid."""
+    from app.analysis.black_scholes import implied_vol, year_fraction
+
+    failures: list[str] = []
+    mids: list[float] = []
+    for leg in legs:
+        if not isinstance(leg, dict) or leg.get("side") not in {"call", "put"}:
+            continue
+        source = _contract_for_leg(leg, contracts)
+        mid = _row_mid(source) or _row_mid(leg)
+        if mid is not None:
+            mids.append(float(mid))
+        if _quote_is_stale_failure(source, leg, now=now):
+            failures.append("Stale or suspect quote")
+            continue
+        chain_iv = source.get("iv")
+        if chain_iv is None:
+            chain_iv = leg.get("iv")
+        if mid is None or spot is None or spot <= 0 or chain_iv is None:
+            continue
+        strike = source.get("strike") if source.get("strike") is not None else leg.get("strike")
+        side = source.get("side") or leg.get("side")
+        expiry = source.get("expiry") or leg.get("expiry")
+        if strike is None or side not in {"call", "put"}:
+            continue
+        dte = 30
+        if expiry:
+            try:
+                exp = datetime.fromisoformat(str(expiry)[:10]).date()
+                dte = max((exp - datetime.now(timezone.utc).date()).days, 1)
+            except ValueError:
+                dte = 30
+        solved = implied_vol(
+            price=float(mid),
+            spot=float(spot),
+            strike=float(strike),
+            years=year_fraction(dte),
+            side=side,
+        )
+        if solved is None:
+            continue
+        chain = float(chain_iv)
+        if chain > 3.0:
+            chain = chain / 100.0
+        if abs(solved - chain) * 100.0 > 5.0:
+            failures.append("Stale or suspect quote")
+    if len(mids) == 2 and mids_are_exact_double(mids):
+        failures.append("Stale or suspect quote")
+    deduped: list[str] = []
+    for item in failures:
+        if item not in deduped:
+            deduped.append(item)
+    return deduped
+
+
+def spread_rule_failures(legs: list[dict[str, Any]], contracts: list[dict[str, Any]]) -> list[str]:
+    """Fail when a cited spread-versus-mid rule is wider than 8%."""
+    failures: list[str] = []
+    for leg in legs:
+        if not isinstance(leg, dict) or leg.get("side") not in {"call", "put"}:
+            continue
+        source = _contract_for_leg(leg, contracts)
+        bid, ask = source.get("bid"), source.get("ask")
+        if not (
+            isinstance(bid, (int, float))
+            and not isinstance(bid, bool)
+            and isinstance(ask, (int, float))
+            and not isinstance(ask, bool)
+            and bid > 0
+            and ask > 0
+        ):
+            failures.append(f"{leg.get('symbol') or leg.get('side')} has no live bid/ask, so spread versus mid cannot pass")
+            continue
+        mid = (float(bid) + float(ask)) / 2.0
+        if mid <= 0:
+            continue
+        pct = (float(ask) - float(bid)) / mid
+        if pct >= 0.08:
+            failures.append(f"bid/ask spread is {pct * 100:.1f}% of mid, not below 8%")
+    return failures
+
+
+def _apply_mid_limits(metrics: dict[str, Any], contracts: list[dict[str, Any]]) -> list[str]:
+    """Marketable limit from the live ask (buy) or bid (sell). Never a market order."""
+    from app.services.executability import marketable_limit
+
+    missing: list[str] = []
+    for leg in metrics.get("legs") or []:
+        if not isinstance(leg, dict) or leg.get("side") not in {"call", "put"}:
+            continue
+        source = _contract_for_leg(leg, contracts)
+        bid, ask = source.get("bid"), source.get("ask")
+        action = str(leg.get("action") or "").lower()
+        priced = marketable_limit(action, {"bid": bid, "ask": ask})
+        limit, basis = priced if priced is not None else (None, None)
+        quoted = source.get("quote_as_of") or source.get("as_of") or leg.get("quote_as_of")
+        if limit is None or basis is None:
+            if leg.get("order_type") != "limit":
+                mid = leg.get("mid")
+                if isinstance(mid, (int, float)) and not isinstance(mid, bool) and mid > 0:
+                    leg["order_type"] = "limit"
+                    leg["limit_price"] = round(float(mid), 2)
+                    leg["limit_basis"] = "mid"
+                    leg["order_note"] = "limit at mid"
+                else:
+                    missing.append(str(leg.get("symbol") or leg.get("side") or "option"))
+            if quoted:
+                leg["quote_as_of"] = quoted
+            continue
+        leg["order_type"] = "limit"
+        leg["limit_price"] = limit
+        leg["limit_basis"] = basis
+        leg["order_note"] = "limit at the ask" if basis == "ask" else "limit at the bid"
+        if quoted:
+            leg["quote_as_of"] = quoted
+    return missing
+
+
+def _apply_marketable_limits(metrics: dict[str, Any], contracts: list[dict[str, Any]]) -> None:
+    """Option legs are limits at the live ask (buy) or bid (sell). Never a market order."""
+    for leg in metrics.get("legs") or []:
+        if not isinstance(leg, dict) or leg.get("side") not in {"call", "put"}:
+            continue
+        source = _contract_for_leg(leg, contracts)
+        action = str(leg.get("action") or "").lower()
+        quoted = source.get("quote_as_of") or leg.get("quote_as_of")
+        if quoted:
+            leg["quote_as_of"] = quoted
+        bid, ask = source.get("bid"), source.get("ask")
+        if (
+            isinstance(bid, (int, float))
+            and not isinstance(bid, bool)
+            and isinstance(ask, (int, float))
+            and not isinstance(ask, bool)
+            and float(bid) > 0
+            and float(ask) > 0
+            and float(ask) >= float(bid)
+            and action in {"buy", "sell"}
+        ):
+            if action == "buy":
+                leg["limit_price"] = round(float(ask), 2)
+                leg["limit_basis"] = "ask"
+                leg["order_note"] = "limit at the ask"
+                leg["quoted_side"] = "ask"
+            else:
+                leg["limit_price"] = round(float(bid), 2)
+                leg["limit_basis"] = "bid"
+                leg["order_note"] = "limit at the bid"
+                leg["quoted_side"] = "bid"
+            leg["order_type"] = "limit"
+            continue
+        mid = leg.get("mid")
+        if isinstance(mid, (int, float)) and not isinstance(mid, bool) and float(mid) > 0:
+            leg["order_type"] = "limit"
+            leg["limit_price"] = round(float(mid), 2)
+            leg["limit_basis"] = leg.get("limit_basis") or "mid"
+            leg["order_note"] = leg.get("order_note") or "limit from the scan mid; live bid/ask was not on the quote"
+
+
+def _stale_quote_phrase(legs: list[dict[str, Any]], contracts: list[dict[str, Any]]) -> str | None:
+    oldest: tuple[float, str] | None = None
+    clock = datetime.now(timezone.utc)
+    for leg in legs:
+        if not isinstance(leg, dict):
+            continue
+        source = _contract_for_leg(leg, contracts)
+        raw = source.get("quote_as_of") or leg.get("quote_as_of")
+        if not _quote_is_stale_failure(source, leg, now=clock):
+            continue
+        phrase = quote_age_phrase(raw, now=clock)
+        if not phrase:
+            continue
+        parsed = str(raw)
+        age = 0.0
+        try:
+            stamp = datetime.fromisoformat(parsed.replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            age = (clock - stamp).total_seconds()
+        except ValueError:
+            age = 0.0
+        if oldest is None or age > oldest[0]:
+            oldest = (age, f"Quote not current. {phrase}. Quoted {parsed}.")
+    return oldest[1] if oldest else None
+
+
+def _protective_put_label(legs: list[dict[str, Any]], *, covered: bool) -> str | None:
+    """Shares already held plus one long put. The label comes from the legs."""
+    if not covered:
+        return None
+    rows = [leg for leg in legs if isinstance(leg, dict)]
+    stock = [leg for leg in rows if leg.get("side") == "stock"]
+    puts = [
+        leg
+        for leg in rows
+        if leg.get("side") == "put" and str(leg.get("action") or "").lower() == "buy"
+    ]
+    calls = [leg for leg in rows if leg.get("side") == "call"]
+    if len(stock) == 1 and len(puts) == 1 and not calls:
+        return "Protective Put"
+    return None
+
+
+def _earnings_inputs(
+    fundamentals_layer: dict[str, Any] | None,
+    sentiment_layer: dict[str, Any] | None,
+) -> tuple[int | None, bool, bool]:
+    """Days, confirmed, and whether a calendar was supplied."""
+    fundamentals = fundamentals_layer or {}
+    sentiment = sentiment_layer or {}
+    calendar = fundamentals.get("earnings_calendar") if isinstance(fundamentals.get("earnings_calendar"), dict) else None
+    alert = sentiment.get("earnings_alert") if isinstance(sentiment.get("earnings_alert"), dict) else None
+    if calendar is not None and calendar.get("earnings_applicable") is False:
+        return None, False, False
+    if calendar is None and alert is None:
+        return None, False, False
+    status = calendar.get("date_status") if calendar is not None else None
+    if status == "estimated":
+        next_date = calendar.get("next_date") if calendar is not None else None
+        if not next_date and alert is not None:
+            next_date = alert.get("next_date")
+        raw_days = None
+        if calendar is not None:
+            raw_days = calendar.get("dte")
+            if raw_days is None:
+                raw_days = calendar.get("days_until")
+        if raw_days is None and alert is not None:
+            raw_days = alert.get("dte")
+            if raw_days is None:
+                raw_days = alert.get("days_until")
+        try:
+            days = int(raw_days) if raw_days is not None else None
+        except (TypeError, ValueError):
+            days = None
+        return days, True, True
+    next_date = None
+    if calendar is not None:
+        next_date = calendar.get("next_date")
+    if not next_date and alert is not None:
+        next_date = alert.get("next_date")
+    if not next_date:
+        return None, False, True
+    raw_days = None
+    if calendar is not None:
+        raw_days = calendar.get("dte")
+        if raw_days is None:
+            raw_days = calendar.get("days_until")
+    if raw_days is None and alert is not None:
+        raw_days = alert.get("dte")
+        if raw_days is None:
+            raw_days = alert.get("days_until")
+    try:
+        days = int(raw_days) if raw_days is not None else None
+    except (TypeError, ValueError):
+        days = None
+    return days, True, True
+
+
+_DTE_RANGE = re.compile(r"(\d+)\s*(?:–|—|-|to)\s*(\d+)\s*DTE", re.IGNORECASE)
+_DTE_IS = re.compile(r"DTE\s+is\s+(\d+)\s+to\s+(\d+)", re.IGNORECASE)
+
+
+def _window_from_text(text: str) -> tuple[int, int] | None:
+    match = _DTE_RANGE.search(text) or _DTE_IS.search(text)
+    if match is None:
+        return None
+    low, high = int(match.group(1)), int(match.group(2))
+    if low > high:
+        low, high = high, low
+    return low, high
+
+
+def _dte_inside(dte: int, low: int, high: int | None) -> bool:
+    if dte < low:
+        return False
+    return True if high is None else dte <= high
+
+
+def _window_phrase(low: int, high: int | None) -> str:
+    if high is None:
+        return f"more than {low - 1} calendar days"
+    return f"{low} to {high} DTE"
+
+
+def dte_window_for(strategy_name: str) -> tuple[int, int | None] | None:
+    """Option DTE bounds from the catalog. A missing max is an open upper end.
+
+    The Gamma Trampoline 5–10 day band is an earnings window, not option DTE.
+    A catalog row with both bounds empty does not borrow a window from how-to text.
+    """
+    names = [strategy_name]
+    if strategy_name in {"Protective Put", "Stock + Long Put"}:
+        names.append("Married Put")
+    from app.strategies.knowledge_base import entry_for
+
+    saw_entry = False
+    for name in names:
+        entry = entry_for(name)
+        if entry is None:
+            continue
+        saw_entry = True
+        source = str(getattr(entry, "dte_source", "") or "").lower()
+        label = str(getattr(entry, "dte_window", "") or "").lower()
+        if "earnings window" in source or "before earnings" in label:
+            return None
+        explicit = getattr(entry, "dte_window", None)
+        if isinstance(explicit, (tuple, list)) and len(explicit) == 2:
+            return int(explicit[0]), int(explicit[1])
+        low = getattr(entry, "dte_min", None)
+        high = getattr(entry, "dte_max", None)
+        if isinstance(low, int) and not isinstance(low, bool):
+            if isinstance(high, int) and not isinstance(high, bool):
+                return low, high
+            if high is None:
+                return low, None
+        if low is None and high is None:
+            return None
+    if saw_entry:
+        return None
+    for name in names:
+        play = PLAYBOOK.get(name) or {}
+        found = _window_from_text(f"{play.get('execution', '')} {play.get('summary', '')}")
+        if found is not None:
+            return found
+    return None
+
+
+def _listed_expiries(chain_analysis: dict[str, Any], vol_layer: dict[str, Any]) -> list[str]:
+    found: list[str] = []
+    for key in ("expiration_dates", "expiries"):
+        raw = chain_analysis.get(key)
+        if isinstance(raw, list):
+            found.extend(str(item)[:10] for item in raw if item)
+    for row in chain_analysis.get("contracts") or []:
+        if isinstance(row, dict) and row.get("expiry"):
+            found.append(str(row["expiry"])[:10])
+    term = vol_layer.get("term_structure")
+    legs = term.get("legs") if isinstance(term, dict) else None
+    if isinstance(legs, list):
+        found.extend(str(leg.get("expiry"))[:10] for leg in legs if isinstance(leg, dict) and leg.get("expiry"))
+    return found
+
+
+def _option_iv(leg: dict[str, Any], pools: list[list[dict[str, Any]]]) -> float | None:
+    if isinstance(leg.get("iv"), (int, float)) and not isinstance(leg.get("iv"), bool):
+        return float(leg["iv"])
+    for pool in pools:
+        row = _contract_for_leg(leg, pool)
+        iv = row.get("iv")
+        if isinstance(iv, (int, float)) and not isinstance(iv, bool):
+            return float(iv)
+    return None
+
+
+def _parse_iso_date(value: Any) -> date | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return date.fromisoformat(value.strip()[:10])
+    except ValueError:
+        return None
+
+
+def _event_vega_note(
+    legs: list[dict[str, Any]],
+    *,
+    earnings_on: date | None,
+    earnings_label: str,
+    hv: Any,
+    pools: list[list[dict[str, Any]]],
+) -> tuple[str | None, float | None]:
+    """Penalty sentence and the measured vol points. Missing IV returns no points."""
+    if earnings_on is None:
+        return None, None
+    shorts = [
+        leg
+        for leg in legs
+        if str(leg.get("action") or "").lower() == "sell" and leg.get("side") in {"call", "put"} and leg.get("expiry")
+    ]
+    longs = [
+        leg
+        for leg in legs
+        if str(leg.get("action") or "").lower() == "buy" and leg.get("side") in {"call", "put"} and leg.get("expiry")
+    ]
+    if not shorts or not longs:
+        return None, None
+    short_dates = [_parse_iso_date(leg.get("expiry")) for leg in shorts]
+    if any(parsed is not None and parsed >= earnings_on for parsed in short_dates):
+        return None, None
+    spanning = []
+    for leg in longs:
+        parsed = _parse_iso_date(leg.get("expiry"))
+        if parsed is not None and parsed > earnings_on:
+            spanning.append(leg)
+    if not spanning:
+        return None, None
+    long_leg = spanning[0]
+    short_leg = shorts[0]
+    long_iv = _option_iv(long_leg, pools)
+    from app.analysis.gate_config import _as_fraction
+
+    normal = _as_fraction(hv)
+    long_fraction = _as_fraction(long_iv)
+    premium = None
+    if long_fraction is not None and normal is not None:
+        premium = (long_fraction - normal) * 100.0
+    side = str(long_leg.get("side") or "option")
+    short_side = str(short_leg.get("side") or "option")
+    base = (
+        f"Event-vega penalty: the long {side} expiring {long_leg.get('expiry')} spans earnings on {earnings_label}. "
+        f"The short {short_side} expiring {short_leg.get('expiry')} is before the event."
+    )
+    if premium is None or premium <= 0 or normal is None or long_fraction is None:
+        return base + " Long-leg IV premium over normal IV could not be measured.", None
+    shown = round(premium, 2)
+    return (
+        base
+        + f" Long-leg IV {long_fraction * 100:.2f}% is {shown:.2f} vol points over normal IV {normal * 100:.2f}%."
+        + f" Penalty {shown:.2f} points."
+    ), shown
+
+
+def _sentiment_direction(score: Any, bias: Any) -> str | None:
+    text = str(bias or "").lower()
+    if "bull" in text and "bear" not in text:
+        return "bullish"
+    if "bear" in text:
+        return "bearish"
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        return None
+    if float(score) > 50:
+        return "bullish"
+    if float(score) < 50:
+        return "bearish"
+    return "neutral"
+
+
+def _structure_direction(strategy_name: str, direction: str) -> str | None:
+    bias = DEFINED_RISK_PLAYBOOK.get(strategy_name, {}).get("bias")
+    if bias in {"bullish", "bearish"}:
+        return str(bias)
+    if direction in {"bullish", "bearish"}:
+        return direction
+    return None
+
+
+def _front_back_iv(
+    legs: list[dict[str, Any]],
+    pools: list[list[dict[str, Any]]],
+    vol_layer: dict[str, Any],
+) -> tuple[Any, Any]:
+    dated: list[tuple[date, float]] = []
+    for leg in legs:
+        exp = _parse_iso_date(leg.get("expiry"))
+        if exp is None or leg.get("side") not in {"call", "put"}:
+            continue
+        iv = _option_iv(leg, pools)
+        if iv is not None:
+            dated.append((exp, iv))
+    expiries = {row[0] for row in dated}
+    if len(expiries) >= 2:
+        dated.sort(key=lambda row: row[0])
+        return dated[0][1], dated[-1][1]
+    term = vol_layer.get("term_structure")
+    term_legs = term.get("legs") if isinstance(term, dict) else None
+    points: list[tuple[int, float]] = []
+    if isinstance(term_legs, list):
+        for leg in term_legs:
+            if not isinstance(leg, dict):
+                continue
+            dte = leg.get("dte")
+            iv = leg.get("atm_iv")
+            if isinstance(dte, int) and isinstance(iv, (int, float)) and not isinstance(iv, bool):
+                points.append((dte, float(iv)))
+    if len(points) >= 2:
+        points.sort(key=lambda row: row[0])
+        return points[0][1], points[-1][1]
+    return vol_layer.get("front_iv"), vol_layer.get("back_iv")
+
+
+def _selected_vega_note(strategy_name: str, regime_view: Any) -> str | None:
+    if regime_view.short != "sell premium" or strategy_vega_sign(strategy_name) != "long":
+        return None
+    time_spread = "Diagonal" in strategy_name or "Calendar" in strategy_name or strategy_name in {
+        APEX_STRATEGY_NAME,
+        "Gamma Trampoline™",
+    }
+    if regime_view.inverted and time_spread:
+        return (
+            "Term-structure inversion justifies the long vega: front IV is at least 1.25 times back IV."
+        )
+    return (
+        f"Long-vega penalty: {strategy_name} is long vega in a rich IV regime "
+        f"({LONG_VEGA_RICH_PENALTY:g} points versus the {IV_MISMATCH_VOL_POINTS:.0f} vol point threshold). "
+        "A long-vega structure in a sell-premium regime "
+        "is penalized unless term-structure inversion justifies a diagonal or calendar."
+    )
+
+
+def _earnings_span_note(
+    legs: list[dict[str, Any]],
+    *,
+    fundamentals_layer: dict[str, Any],
+    sentiment_layer: dict[str, Any],
+    hv: Any,
+    pools: list[list[dict[str, Any]]],
+) -> tuple[str | None, float | None]:
+    calendar = fundamentals_layer.get("earnings_calendar") if isinstance(fundamentals_layer, dict) else None
+    alert = sentiment_layer.get("earnings_alert") if isinstance(sentiment_layer, dict) else None
+    if isinstance(calendar, dict) and calendar.get("earnings_applicable") is False:
+        return None, None
+    raw = None
+    label = None
+    if isinstance(calendar, dict):
+        raw = calendar.get("next_date")
+        label = calendar.get("display") or raw
+    if not raw and isinstance(alert, dict):
+        raw = alert.get("next_date")
+        label = label or raw
+    return _event_vega_note(
+        legs,
+        earnings_on=_parse_iso_date(raw),
+        earnings_label=str(label or raw or ""),
+        hv=hv,
+        pools=pools,
+    )
+
+
+def _retarget_dte_window(
+    strategy_name: str,
+    *,
+    contracts: list[dict[str, Any]],
+    front_expiry: str | None,
+    back_month_contracts: list[dict[str, Any]] | None,
+    back_expiry: str | None,
+) -> tuple[list[dict[str, Any]], str, list[dict[str, Any]] | None, str | None, str] | None:
+    """Move the candidate onto the nearest listed expiry inside the how-to window."""
+    window = dte_window_for(strategy_name)
+    if window is None or not front_expiry:
+        return None
+    low, high = window
+    today = datetime.now(timezone.utc).date()
+    user_dte = _dte_from_expiry(str(front_expiry), today=today)
+    if user_dte is None or _dte_inside(user_dte, low, high):
+        return None
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in contracts:
+        if not isinstance(row, dict):
+            continue
+        exp = str(row.get("expiry") or front_expiry)[:10]
+        groups.setdefault(exp, []).append(row)
+    compliant: list[tuple[float, str, list[dict[str, Any]], int]] = []
+    midpoint = float(low) if high is None else (low + high) / 2.0
+    for exp, rows in groups.items():
+        dte = _dte_from_expiry(exp, today=today)
+        if dte is None or not _dte_inside(dte, low, high):
+            continue
+        compliant.append((abs(dte - midpoint), exp, rows, dte))
+    if not compliant:
+        return None
+    compliant.sort()
+    _, exp, rows, dte = compliant[0]
+    if exp == str(front_expiry)[:10]:
+        return None
+    note = (
+        f"User expiry {front_expiry} is {user_dte} DTE, outside the {_window_phrase(low, high)}. "
+        f"The candidate uses {exp} ({dte} DTE)."
+    )
+    return rows, exp, back_month_contracts, back_expiry, note
+
+
+def _dte_window_note(
+    strategy_name: str,
+    *,
+    chain_analysis: dict[str, Any],
+    vol_layer: dict[str, Any],
+    option_legs: list[dict[str, Any]],
+) -> str | None:
+    window = dte_window_for(strategy_name)
+    if window is None:
+        return None
+    low, high = window
+    user_expiry = chain_analysis.get("expiry")
+    if not user_expiry and option_legs:
+        user_expiry = option_legs[0].get("expiry")
+    dte = _dte_from_expiry(str(user_expiry) if user_expiry else None)
+    if dte is None or _dte_inside(dte, low, high):
+        return None
+    from app.strategies.expiry_utils import nearest_expiry_in_window
+
+    today = datetime.now(timezone.utc).date()
+    nearest = nearest_expiry_in_window(
+        _listed_expiries(chain_analysis, vol_layer),
+        low=low,
+        high=high,
+        today=today,
+    )
+    if high is None:
+        window = f"more than {low - 1} day"
+    else:
+        window = f"{low} to {high} day"
+    days = "1 day" if dte == 1 else f"{dte} days"
+    base = (
+        f"The chosen expiry {user_expiry} is {days} out, outside the {window} window for this structure."
+    )
+    if nearest is None:
+        return base + " No listed expiry is inside that window."
+    nearest_dte = _dte_from_expiry(nearest, today=today)
+    if nearest_dte is None:
+        return base + f" Nearest listed expiry inside that window is {nearest}."
+    nearest_days = "1 day" if nearest_dte == 1 else f"{nearest_dte} days"
+    return base + f" Nearest listed expiry inside that window is {nearest} ({nearest_days} out)."
+
+
+def _sentiment_fit_note(
+    *,
+    strategy_name: str,
+    direction: str,
+    tech_score: float,
+    sentiment_layer: dict[str, Any],
+) -> tuple[str | None, bool]:
+    score = sentiment_layer.get("score_0_100")
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        return None, False
+    struct_dir = _structure_direction(strategy_name, direction)
+    sent_dir = _sentiment_direction(score, sentiment_layer.get("bias"))
+    tech_dir = direction if direction in {"bullish", "bearish"} else None
+    margin = direction_margin(tech_score=float(tech_score), sentiment_score=float(score)) if tech_dir else None
+    low = margin is not None and margin < direction_margin_min()
+    if struct_dir not in {"bullish", "bearish"} or sent_dir not in {"bullish", "bearish"} or struct_dir == sent_dir:
+        return None, low
+    tech_w = float(APEX_COMPOSITE_WEIGHTS["technicals"])
+    sent_w = float(APEX_COMPOSITE_WEIGHTS["sentiment"])
+    tech_mag = abs(float(tech_score)) * tech_w
+    sent_mag = abs((float(score) - 50.0) * 2.0) * sent_w
+    threshold = direction_margin_min()
+    if tech_mag >= sent_mag:
+        lead = (
+            f"The technical weighted vote {tech_mag:.1f} leads the sentiment weighted vote {sent_mag:.1f}, "
+            f"so the {struct_dir} direction prevailed."
+        )
+    else:
+        lead = (
+            f"The sentiment weighted vote {sent_mag:.1f} leads the technical weighted vote {tech_mag:.1f}. "
+            f"The structure follows the technical direction {direction}."
+        )
+    margin_text = "unavailable" if margin is None else f"{margin:.1f}"
+    conviction = (
+        f"Direction margin {margin_text} is below {threshold:g}, so the outlook is low conviction."
+        if low
+        else f"Direction margin {margin_text} is at or above {threshold:g}."
+    )
+    note = (
+        f"Sentiment conflict: score {float(score):g} ({sent_dir}) weight {sent_w * 100:.0f}% "
+        f"opposes the {struct_dir} structure. Technical bias {direction} score {float(tech_score):g} "
+        f"weight {tech_w * 100:.0f}%. {lead} {conviction}"
+    )
+    return note, low
+
+
+def _card_stamp(quote_as_of: Any) -> str:
+    if isinstance(quote_as_of, str) and quote_as_of.strip():
+        return quote_as_of.strip()
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _record_card_figures(
+    scan_id: str,
+    strategy_name: str,
+    figures: dict[str, Any],
+    *,
+    feed: Any,
+    timestamp: str,
+) -> None:
+    """Persist the numbers the card is allowed to print. Does not read the prose."""
+    from app.services.evidence_ledger import record_card_value
+
+    feed_text = feed if isinstance(feed, str) and feed.strip() else None
+    for key, value in figures.items():
+        if value is None or value == "":
+            continue
+        inputs: dict[str, Any] = {"strategy": strategy_name}
+        if str(key).startswith("threshold_"):
+            inputs["threshold"] = value
+        else:
+            inputs["measured"] = value
+        record_card_value(
+            scan_id,
+            str(key),
+            value,
+            inputs=inputs,
+            source="strategy_layer",
+            feed=feed_text,
+            timestamp=timestamp,
+            fn="build_strategy_layer",
+            strategy_id=strategy_name,
+        )
+
+
+def _without_catalog_sentences(text: str, strategy_name: str) -> str:
+    """Drop verbatim knowledge-base sentences so the check can judge the generated remainder."""
+    try:
+        from app.strategies.knowledge_base import entry_for
+    except Exception:
+        return text
+    entry = entry_for(strategy_name)
+    if entry is None:
+        return text
+    catalog = "\n".join(
+        str(getattr(entry, name, "") or "")
+        for name in ("title", "summary", "why_it_fits", "how_to_use", "key_risks", "greeks_profile")
+    )
+    pieces = []
+    for sentence in re.split(r"(?<=[.!?])\s+", text.strip()):
+        cleaned = sentence.strip()
+        if cleaned and cleaned not in catalog and catalog.find(cleaned.rstrip(".")) < 0:
+            pieces.append(cleaned)
+    return " ".join(pieces)
+
+
+def _narrative_line(strategy_name: str, summary: str, execution: str) -> str:
+    """Name the structure once. Catalog summaries already open with the name."""
+    body = " ".join(part for part in (summary.strip(), execution.strip()) if part)
+    lead = strategy_name.strip()
+    if lead and body.lower().startswith(f"{lead.lower()}."):
+        return body
+    return f"Recommended: {lead}. {body}".strip()
+
+
+_LEDGER_PROSE = (
+    "from strategy_recommendation",
+    "from strategy_layer",
+    "via recommend_strategy",
+    "via build_strategy_layer",
+    "data_freshness is",
+    ":score is 0",
+    "Payoff is the model grid",
+    "payoff_grid",
+)
+
+
+def _without_ledger_prose(text: str) -> str:
+    """Drop sentences that are ledger rows. The card keeps the prose that remains."""
+    kept: list[str] = []
+    for sentence in re.split(r"(?<=[.!?])\s+", (text or "").strip()):
+        cleaned = sentence.strip()
+        if cleaned and not any(marker in cleaned for marker in _LEDGER_PROSE):
+            kept.append(cleaned)
+    return " ".join(kept).strip()
+
+
+def _guard_card_text(text: str, *, scan_id: str, strategy_name: str) -> str:
+    from app.services.narrative_guard import check_narrative
+
+    result = check_narrative(text or "", scan_id=scan_id, strategy_id=strategy_name)
+    if result.accepted:
+        return _without_ledger_prose(result.text) or result.text
+    remainder = _without_catalog_sentences(text or "", strategy_name)
+    if remainder != (text or ""):
+        again = check_narrative(remainder, scan_id=scan_id, strategy_id=strategy_name)
+        if again.accepted:
+            return _without_ledger_prose(text) or text
+    cleaned = _without_ledger_prose(result.text)
+    if cleaned:
+        return cleaned
+    return "The generated explanation was rejected because a figure was not on the ledger."
+
+
+def _guard_strategy_card(
+    *,
+    scan_id: str,
+    strategy_name: str,
+    fit: str,
+    execution: str,
+    notes: list[str],
+    summary: str,
+    status_line: str,
+    narrative: str,
+    figures: dict[str, Any],
+    feed: Any,
+    quote_as_of: Any,
+) -> tuple[str, str, list[str], str, str, str]:
+    _record_card_figures(
+        scan_id,
+        strategy_name,
+        figures,
+        feed=feed,
+        timestamp=_card_stamp(quote_as_of),
+    )
+    guarded_notes = [
+        _guard_card_text(note, scan_id=scan_id, strategy_name=strategy_name) for note in notes if note
+    ]
+    return (
+        _guard_card_text(fit, scan_id=scan_id, strategy_name=strategy_name),
+        _guard_card_text(execution, scan_id=scan_id, strategy_name=strategy_name),
+        guarded_notes,
+        _guard_card_text(summary, scan_id=scan_id, strategy_name=strategy_name),
+        _guard_card_text(status_line, scan_id=scan_id, strategy_name=strategy_name),
+        _guard_card_text(narrative, scan_id=scan_id, strategy_name=strategy_name),
+    )
+
+
 def build_strategy_layer(
     *,
     strategy_name: StrategyName,
@@ -1563,65 +3395,88 @@ def build_strategy_layer(
     auto_exec_threshold: float = DEFAULT_AUTO_EXEC_THRESHOLD,
     back_month_contracts: list[dict[str, Any]] | None = None,
     back_expiry: str | None = None,
+    earnings_risk_opt_in: bool = False,
+    in_position: bool = False,
     ticker: str = "",
+    gate_reason: str | None = None,
+    leg_structure: str | None = None,
+    strategies_evaluated: int | None = None,
+    risk_notes: list[str] | None = None,
+    benchmark_rule: str | None = None,
 ) -> dict[str, Any]:
     from app.analysis.score_bounds import validate_scan_scores
 
+    requested_name = strategy_name
     sid = resolve_strategy_id(strategy_name)
     if sid and sid in STRATEGY_REGISTRY:
         strategy_name = STRATEGY_REGISTRY[sid].display_name  # type: ignore[assignment]
+    from app.services.apex_strategy import GAMMA_TRAMPOLINE_NAME
+
+    if requested_name == GAMMA_TRAMPOLINE_NAME:
+        strategy_name = GAMMA_TRAMPOLINE_NAME  # type: ignore[assignment]
 
     tier = _execution_tier(composite, auto_exec_threshold=auto_exec_threshold)
-    empty_metrics = {
-        "max_loss": None,
-        "max_profit": None,
-        "net_debit_credit": None,
-        "net_type": None,
-        "breakevens": [],
-        "legs": [],
-        "per_contract_multiplier": 100,
-    }
-    if tier == "blocked":
-        return {
-            "title": "Strategy",
-            "tradeable": False,
-            "execution_tier": tier,
-            "selected_strategy": NOT_TRADEABLE_COPY,
-            "composite_score": composite,
-            "clears_threshold": False,
-            "direction": direction,
-            "vol_signal": vol_signal,
-            "recommended_contract": None,
-            "what_is_this": "",
-            "why_recommended": (
-                f"Composite score {composite}/100 is below the 51 minimum required for an actionable "
-                "options structure on this scan."
-            ),
-            "how_to_execute": (
-                "Review prior layers, improve composite above 50, and re-scan before considering execution. "
-                "No legs or payoff metrics are shown while the setup is blocked."
-            ),
-            "metrics": empty_metrics,
-            "narrative": (
-                f"{NOT_TRADEABLE_COPY}. Composite {composite}/100 is in the blocked band (≤50). "
-                "Improve conviction, liquidity, and structure fit before returning to strategy selection."
-            ),
-        }
+    strategy_name = _executable_name(strategy_name, direction=direction, leg_structure=leg_structure)
+    earnings_calendar = (fundamentals_layer or {}).get("earnings_calendar")
+    drop_unconfirmed = (
+        isinstance(earnings_calendar, dict) and earnings_calendar.get("earnings_applicable") is False
+    )
+    notes = [
+        note
+        for note in (risk_notes or [])
+        if isinstance(note, str)
+        and note.strip()
+        and "1.35" not in note
+        and not (drop_unconfirmed and note.strip() == "Earnings date is unconfirmed.")
+    ]
+    _ = gate_reason
 
     recommended = chain_analysis.get("recommendedContract")
-    contracts = chain_analysis.get("contracts") or []
+    if strategy_name == "APEX Benchmark Greeks Strategy":
+        side = "put" if direction == "bearish" else "call"
+        recommended = {**(recommended or {}), "side": side, "benchmark_side": side}
+    contracts = list(chain_analysis.get("contracts") or [])
     sym = ticker or chain_analysis.get("symbol") or ""
+    front_expiry = chain_analysis.get("expiry")
+    dte_switch_note: str | None = None
+    retargeted = _retarget_dte_window(
+        strategy_name,
+        contracts=contracts,
+        front_expiry=str(front_expiry) if front_expiry else None,
+        back_month_contracts=back_month_contracts,
+        back_expiry=back_expiry,
+    )
+    if retargeted is not None:
+        contracts, front_expiry, back_month_contracts, back_expiry, dte_switch_note = retargeted
+        if isinstance(recommended, dict):
+            recommended = {**recommended, "expiry": front_expiry}
     metrics = compute_strategy_metrics(
         strategy_name,
         spot=chain_analysis.get("spot"),
         contracts=contracts,
         recommended=recommended,
         back_month_contracts=back_month_contracts,
-        front_expiry=chain_analysis.get("expiry"),
+        front_expiry=front_expiry,
         back_expiry=back_expiry,
         iv=vol_layer.get("iv") if isinstance(vol_layer.get("iv"), (int, float)) else None,
         ticker=sym,
+        shares_held=int(chain_analysis.get("shares_held") or chain_analysis.get("sharesHeld") or 0),
+        shares_encumbered=int(chain_analysis.get("shares_encumbered") or 0),
+        shares_short=int(chain_analysis.get("shares_short") or 0),
+        share_avg_cost=chain_analysis.get("share_avg_cost"),
+        stock_ask=chain_analysis.get("stock_ask"),
+        component_contracts=chain_analysis.get("component_contracts"),
+        component_ticker=chain_analysis.get("component_symbol") or chain_analysis.get("component_ticker"),
+        hv=vol_layer.get("hv") if isinstance(vol_layer.get("hv"), (int, float)) else None,
     )
+    inferred = structure_name_from_legs(metrics.get("legs") or [])
+    if inferred and inferred != strategy_name:
+        built = get_strategy_spec(strategy_name)
+        # A single long put is both Married Put and Long Put. A single long call is
+        # both APEX Benchmark Greeks Strategy and Long Call. The matrix name stays.
+        # Leg shape fills in a label only when the selector did not already name a structure.
+        if built is None or built.risk_type == "advisory" or built.leg_count == 0:
+            strategy_name = inferred
     recommended = _anchor_from_metrics_legs(metrics, recommended, sym)
     scan_scores = {
         "iv_rank": vol_layer.get("iv_rank"),
@@ -1663,18 +3518,268 @@ def build_strategy_layer(
     if metrics.get("max_profit_unlimited_allowed") is not None:
         max_profit_unlimited_allowed = bool(metrics.get("max_profit_unlimited_allowed"))
     metrics = {**metrics, "max_profit_unlimited_allowed": max_profit_unlimited_allowed}
-    playbook = PLAYBOOK.get(strategy_name, {"summary": "", "execution": ""})
+    if validation_errors:
+        first = validation_errors[0]
+        notes.append(
+            f"Pre-trade check {first.get('check')}: expected {first.get('expected')}; actual {first.get('actual')}."
+        )
+    summary, execution = _structure_copy(
+        strategy_name,
+        metrics.get("legs") or [],
+        benchmark_rule=benchmark_rule,
+    )
+    if strategy_name == "Gamma Trampoline™" and isinstance(metrics, dict) and metrics.get("scenario_conflict"):
+        from app.strategies.knowledge_base import GAMMA_SCENARIOS
+
+        summary = summary.replace(GAMMA_SCENARIOS, "").strip()
+    reason = metrics.get("validation_error")
+    if metrics.get("validation_blocked") and reason:
+        summary = str(reason)
+        execution = str(reason)
+    else:
+        execution = align_exit_copy(execution, auto_exec_threshold)
+    card_text = f"{summary} {execution}"
+    block_notes: list[str] = []
+    chain_rows = contracts if isinstance(contracts, list) else []
+    option_legs = [leg for leg in (metrics.get("legs") or []) if isinstance(leg, dict) and leg.get("side") in {"call", "put"}]
+    if not validation_blocked and (_cites_spread_rule(card_text) or "mid-price" in card_text.lower() or "mid of the net" in card_text.lower()):
+        missing_mids = _apply_mid_limits(metrics, chain_rows)
+        block_notes.extend(spread_rule_failures(metrics.get("legs") or [], chain_rows))
+        if missing_mids:
+            block_notes.append(
+                "Live bid/ask mid is unavailable, so a limit at mid cannot be priced for "
+                + ", ".join(missing_mids)
+                + "."
+            )
+        elif "limit at the live bid or ask" not in execution:
+            execution = (
+                f"{execution} Option orders are a limit at the live bid or ask."
+            ).strip()
+    spread_cap = None
+    if strategy_name in CREDIT_STRUCTURES:
+        spread_cap = 0.10
+    elif strategy_name in {APEX_STRATEGY_NAME, "Gamma Trampoline™"}:
+        spread_cap = 0.08
+    if spread_cap is not None:
+        for leg in option_legs:
+            source = _contract_for_leg(leg, chain_rows)
+            spread_pct = _leg_spread_pct(source)
+            if spread_pct is not None and spread_pct >= spread_cap:
+                bid, ask = source.get("bid"), source.get("ask")
+                slip = ""
+                if (
+                    isinstance(bid, (int, float))
+                    and not isinstance(bid, bool)
+                    and isinstance(ask, (int, float))
+                    and not isinstance(ask, bool)
+                    and float(ask) >= float(bid)
+                ):
+                    dollars = round((float(ask) - float(bid)) / 2.0 * 100.0, 2)
+                    slip = f" Estimated slippage is ${dollars:.2f}."
+                block_notes.append(
+                    f"bid/ask spread is {spread_pct * 100:.1f}% of mid, not below {spread_cap * 100:.0f}%.{slip}"
+                )
+    # IV < HV belongs to Rule 1 names only. Copy that mentions the old theta line does not apply it.
+    if not validation_blocked and strategy_name in PLAIN_LONG_PREMIUM:
+        block_notes.extend(
+            rule1_buy_failures(
+                metrics.get("legs") or [],
+                chain_rows,
+                hv=vol_layer.get("hv"),
+                check_iv_below_hv=True,
+            )
+        )
+    iv_rank_value = vol_layer.get("iv_rank")
+    if (
+        strategy_name in PLAIN_LONG_PREMIUM
+        and isinstance(iv_rank_value, (int, float))
+        and not isinstance(iv_rank_value, bool)
+        and float(iv_rank_value) > 70
+    ):
+        block_notes.append("IV rank is above 70, so a plain long call or long put is not selected")
+    spot_px = chain_analysis.get("spot") if isinstance(chain_analysis.get("spot"), (int, float)) else None
+    if option_legs:
+        block_notes.extend(suspect_quote_failures(option_legs, chain_rows, spot=spot_px))
+    stale_phrase = _stale_quote_phrase(option_legs, chain_rows)
+    if stale_phrase:
+        block_notes = [
+            stale_phrase if ("stale" in note.lower() or "suspect" in note.lower()) else note
+            for note in block_notes
+        ]
+    _apply_marketable_limits(metrics, chain_rows)
+    exit_level = printed_exit_level(execution)
+    if exit_level is not None and composite < exit_level:
+        block_notes.append(
+            f"Composite {float(composite):.1f} is already below the exit level { _threshold_token(exit_level) } printed on the card."
+        )
+    earn_days, earn_confirmed, earn_discussed = _earnings_inputs(fundamentals_layer, sentiment_layer)
+    earnings_sentence: str | None = None
+    if earn_discussed:
+        earn_block, earn_note = earnings_position_note(strategy_name, days=earn_days, confirmed=earn_confirmed)
+        if earn_note and earn_note not in notes and earn_note not in block_notes:
+            notes.append(earn_note)
+        if earn_block:
+            block_notes.append(earn_note or "Earnings are within 1 day.")
+        next_raw = None
+        calendar = (fundamentals_layer or {}).get("earnings_calendar")
+        alert = (sentiment_layer or {}).get("earnings_alert")
+        if isinstance(calendar, dict):
+            next_raw = calendar.get("next_date")
+        if not next_raw and isinstance(alert, dict):
+            next_raw = alert.get("next_date")
+        expiries = [str(leg.get("expiry")) for leg in option_legs if leg.get("expiry")]
+        latest_expiry = max(expiries) if expiries else chain_analysis.get("expiry")
+        earn_source = None
+        if isinstance(calendar, dict):
+            earn_source = calendar.get("source")
+        if not earn_source and isinstance(alert, dict):
+            earn_source = alert.get("source")
+        inside, crush_note = earnings_before_expiry(
+            next_raw,
+            latest_expiry,
+            confirmed=earn_confirmed and bool(next_raw),
+        )
+        if (
+            isinstance(calendar, dict)
+            and calendar.get("date_status") == "estimated"
+            and isinstance(crush_note, str)
+            and crush_note.startswith("Earnings on ")
+        ):
+            shown = calendar.get("display") or next_raw
+            if isinstance(shown, str) and shown.strip():
+                label = shown if shown.endswith("est.") else f"{shown} est."
+                tail = crush_note.split(" before expiry", 1)
+                if len(tail) == 2:
+                    crush_note = f"Earnings on {label} before expiry{tail[1]}"
+        if (
+            isinstance(calendar, dict)
+            and calendar.get("earnings_applicable") is False
+        ):
+            crush_note = None
+            earn_note = None
+        if crush_note == "Earnings date is unconfirmed." and isinstance(calendar, dict):
+            if calendar.get("earnings_applicable") is False:
+                crush_note = None
+            elif calendar.get("date_status") == "estimated":
+                shown = calendar.get("display")
+                crush_note = f"Earnings date {shown}." if isinstance(shown, str) and shown else None
+        if crush_note and crush_note not in notes:
+            notes.append(crush_note)
+            earnings_sentence = crush_note
+        if inside and strategy_name in PLAIN_LONG_PREMIUM and not earnings_risk_opt_in:
+            block_notes.append(crush_note or "Earnings before expiry blocks auto-execute on a single-leg long option.")
+    elif strategy_name != APEX_STRATEGY_NAME and any("Earnings are within 1 day." in note for note in notes):
+        block_notes.append("Earnings are within 1 day.")
+    deduped_blocks: list[str] = []
+    for block_note in block_notes:
+        if block_note and block_note not in deduped_blocks:
+            deduped_blocks.append(block_note)
+    block_notes = deduped_blocks
+    for block_note in block_notes:
+        if block_note not in notes:
+            notes.append(block_note)
+    deduped_notes: list[str] = []
+    for note in notes:
+        if note not in deduped_notes:
+            deduped_notes.append(note)
+    notes = deduped_notes
+    from app.services.stock_leg import leg_completeness_error
+
+    completeness = leg_completeness_error(strategy_name, metrics.get("legs") or [])
+    if completeness:
+        block_notes.append(completeness)
+        validation_blocked = True
+        if completeness not in notes:
+            notes.append(completeness)
+    _apply_mid_limits(metrics, chain_rows)
+    auto_exec_blocked = bool(block_notes) or validation_blocked
+    checks_passed = not auto_exec_blocked
+    position_action = hysteresis_action(composite, in_position=in_position)
+    regime_iv = vol_layer.get("atm_iv")
+    if regime_iv is None:
+        regime_iv = vol_layer.get("iv")
+    back_pool = back_month_contracts if isinstance(back_month_contracts, list) else []
+    iv_pools = [chain_rows, back_pool]
+    front_iv, back_iv = _front_back_iv(option_legs, iv_pools, vol_layer)
+    regime_view = assess_vol_regime(
+        iv=regime_iv,
+        hv=vol_layer.get("hv"),
+        iv_rank=vol_layer.get("iv_rank"),
+        vol_signal=vol_signal,
+        front_iv=front_iv,
+        back_iv=back_iv,
+        inversion_flagged=bool(vol_layer.get("term_structure_inverted")),
+    )
+    regime = regime_view.display
+    if position_action == "no_entry" and not auto_exec_blocked:
+        lead = (
+            f"Composite {float(composite):.1f}/100 is below the entry line ({entry_composite_min():.0f}), "
+            "so this is not a new entry."
+        )
+    elif position_action == "hold" and not auto_exec_blocked:
+        lead = (
+            f"Composite {float(composite):.1f}/100 is at or above the exit line ({exit_composite_min():.0f}), "
+            "so an open position is held."
+        )
+    elif position_action == "exit" and not auto_exec_blocked:
+        lead = (
+            f"Composite {float(composite):.1f}/100 is below the exit line ({exit_composite_min():.0f})."
+        )
+    elif tier == "caution" and not auto_exec_blocked:
+        lead = (
+            f"Composite {float(composite):.1f}/100 — manual review required below your auto-execution threshold "
+            f"({auto_exec_threshold:.0f})."
+        )
+    elif not auto_exec_blocked:
+        lead = f"Composite {float(composite):.1f}/100 meets your auto-execution threshold ({auto_exec_threshold:.0f})."
+    else:
+        lead = f"Composite {float(composite):.1f}."
+    rank_reason = vol_layer.get("iv_rank_gap") if isinstance(vol_layer.get("iv_rank_gap"), str) else None
+    if rank_reason is None and isinstance(vol_layer.get("iv_rank_invalid"), str):
+        rank_reason = vol_layer.get("iv_rank_invalid")
+    iv_rank_text = format_iv_rank_with_reason(vol_layer.get("iv_rank"), rank_reason)
+    conflict_note, low_conviction = _sentiment_fit_note(
+        strategy_name=strategy_name,
+        direction=direction,
+        tech_score=tech_score,
+        sentiment_layer=sentiment_layer,
+    )
+    vega_note = _selected_vega_note(strategy_name, regime_view)
+    if vega_note:
+        notes.append(vega_note)
+    event_note, event_points = _earnings_span_note(
+        option_legs,
+        fundamentals_layer=fundamentals_layer,
+        sentiment_layer=sentiment_layer,
+        hv=vol_layer.get("hv"),
+        pools=iv_pools,
+    )
+    if event_note:
+        notes.append(event_note)
+    dte_note = dte_switch_note or _dte_window_note(
+        strategy_name,
+        chain_analysis=chain_analysis,
+        vol_layer=vol_layer,
+        option_legs=option_legs,
+    )
     why_parts = [
-        f"Composite {composite}/100 — manual review required below your auto-execution threshold ({auto_exec_threshold:.0f})."
-        if tier == "caution"
-        else f"Composite {composite}/100 meets your auto-execution threshold ({auto_exec_threshold:.0f}).",
+        lead,
         f"Technical bias {direction} (score {tech_score}).",
-        f"Volatility regime: {vol_signal} (IV rank {vol_layer.get('iv_rank', '—')}).",
+        _trader_vol_sentence(regime_view, vol_layer, iv_rank_text),
     ]
-    if sentiment_layer.get("bias"):
-        why_parts.append(f"Sentiment {sentiment_layer.get('bias')} on 0–100 scale {sentiment_layer.get('score_0_100', '—')}.")
-    if fundamentals_layer.get("score") is not None:
-        why_parts.append(f"Fundamentals score {fundamentals_layer.get('score')}.")
+    if earnings_sentence:
+        why_parts.append(earnings_sentence)
+    if conflict_note:
+        why_parts.append(conflict_note)
+    if event_note:
+        why_parts.append(event_note)
+    if dte_note:
+        why_parts.append(dte_note)
+    if auto_exec_blocked:
+        why_parts.append(_trader_failed_checks(block_notes))
+    payoff_line = _payoff_sentence(metrics)
+    if payoff_line:
+        why_parts.append(payoff_line)
 
     selection_rationale = selection_rationale_for(
         strategy_name,
@@ -1682,33 +3787,362 @@ def build_strategy_layer(
         tech_score=tech_score,
         vol_signal=vol_signal,
     )
-    if selection_rationale:
-        why_parts.append(selection_rationale)
+    if strategy_name == "APEX Benchmark Greeks Strategy":
+        from app.strategies.knowledge_base import RULE1_RATIO, RULE1_RISKS, RULE1_WHY
 
+        option_rows = [leg for leg in option_legs if leg.get("action") == "buy"]
+        if len(option_legs) == 1 and option_rows:
+            why_parts.append(RULE1_WHY)
+            why_parts.append(RULE1_RATIO)
+            if RULE1_RISKS not in notes:
+                notes.append(RULE1_RISKS)
+    if benchmark_rule == "rule2":
+        from app.strategies.knowledge_base import RULE2_PROBABILITY, RULE2_RISKS, RULE2_WHY
+
+        why_parts.append(RULE2_WHY)
+        why_parts.append(RULE2_PROBABILITY)
+        if RULE2_RISKS not in notes:
+            notes.append(RULE2_RISKS)
+    if strategy_name == "Gamma Trampoline™":
+        from app.strategies.knowledge_base import GAMMA_GREEKS, GAMMA_PROBLEM
+
+        why_parts.append(GAMMA_PROBLEM)
+        why_parts.append(GAMMA_GREEKS)
+
+    defined = is_defined_risk_strategy(strategy_name)
+    score_clears = (
+        position_action == "enter"
+        and composite >= auto_exec_threshold
+        and defined
+        and not validation_blocked
+        and not auto_exec_blocked
+    )
+    hard_blocks, spread_blocks = split_block_notes(block_notes)
+    if validation_blocked and not hard_blocks:
+        detail = None
+        if validation_errors:
+            first = validation_errors[0]
+            check = first.get("check") or "validation"
+            detail = (
+                f"Pre-trade check {check}: expected {first.get('expected')}; "
+                f"actual {first.get('actual')}."
+            )
+        hard_blocks = [detail or "Pre-trade validation did not pass."]
+    placeable = not validation_blocked and not hard_blocks
+    executable_flag = bool(placeable and not spread_blocks and defined and not auto_exec_blocked)
+    validation_flag = not validation_blocked and not hard_blocks
+    exec_reason = None
+    if not executable_flag:
+        if hard_blocks:
+            exec_reason = hard_blocks[0]
+        elif spread_blocks:
+            exec_reason = spread_blocks[0]
+        elif not defined:
+            exec_reason = "The structure is not defined risk."
+        elif block_notes:
+            exec_reason = block_notes[0]
+        else:
+            exec_reason = "Not executable."
+    decision = can_auto_execute(
+        {
+            "composite_score": composite,
+            "executable": executable_flag,
+            "validation_passed": validation_flag,
+            "executability_reason": exec_reason,
+            "validation_reason": hard_blocks[0] if not validation_flag else None,
+        },
+        {"auto_execution_threshold": auto_exec_threshold},
+    )
+    status_line = eligibility_sentence(composite, auto_exec_threshold, decision)
+    structure_label = _protective_put_label(
+        metrics.get("legs") or [],
+        covered=bool(metrics.get("equity_covered_by_holdings")),
+    )
+    quote_not_current = any("quote not current" in note.lower() for note in hard_blocks)
+    quote_as_of = None
+    for leg in option_legs:
+        source = _contract_for_leg(leg, chain_rows)
+        quote_as_of = source.get("quote_as_of") or leg.get("quote_as_of") or quote_as_of
+    from app.contracts import VolRegime
+
+    scan_key = str(ticker or chain_analysis.get("symbol") or "scan")
+    record_ledger(
+        scan_id=scan_key,
+        kind="value",
+        key="vol_regime",
+        value=VolRegime(
+            ivMinusHvPts=regime_view.iv_minus_hv_pts,
+            ivToHv=regime_view.iv_to_hv,
+            ivRank=regime_view.iv_rank,
+            verdict=regime_view.verdict,
+            rule=regime_view.rule,
+        ),
+        inputs={
+            "iv": regime_iv,
+            "hv": vol_layer.get("hv"),
+            "iv_rank": vol_layer.get("iv_rank"),
+            "display": regime,
+        },
+        fn="build_strategy_layer",
+    )
+    if vega_note:
+        record_ledger(
+            scan_id=scan_key,
+            kind="score",
+            key="vega_regime",
+            value=vega_note,
+            inputs={"strategy": strategy_name, "regime": regime_view.short},
+            fn="build_strategy_layer",
+        )
+    if event_note:
+        record_ledger(
+            scan_id=scan_key,
+            kind="score",
+            key="event_vega",
+            value=event_note,
+            inputs={"strategy": strategy_name},
+            fn="build_strategy_layer",
+        )
+    if dte_note:
+        record_ledger(
+            scan_id=scan_key,
+            kind="gate",
+            key="dte_window",
+            value=dte_note,
+            inputs={"strategy": strategy_name},
+            fn="build_strategy_layer",
+        )
+    if conflict_note:
+        record_ledger(
+            scan_id=scan_key,
+            kind="score",
+            key="sentiment_conflict",
+            value=conflict_note,
+            inputs={"direction": direction, "low_conviction": low_conviction},
+            fn="build_strategy_layer",
+        )
+    fit = " ".join(why_parts)
+    from app.analysis.gate_config import IV_RANK_CHEAP_BELOW, IV_RANK_RICH_ABOVE, gamma_front_back_iv_ratio_min
+
+    sent_score = sentiment_layer.get("score_0_100") if isinstance(sentiment_layer, dict) else None
+    margin = None
+    if isinstance(sent_score, (int, float)) and not isinstance(sent_score, bool):
+        margin = direction_margin(tech_score=float(tech_score), sentiment_score=float(sent_score))
+    fund_score = fundamentals_layer.get("score") if isinstance(fundamentals_layer, dict) else None
+    figures: dict[str, Any] = {
+        "composite": float(composite),
+        "technical": float(tech_score),
+        "sentiment": float(sent_score) if isinstance(sent_score, (int, float)) and not isinstance(sent_score, bool) else None,
+        "fundamentals": float(fund_score) if isinstance(fund_score, (int, float)) and not isinstance(fund_score, bool) else None,
+        "iv": regime_iv if isinstance(regime_iv, (int, float)) and not isinstance(regime_iv, bool) else None,
+        "hv": vol_layer.get("hv") if isinstance(vol_layer.get("hv"), (int, float)) else None,
+        "iv_rank": regime_view.iv_rank,
+        "iv_minus_hv_pts": regime_view.iv_minus_hv_pts,
+        "iv_to_hv": regime_view.iv_to_hv,
+        "threshold_auto_exec": float(auto_exec_threshold),
+        "threshold_entry": float(entry_composite_min()),
+        "threshold_exit": float(exit_composite_min()),
+        "threshold_vol_band": float(IV_MISMATCH_VOL_POINTS),
+        "threshold_iv_rank_cheap": float(IV_RANK_CHEAP_BELOW),
+        "threshold_iv_rank_rich": float(IV_RANK_RICH_ABOVE),
+        "threshold_inversion": float(gamma_front_back_iv_ratio_min()),
+        "threshold_direction_margin": float(direction_margin_min()),
+        "vega_penalty": float(LONG_VEGA_RICH_PENALTY),
+        "direction_margin": margin,
+        "technical_weighted_vote": (
+            abs(float(tech_score)) * float(APEX_COMPOSITE_WEIGHTS["technicals"])
+            if isinstance(sent_score, (int, float)) and not isinstance(sent_score, bool)
+            else None
+        ),
+        "sentiment_weighted_vote": (
+            abs((float(sent_score) - 50.0) * 2.0) * float(APEX_COMPOSITE_WEIGHTS["sentiment"])
+            if isinstance(sent_score, (int, float)) and not isinstance(sent_score, bool)
+            else None
+        ),
+        "event_vega_points": event_points,
+        "weight_technical": float(APEX_COMPOSITE_WEIGHTS["technicals"]),
+        "weight_sentiment": float(APEX_COMPOSITE_WEIGHTS["sentiment"]),
+        "scale_low": 0,
+        "scale_high": 100,
+        "leg_count": len(option_legs),
+        "threshold_theta_cap_pct": round(float(theta_max_pct_per_day()) * 100.0, 2),
+        "threshold_rule1_theta": 0.05,
+        "threshold_rule1_delta": 0.55,
+        "threshold_delta_theta": 10,
+        "symbol": str(ticker or chain_analysis.get("symbol") or ""),
+    }
+    if (
+        isinstance(front_iv, (int, float))
+        and not isinstance(front_iv, bool)
+        and isinstance(back_iv, (int, float))
+        and not isinstance(back_iv, bool)
+        and float(back_iv) > 0
+    ):
+        # The term-structure sentence prints this ratio to two decimals.
+        figures["front_iv"] = float(front_iv)
+        figures["back_iv"] = float(back_iv)
+        figures["front_back_iv_ratio"] = round(float(front_iv) / float(back_iv), 2)
+    calendar = fundamentals_layer.get("earnings_calendar") if isinstance(fundamentals_layer, dict) else None
+    if isinstance(calendar, dict) and calendar.get("next_date"):
+        figures["earnings_date"] = str(calendar.get("next_date"))[:10]
+    window = dte_window_for(strategy_name)
+    if window is not None:
+        figures["threshold_dte_min"] = int(window[0])
+        if window[1] is not None:
+            figures["threshold_dte_max"] = int(window[1])
+    selected_expiry = chain_analysis.get("expiry") or (option_legs[0].get("expiry") if option_legs else None)
+    selected_dte = _dte_from_expiry(str(selected_expiry) if selected_expiry else None)
+    if selected_dte is not None:
+        figures["selected_dte"] = int(selected_dte)
+    for index, leg in enumerate(option_legs):
+        source = _contract_for_leg(leg, chain_rows)
+        for field in ("strike", "bid", "ask", "delta", "iv", "theta", "mid", "quantity"):
+            raw = source.get(field) if isinstance(source, dict) else None
+            if raw is None:
+                raw = leg.get(field)
+            if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                figures[f"leg{index}_{field}"] = float(raw)
+        mid = leg.get("mid")
+        theta = leg.get("theta")
+        if (
+            isinstance(mid, (int, float))
+            and isinstance(theta, (int, float))
+            and not isinstance(mid, bool)
+            and not isinstance(theta, bool)
+            and float(mid) > 0
+        ):
+            figures[f"leg{index}_theta_pct"] = round(abs(float(theta)) / float(mid) * 100.0, 2)
+        theta_raw = figures.get(f"leg{index}_theta")
+        delta_raw = figures.get(f"leg{index}_delta")
+        if isinstance(theta_raw, float):
+            figures[f"leg{index}_theta_abs"] = abs(theta_raw)
+        if isinstance(theta_raw, float) and isinstance(delta_raw, float) and theta_raw != 0:
+            figures[f"leg{index}_delta_over_theta"] = abs(delta_raw) / abs(theta_raw)
+        expiry = leg.get("expiry") or (source.get("expiry") if isinstance(source, dict) else None)
+        if expiry:
+            figures[f"leg{index}_expiry"] = str(expiry)[:10]
+        occ = leg.get("symbol") or (source.get("symbol") if isinstance(source, dict) else None)
+        if isinstance(occ, str) and occ.strip():
+            figures[f"leg{index}_symbol"] = occ.strip()
+        spread = _leg_spread_pct(source) if isinstance(source, dict) else None
+        if spread is not None:
+            figures[f"leg{index}_spread"] = float(spread)
+            bid, ask = source.get("bid"), source.get("ask")
+            if (
+                isinstance(bid, (int, float))
+                and isinstance(ask, (int, float))
+                and not isinstance(bid, bool)
+                and not isinstance(ask, bool)
+                and float(ask) >= float(bid)
+            ):
+                figures[f"leg{index}_slippage"] = round((float(ask) - float(bid)) / 2.0 * 100.0, 2)
+    metric_queue: list[tuple[str, Any]] = [("metric", metrics)]
+    while metric_queue and len(figures) < 400:
+        prefix, node = metric_queue.pop()
+        if isinstance(node, dict):
+            for key, val in node.items():
+                if key in {"legs", "validation_error"}:
+                    continue
+                metric_queue.append((f"{prefix}_{key}", val))
+        elif isinstance(node, (list, tuple)):
+            for offset, val in enumerate(node[:12]):
+                metric_queue.append((f"{prefix}_{offset}", val))
+        elif isinstance(node, (int, float)) and not isinstance(node, bool):
+            figures[prefix] = float(node)
+        elif isinstance(node, str) and re.fullmatch(r"[A-Z]{1,5}", node.strip()):
+            figures[prefix] = node.strip()
+    if strategy_name == "APEX Benchmark Greeks Strategy" or benchmark_rule:
+        figures.update({"rule_ratio": 10, "rule_move_pct": 0.01, "rule_final_dte": 21})
+    if benchmark_rule == "rule2":
+        figures.update({"short_delta_cap": 0.20, "model_probability": 0.80, "profit_take": 0.50, "loss_multiple": 2})
+    # The credit-spread playbook cites this cap. Record the settings value the sentence prints.
+    short_cap = rule2_short_delta_max()
+    if f"{short_cap:.2f}" in execution:
+        figures.setdefault("short_delta_cap", float(short_cap))
+    if strategy_name == "Gamma Trampoline™":
+        figures.update({"gamma_days_min": 5, "gamma_days_max": 10})
+    outlook = _outlook_for(strategy_name, direction)
+    if low_conviction and margin is not None:
+        outlook = (
+            f"{outlook}, low conviction, direction margin {margin:.1f} "
+            f"versus threshold {direction_margin_min():g}."
+        )
+    narrative = _narrative_line(str(strategy_name), summary, execution)
+    fit, execution, notes, summary, status_line, narrative = _guard_strategy_card(
+        scan_id=scan_key,
+        strategy_name=strategy_name,
+        fit=fit,
+        execution=execution,
+        notes=notes,
+        summary=summary,
+        status_line=status_line,
+        narrative=narrative,
+        figures=figures,
+        feed=vol_layer.get("feed") if isinstance(vol_layer, dict) else None,
+        quote_as_of=quote_as_of,
+    )
+    outlook = _guard_card_text(outlook, scan_id=scan_key, strategy_name=strategy_name)
+    equity_note = _guard_card_text(
+        str(metrics.get("equity_note") or ""),
+        scan_id=scan_key,
+        strategy_name=strategy_name,
+    ) if isinstance(metrics.get("equity_note"), str) and str(metrics.get("equity_note")).strip() else metrics.get("equity_note")
+    if isinstance(selection_rationale, str) and selection_rationale.strip():
+        selection_rationale = _guard_card_text(
+            selection_rationale,
+            scan_id=scan_key,
+            strategy_name=strategy_name,
+        )
+    hard_blocks = [
+        _guard_card_text(note, scan_id=scan_key, strategy_name=strategy_name)
+        for note in hard_blocks
+        if isinstance(note, str) and note.strip()
+    ]
+    spread_blocks = [
+        _guard_card_text(note, scan_id=scan_key, strategy_name=strategy_name)
+        for note in spread_blocks
+        if isinstance(note, str) and note.strip()
+    ]
+    block_reason = (hard_blocks or spread_blocks or [None])[0]
+    if isinstance(block_reason, str) and block_reason.strip():
+        block_reason = _guard_card_text(block_reason, scan_id=scan_key, strategy_name=strategy_name)
     return {
         "title": "Strategy playbook",
-        "tradeable": not validation_blocked,
+        "tradeable": checks_passed,
+        "checks_passed": checks_passed,
+        "execution_banner": None if checks_passed else NOT_EXECUTABLE,
         "execution_tier": tier,
-        "selected_strategy": strategy_name if not validation_blocked else NOT_TRADEABLE_COPY,
+        "selected_strategy": strategy_name,
+        "structure_label": structure_label,
         "composite_score": composite,
-        "clears_threshold": composite > EXECUTION_SCORE_BLOCKED_MAX,
+        "clears_threshold": score_clears,
+        "position_action": position_action,
+        "auto_exec_blocked": auto_exec_blocked,
         "direction": direction,
         "vol_signal": vol_signal,
+        "vol_regime": regime,
         "recommended_contract": recommended,
         "equity_required": bool(spec and spec.equity_required),
-        "equity_overlay_only": bool(
-            spec and spec.equity_required and spec.equity_leg_spec and spec.equity_leg_spec.entry_mode == "pre_existing"
-        ),
-        "what_is_this": playbook.get("summary", ""),
-        "why_recommended": " ".join(why_parts),
+        "equity_overlay_only": False,
+        "equity_note": equity_note,
+        "what_is_this": summary,
+        "why_recommended": fit,
+        "why_it_fits": fit,
+        "outlook": outlook,
+        "strategies_evaluated": strategies_evaluated,
         "selection_rationale": selection_rationale,
-        "how_to_execute": playbook.get("execution", ""),
+        "how_to_execute": execution,
+        "risk_notes": notes,
+        "auto_exec_line": status_line,
+        "auto_execute_eligible": decision.eligible,
+        "auto_exec_reasons": decision.reasons,
+        "placeable": placeable,
+        "hard_block_reasons": hard_blocks,
+        "spread_block_reasons": spread_blocks,
+        "block_reason": block_reason,
+        "quote_not_current": quote_not_current,
+        "quote_as_of": quote_as_of,
         "metrics": metrics,
         "validation_errors": validation_errors,
-        "narrative": (
-            f"Recommended: {strategy_name}. {playbook.get('summary', '')} "
-            f"{playbook.get('execution', '')}"
-            if not validation_blocked
-            else f"{NOT_TRADEABLE_COPY}. Strategy validation failed — {validation_errors[0]['check'] if validation_errors else 'leg mismatch'}."
-        ),
+        "narrative": narrative,
     }

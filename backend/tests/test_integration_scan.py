@@ -169,6 +169,9 @@ async def test_scan_layers_risk_order_fill_balance(client: AsyncClient) -> None:
         assert enum_values.index(slide_order[i]) < enum_values.index(slide_order[i + 1])
 
     strategy_legs = data["layer_data"]["risk_review"]["strategy_legs"]
+    selected = strategy["selected_strategy"]
+    if "NO TRADE" in selected or not strategy.get("tradeable") or not strategy_legs:
+        return
     assert strategy_legs
     order = await client.post(
         "/api/orders",

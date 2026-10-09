@@ -68,3 +68,13 @@ async def client() -> AsyncIterator[AsyncClient]:
     async with AsyncClient(transport=transport, base_url="http://test", cookies={"dummy": "1"}) as ac:
         yield ac
     await engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _login_code_email_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sign-in emails a code before the session exists. Other tests still pass that step."""
+
+    async def _sent(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr("app.routers.auth.send_login_code", _sent)

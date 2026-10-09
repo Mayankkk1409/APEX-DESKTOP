@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import { humanizeLabel } from "../lib/humanizeLabel";
+import { formatEarningsDate } from "../lib/quoteMeta";
 import type { FundamentalsLayer } from "../types";
 
 function dash(v: string | number | null | undefined): string {
@@ -77,11 +78,21 @@ function buildFactorCards(data: FundamentalsLayer): FactorCard[] {
     {
       id: "earnings",
       title: "Earnings timing",
-      body: cal.next_date
-        ? `Next earnings ${cal.next_date}${cal.dte != null ? ` (${cal.dte} DTE)` : ""}.`
-        : cal.last_reported
-          ? `Last reported ${cal.last_reported}.`
-          : "Earnings timing unavailable.",
+      body: (() => {
+        const extra = cal as typeof cal & {
+          date_status?: string;
+          display?: string | null;
+          earnings_applicable?: boolean;
+          security_type?: string;
+        };
+        if (extra.earnings_applicable === false) {
+          return `${data.symbol} is classified as ${extra.security_type || "ETF"}. An issuer earnings date does not apply.`;
+        }
+        const shown = formatEarningsDate(extra.display || cal.next_date, extra.date_status);
+        if (shown) return `Next earnings ${shown}${cal.dte != null ? ` (${cal.dte} DTE)` : ""}.`;
+        if (extra.date_status === "unknown") return "Earnings date is unknown. This is a data gap.";
+        return cal.last_reported ? `Last reported ${cal.last_reported}.` : "Earnings timing unavailable.";
+      })(),
     },
   ];
 }
