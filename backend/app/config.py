@@ -60,6 +60,14 @@ class Settings(BaseSettings):
     api_public_base_url: str = "http://localhost:8000"
     frontend_base_url: str = "http://localhost:5173"
 
+    # Optional SMTP for the signup confirmation. An empty host skips mail.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    smtp_starttls: bool = True
+
     default_symbol: str = "SPX"
     splash_duration_ms: int = Field(default=3000, ge=2500, le=3500)
 
@@ -107,6 +115,21 @@ class Settings(BaseSettings):
     gamma_spread_max: float = 0.08
     gamma_back_week_days: int = 14
     gamma_back_week_tolerance_days: int = 4
+
+    @field_validator("smtp_host", "smtp_username", "smtp_from", mode="before")
+    @classmethod
+    def strip_smtp_text(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @field_validator("smtp_password", mode="before")
+    @classmethod
+    def smtp_password_without_spaces(cls, value: object) -> object:
+        # Gmail shows app passwords in groups of four. The login value has no spaces.
+        if isinstance(value, str):
+            return "".join(value.split())
+        return value
 
     @field_validator("entry_composite_min")
     @classmethod
