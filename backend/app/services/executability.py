@@ -197,7 +197,8 @@ def spread_confirmation_text(
     slip = f"${slippage:.2f}" if slippage is not None else "unavailable"
     return (
         f"Bid/ask spread is {spread_pct * 100:.1f}% of mid, wider than the "
-        f"{threshold * 100:.0f}% cap. Estimated slippage {slip}."
+        f"{threshold * 100:.0f}% cap. Estimated slippage {slip}. "
+        "The price you would pay is not reliable."
     )
 
 

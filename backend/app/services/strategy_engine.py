@@ -305,37 +305,62 @@ def compute_strategy_metrics(
 
     if "Iron Condor" in strategy_name:
         assert_strategy_handler(strategy_name, resolve_strategy_id(strategy_name) or "short_iron_condor")
-        short_put = _pick_strike(contracts, "put", atm, 0.20)
-        long_put = min(
-            (c for c in contracts if c.get("side") == "put" and short_put and c.get("strike", 0) < short_put["strike"]),
-            key=lambda c: c["strike"],
-            default=None,
+        from app.strategies.chain_utils import short_and_wing
+
+        wide = "wide" in strategy_name.lower()
+        long_body = "Long Iron" in strategy_name or strategy_name.startswith("Reverse")
+        put_pair = short_and_wing(contracts, "put", float(atm), 0.20, wide=wide)
+        call_pair = short_and_wing(contracts, "call", float(atm), 0.20, wide=wide)
+        if not put_pair or not call_pair:
+            metrics.update(
+                {
+                    "legs": [],
+                    "validation_blocked": True,
+                    "validation_error": (
+                        "A short iron condor needs a long put, a short put, a short call, and a long call. "
+                        "A wing quote is not on this chain, so the structure was not built."
+                    ),
+                }
+            )
+            return metrics
+        short_put, long_put = put_pair
+        short_call, long_call = call_pair
+        plan = (
+            [("buy", short_put), ("sell", long_put), ("buy", short_call), ("sell", long_call)]
+            if long_body
+            else [("sell", short_put), ("buy", long_put), ("sell", short_call), ("buy", long_call)]
         )
-        short_call = _pick_strike(contracts, "call", atm, 0.20)
-        long_call = min(
-            (c for c in contracts if c.get("side") == "call" and short_call and c.get("strike", 0) > short_call["strike"]),
-            key=lambda c: c["strike"],
-            default=None,
-        )
-        for action, c in [("sell", short_put), ("buy", long_put), ("sell", short_call), ("buy", long_call)]:
+        for action, c in plan:
             lg = leg(action, c)
-            if lg:
+            if lg and lg.get("symbol"):
                 legs.append(lg)
+        if len(legs) != 4:
+            metrics.update(
+                {
+                    "legs": [],
+                    "validation_blocked": True,
+                    "validation_error": (
+                        "A short iron condor needs a long put, a short put, a short call, and a long call. "
+                        "A wing quote is not on this chain, so the structure was not built."
+                    ),
+                }
+            )
+            return metrics
         credits = sum(l["mid"] or 0 for l in legs if l["action"] == "sell")
         debits = sum(l["mid"] or 0 for l in legs if l["action"] == "buy")
         net = credits - debits
-        put_width = (short_put["strike"] - long_put["strike"]) if short_put and long_put else 0
-        call_width = (long_call["strike"] - short_call["strike"]) if short_call and long_call else 0
+        put_width = short_put["strike"] - long_put["strike"]
+        call_width = long_call["strike"] - short_call["strike"]
         width = max(put_width, call_width)
         metrics.update(
             {
-                "net_debit_credit": round(net, 2),
+                "net_debit_credit": round(abs(debits - credits), 2),
                 "net_type": "credit" if net >= 0 else "debit",
                 "max_profit": round(net * contract_multiplier, 2) if net > 0 else None,
                 "max_loss": round((width - net) * contract_multiplier, 2) if width and net >= 0 else None,
                 "breakevens": [
-                    round(short_put["strike"] - net, 2) if short_put else None,
-                    round(short_call["strike"] + net, 2) if short_call else None,
+                    round(short_put["strike"] - net, 2),
+                    round(short_call["strike"] + net, 2),
                 ],
                 "legs": legs,
             }

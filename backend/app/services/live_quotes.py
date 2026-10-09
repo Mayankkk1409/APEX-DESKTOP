@@ -56,8 +56,10 @@ HTTP_HEADERS = {
 
 _CACHE_TTL_SECONDS = 8.0
 _bundle_cache: dict[str, tuple[float, "_Bundle"]] = {}
+_bundle_inflight: dict[str, asyncio.Task["_Bundle"]] = {}
 _SESSION_TTL_SECONDS = 3600.0
 _session_cache: tuple[float, list[tuple[datetime, datetime]]] | None = None
+_session_inflight: asyncio.Task[list[tuple[datetime, datetime]]] | None = None
 
 
 @dataclass
@@ -104,9 +106,11 @@ class _Bundle:
 
 
 def clear_quote_cache() -> None:
-    global _session_cache
+    global _session_cache, _session_inflight
     _bundle_cache.clear()
+    _bundle_inflight.clear()
     _session_cache = None
+    _session_inflight = None
 
 
 def parse_number(value: Any) -> float | None:
@@ -672,7 +676,20 @@ async def _load_bundle(symbol: str, settings: Settings) -> _Bundle:
     cached = _bundle_cache.get(symbol)
     if cached and now - cached[0] < _CACHE_TTL_SECONDS:
         return cached[1]
+    inflight = _bundle_inflight.get(symbol)
+    if inflight is not None:
+        return await inflight
+    task = asyncio.create_task(_fetch_bundle(symbol, settings))
+    _bundle_inflight[symbol] = task
+    try:
+        return await task
+    finally:
+        if _bundle_inflight.get(symbol) is task:
+            _bundle_inflight.pop(symbol, None)
 
+
+async def _fetch_bundle(symbol: str, settings: Settings) -> _Bundle:
+    now = time.monotonic()
     meta = _index_meta(symbol)
     bundle = _Bundle(
         symbol=symbol,
@@ -851,16 +868,29 @@ async def _fetch_alpaca_calendar(settings: Settings) -> list[tuple[datetime, dat
 
 async def regular_market_sessions(settings: Settings) -> list[tuple[datetime, datetime]]:
     """Alpaca market calendar when the broker answers; otherwise weekday regular hours."""
-    global _session_cache
+    global _session_inflight
     now = time.monotonic()
     if _session_cache and now - _session_cache[0] < _SESSION_TTL_SECONDS:
         return _session_cache[1]
-    fetched = await _fetch_alpaca_calendar(settings)
-    anchor = datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York")).date()
-    sessions = fetched if fetched else weekday_sessions(anchor)
-    if fetched:
-        _session_cache = (now, sessions)
-    return sessions
+    if _session_inflight is not None:
+        return await _session_inflight
+
+    async def load() -> list[tuple[datetime, datetime]]:
+        global _session_cache
+        fetched = await _fetch_alpaca_calendar(settings)
+        anchor = datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York")).date()
+        sessions = fetched if fetched else weekday_sessions(anchor)
+        if fetched:
+            _session_cache = (time.monotonic(), sessions)
+        return sessions
+
+    task = asyncio.create_task(load())
+    _session_inflight = task
+    try:
+        return await task
+    finally:
+        if _session_inflight is task:
+            _session_inflight = None
 
 
 async def get_live_quote(symbol: str, settings: Settings) -> Quote:

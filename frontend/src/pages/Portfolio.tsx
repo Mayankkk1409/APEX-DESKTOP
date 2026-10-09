@@ -14,7 +14,7 @@ import { useAccountOverallPnl } from "../hooks/useAccountOverallPnl";
 import { useBrokerage } from "../hooks/useBrokerage";
 import { defaultAccountLabel, usePositionCertificate } from "../hooks/usePositionCertificate";
 import { daysForPosition } from "../lib/dailyPnl";
-import { refreshDeskQueries } from "../lib/deskRefresh";
+import { DESK_STALE_MS, refreshDeskQueries } from "../lib/deskRefresh";
 import { filterPnlPoints, type PnlTimeframe } from "../lib/pnlTimeframe";
 import { assetLabel, fmtBalance, fmtMoney, fmtPlain, fmtTs } from "../lib/portfolioFormat";
 import { isRiskProfile, patchUserSettings, readUserSettings, type RiskProfile } from "../lib/userSettings";
@@ -92,30 +92,35 @@ export function Portfolio() {
     queryKey: ["port"],
     queryFn: () => api.portfolio(),
     enabled: !usingBrokerage,
+    staleTime: DESK_STALE_MS,
   });
   const paperPnlHistory = useQuery({
     queryKey: ["pnl-history"],
     queryFn: () => api.pnlHistory(),
     enabled: !usingBrokerage,
     retry: 2,
+    staleTime: DESK_STALE_MS,
   });
   const dailyPnl = useQuery({
     queryKey: ["daily-pnl"],
     queryFn: () => api.dailyPnl(),
     enabled: !usingBrokerage,
     retry: 2,
+    staleTime: DESK_STALE_MS,
   });
   const brokerageEquityHistory = useQuery({
     queryKey: ["brokerage", "equity-history", brokerage.activeAccountId],
     queryFn: () => api.brokerageEquityHistory(brokerage.activeAccountId!),
     enabled: usingBrokerage && Boolean(brokerage.activeAccountId),
     retry: 2,
+    staleTime: DESK_STALE_MS,
   });
   const accountPnl = useAccountOverallPnl();
   const positions = useQuery({
     queryKey: ["pos"],
     queryFn: () => api.positions(),
     enabled: !usingBrokerage,
+    staleTime: DESK_STALE_MS,
   });
   const paperOrders = useQuery({
     queryKey: ["orders"],

@@ -17,7 +17,11 @@ from app.strategies.chain_utils import (
     next_higher_strike,
     next_lower_strike,
     pick_strike,
+    best_quoted,
+    has_live_quote,
+    quoted_body_wings,
     resolve_contract_from_recommended,
+    short_and_wing,
     sorted_strikes,
 )
 from app.strategies.payoffs.core import PAYOFF_FUNCTIONS, invoke_payoff
@@ -135,6 +139,55 @@ def _blocked(ctx: BuildContext, reason: str) -> tuple[list[dict[str, Any]], dict
     metrics["max_profit_unlimited_allowed"] = False
     metrics["max_loss_unlimited_allowed"] = False
     return [], metrics
+
+
+def _wing_not_listed(ctx: BuildContext, fallback_id: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Stand aside. A partial structure is not returned for the validator to reject."""
+    spec = get_strategy_spec(ctx.strategy_id) or STRATEGY_REGISTRY[fallback_id]
+    if "iron_condor" in spec.strategy_id:
+        reason = (
+            f"{spec.display_name} needs a long put, a short put, a short call, and a long call. "
+            "A wing quote is not on this chain, so the structure was not built."
+        )
+    else:
+        reason = (
+            f"{spec.display_name} needs {spec.leg_count} quoted legs. "
+            "A wing quote is not on this chain, so the structure was not built."
+        )
+    return _blocked(ctx, reason)
+
+
+def _wheel_covered_call(legs: list[dict[str, Any]]) -> bool:
+    """Shares already held: the wheel stage is stock plus a short call, not the opening put."""
+    stock = [leg for leg in legs if leg.get("side") == "stock"]
+    opts = [leg for leg in legs if leg.get("side") in {"call", "put"}]
+    return (
+        len(stock) == 1
+        and stock[0].get("action") == "buy"
+        and len(opts) == 1
+        and opts[0].get("action") == "sell"
+        and opts[0].get("side") == "call"
+    )
+
+
+def _without_partial_legs(ctx: BuildContext, spec: StrategySpec, metrics: dict[str, Any]) -> dict[str, Any]:
+    """A built structure matches the registry count, or it is not a structure."""
+    if spec.leg_count <= 0:
+        return metrics
+    legs = [leg for leg in (metrics.get("legs") or []) if isinstance(leg, dict)]
+    if len(legs) == spec.leg_count:
+        return metrics
+    if ctx.strategy_id == "wheel_strategy" and _wheel_covered_call(legs):
+        return metrics
+    if metrics.get("validation_blocked") and not legs:
+        return metrics
+    reason = metrics.get("validation_error")
+    if not isinstance(reason, str) or not reason.strip():
+        reason = (
+            f"{spec.display_name} needs {spec.leg_count} legs. "
+            "This chain does not quote the full structure, so it was not built."
+        )
+    return _blocked(ctx, reason)[1]
 
 
 def _without_closed_form(metrics: dict[str, Any]) -> dict[str, Any]:
@@ -279,17 +332,19 @@ def _build_single_short(ctx: BuildContext, side: Side) -> tuple[list[dict[str, A
 
 
 def _build_vertical_debit(ctx: BuildContext, side: Side, *, wide: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    long_c = pick_strike(ctx.contracts, side, ctx.spot, 0.55) or nearest_strike_contract(ctx.contracts, side, ctx.spot)
-    if not long_c:
-        return [], _empty_metrics(ctx.contract_multiplier)
+    pair = short_and_wing(ctx.contracts, side, ctx.spot, 0.55, wide=wide)
+    if not pair:
+        return _wing_not_listed(ctx, "bull_call_spread")
+    long_c, short_c = pair
     ls = float(long_c["strike"])
-    short_c = next_higher_strike(ctx.contracts, side, ls, wide=wide) if side == "call" else next_lower_strike(ctx.contracts, side, ls, wide=wide)
     legs = [lg for lg in [make_option_leg("buy", long_c, expiry=ctx.front_expiry), make_option_leg("sell", short_c, expiry=ctx.front_expiry)] if lg]
+    if len(legs) != 2:
+        return _wing_not_listed(ctx, "bull_call_spread")
     net, nt = net_debit_credit(legs)
     payoff = invoke_payoff(
         "payoff_vertical_debit",
         long_strike=ls,
-        short_strike=float(short_c["strike"]) if short_c else ls + 5,
+        short_strike=float(short_c["strike"]),
         net_debit=net,
         side=side,
         contract_multiplier=ctx.contract_multiplier,
@@ -299,18 +354,20 @@ def _build_vertical_debit(ctx: BuildContext, side: Side, *, wide: bool = False) 
 
 
 def _build_vertical_credit(ctx: BuildContext, side: Side) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    short_c = pick_strike(ctx.contracts, side, ctx.spot, 0.20) or nearest_strike_contract(ctx.contracts, side, ctx.spot)
-    if not short_c:
-        return [], _empty_metrics(ctx.contract_multiplier)
+    pair = short_and_wing(ctx.contracts, side, ctx.spot, 0.20)
+    if not pair:
+        return _wing_not_listed(ctx, "bull_put_spread_credit")
+    short_c, long_c = pair
     ss = float(short_c["strike"])
-    long_c = next_lower_strike(ctx.contracts, side, ss) if side == "put" else next_higher_strike(ctx.contracts, side, ss)
     legs = [lg for lg in [make_option_leg("sell", short_c, expiry=ctx.front_expiry), make_option_leg("buy", long_c, expiry=ctx.front_expiry)] if lg]
+    if len(legs) != 2:
+        return _wing_not_listed(ctx, "bull_put_spread_credit")
     net, nt = net_debit_credit(legs)
     credit = -net if net < 0 else net
     payoff = invoke_payoff(
         "payoff_vertical_credit",
         short_strike=ss,
-        long_strike=float(long_c["strike"]) if long_c else ss - 5,
+        long_strike=float(long_c["strike"]),
         net_credit=credit,
         side=side,
         contract_multiplier=ctx.contract_multiplier,
@@ -320,13 +377,19 @@ def _build_vertical_credit(ctx: BuildContext, side: Side) -> tuple[list[dict[str
 
 
 def _build_straddle(ctx: BuildContext, *, short: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    call_c = nearest_strike_contract(ctx.contracts, "call", ctx.spot)
-    put_c = nearest_strike_contract(ctx.contracts, "put", ctx.spot)
-    strike = float(call_c["strike"] if call_c else (put_c["strike"] if put_c else ctx.spot))
-    call_c = call_c or contract_at_strike(ctx.contracts, "call", strike)
-    put_c = put_c or contract_at_strike(ctx.contracts, "put", strike)
+    call_c, put_c = _call_put_at_one_strike(ctx.contracts, ctx.spot, expiry=ctx.front_expiry)
+    if not has_live_quote(call_c) or not has_live_quote(put_c):
+        spec = get_strategy_spec(ctx.strategy_id) or STRATEGY_REGISTRY["long_straddle"]
+        return _blocked(
+            ctx,
+            f"{spec.display_name} needs a call and a put at the same strike. This chain does not quote both, so the structure was not built.",
+        )
+    strike = float(call_c["strike"])
     action = "sell" if short else "buy"
-    legs = [lg for lg in [make_option_leg(action, call_c, expiry=ctx.front_expiry), make_option_leg(action, put_c, expiry=ctx.front_expiry)] if lg]
+    legs = [lg for lg in [make_option_leg(action, call_c, expiry=ctx.front_expiry), make_option_leg(action, put_c, expiry=ctx.front_expiry)] if lg and lg.get("symbol")]
+    if len(legs) != 2:
+        spec = get_strategy_spec(ctx.strategy_id) or STRATEGY_REGISTRY["long_straddle"]
+        return _blocked(ctx, f"{spec.display_name} needs a call and a put at the same strike. This chain does not quote both, so the structure was not built.")
     cm = (legs[0].get("mid") or 0) if legs else 0
     pm = (legs[1].get("mid") or 0) if len(legs) > 1 else 0
     ref = "payoff_short_straddle" if short else "payoff_long_straddle"
@@ -342,10 +405,16 @@ def _build_strangle(ctx: BuildContext, *, short: bool = False, guts: bool = Fals
         call_c = next_lower_strike(ctx.contracts, "call", ctx.spot) or pick_strike(ctx.contracts, "call", ctx.spot, 0.70)
         put_c = next_higher_strike(ctx.contracts, "put", ctx.spot) or pick_strike(ctx.contracts, "put", ctx.spot, 0.70)
     else:
-        put_c = pick_strike(ctx.contracts, "put", ctx.spot, 0.20)
-        call_c = pick_strike(ctx.contracts, "call", ctx.spot, 0.20)
+        call_c = best_quoted(ctx.contracts, "call", ctx.spot, 0.20)
+        put_c = best_quoted(ctx.contracts, "put", ctx.spot, 0.20)
     action = "sell" if short else "buy"
-    legs = [lg for lg in [make_option_leg(action, call_c, expiry=ctx.front_expiry), make_option_leg(action, put_c, expiry=ctx.front_expiry)] if lg]
+    legs = [lg for lg in [make_option_leg(action, call_c, expiry=ctx.front_expiry), make_option_leg(action, put_c, expiry=ctx.front_expiry)] if lg and lg.get("symbol")]
+    if len(legs) != 2 or not has_live_quote(call_c) or not has_live_quote(put_c):
+        spec = get_strategy_spec(ctx.strategy_id) or STRATEGY_REGISTRY["long_strangle"]
+        return _blocked(
+            ctx,
+            f"{spec.display_name} needs a call and a put. This chain does not quote both, so the structure was not built.",
+        )
     ps = float((put_c or {}).get("strike") or ctx.spot - 5)
     cs = float((call_c or {}).get("strike") or ctx.spot + 5)
     cm = (legs[0].get("mid") or 0) if legs else 0
@@ -529,23 +598,27 @@ def _build_jelly_roll(ctx: BuildContext) -> tuple[list[dict[str, Any]], dict[str
 
 
 def _build_iron_condor(ctx: BuildContext, *, long: bool = False, wide: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    short_put = pick_strike(ctx.contracts, "put", ctx.spot, 0.20)
-    long_put = next_lower_strike(ctx.contracts, "put", float(short_put["strike"]), wide=wide) if short_put else None
-    short_call = pick_strike(ctx.contracts, "call", ctx.spot, 0.20)
-    long_call = next_higher_strike(ctx.contracts, "call", float(short_call["strike"]), wide=wide) if short_call else None
+    put_pair = short_and_wing(ctx.contracts, "put", ctx.spot, 0.20, wide=wide)
+    call_pair = short_and_wing(ctx.contracts, "call", ctx.spot, 0.20, wide=wide)
+    if not put_pair or not call_pair:
+        return _wing_not_listed(ctx, "short_iron_condor")
+    short_put, long_put = put_pair
+    short_call, long_call = call_pair
     if long:
         # Debit / reverse condor: buy the body, sell the wings.
         plan = [("buy", short_put), ("sell", long_put), ("buy", short_call), ("sell", long_call)]
     else:
         plan = [("sell", short_put), ("buy", long_put), ("sell", short_call), ("buy", long_call)]
-    legs = [lg for action, c in plan if (lg := make_option_leg(action, c, expiry=ctx.front_expiry))]
-    legs = normalize_leg_mids([l for l in legs if l.get("symbol")])
+    legs = [lg for action, c in plan if (lg := make_option_leg(action, c, expiry=ctx.front_expiry)) and lg.get("symbol")]
+    if len(legs) != 4:
+        return _wing_not_listed(ctx, "short_iron_condor")
+    legs = normalize_leg_mids(legs)
     net, nt = net_debit_credit(legs)
     credit = round(-net, 4) if net < 0 else 0.0
-    sp = float(short_put["strike"]) if short_put else ctx.spot - 5
-    lp = float(long_put["strike"]) if long_put else ctx.spot - 10
-    sc = float(short_call["strike"]) if short_call else ctx.spot + 5
-    lc = float(long_call["strike"]) if long_call else ctx.spot + 10
+    sp = float(short_put["strike"])
+    lp = float(long_put["strike"])
+    sc = float(short_call["strike"])
+    lc = float(long_call["strike"])
     if long:
         # Parameter names are the bought and sold strikes, not the short-condor nicknames.
         payoff = invoke_payoff(
@@ -609,26 +682,25 @@ def _build_butterfly(ctx: BuildContext, side: Side, *, short: bool = False, brok
 
 
 def _build_iron_butterfly(ctx: BuildContext, *, long: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    atm = ctx.spot
-    sp = nearest_strike_contract(ctx.contracts, "put", atm)
-    sc = nearest_strike_contract(ctx.contracts, "call", atm)
-    k = float(sp["strike"] if sp else (sc["strike"] if sc else atm))
-    sp = sp or contract_at_strike(ctx.contracts, "put", k)
-    sc = sc or contract_at_strike(ctx.contracts, "call", k)
-    lp = next_lower_strike(ctx.contracts, "put", k)
-    lc = next_higher_strike(ctx.contracts, "call", k)
+    body = quoted_body_wings(ctx.contracts, ctx.spot)
+    if not body:
+        return _wing_not_listed(ctx, "iron_butterfly")
+    sp, sc, lp, lc = body
+    k = float(sp["strike"])
     if long:
         plan = [("buy", sp), ("sell", lp), ("buy", sc), ("sell", lc)]
     else:
         plan = [("sell", sp), ("buy", lp), ("sell", sc), ("buy", lc)]
-    legs = [lg for action, c in plan if (lg := make_option_leg(action, c, expiry=ctx.front_expiry))]
+    legs = [lg for action, c in plan if (lg := make_option_leg(action, c, expiry=ctx.front_expiry)) and lg.get("symbol")]
+    if len(legs) != 4:
+        return _wing_not_listed(ctx, "iron_butterfly")
     net, nt = net_debit_credit(legs)
     ref = "payoff_long_iron_butterfly" if long else "payoff_iron_butterfly"
     kwargs = dict(
-        put_long_strike=float(lp["strike"]) if lp else k - 5,
+        put_long_strike=float(lp["strike"]),
         put_short_strike=k,
         call_short_strike=k,
-        call_long_strike=float(lc["strike"]) if lc else k + 5,
+        call_long_strike=float(lc["strike"]),
         contract_multiplier=ctx.contract_multiplier,
     )
     if long:
@@ -666,9 +738,14 @@ def _build_christmas_tree(ctx: BuildContext) -> tuple[list[dict[str, Any]], dict
 
 
 def _build_strip_strap(ctx: BuildContext, *, strip: bool) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    call_c = nearest_strike_contract(ctx.contracts, "call", ctx.spot)
-    put_c = nearest_strike_contract(ctx.contracts, "put", ctx.spot)
-    strike = float(call_c["strike"] if call_c else ctx.spot)
+    call_c, put_c = _call_put_at_one_strike(ctx.contracts, ctx.spot, expiry=ctx.front_expiry)
+    if not has_live_quote(call_c) or not has_live_quote(put_c):
+        spec = get_strategy_spec(ctx.strategy_id) or STRATEGY_REGISTRY["strip"]
+        return _blocked(
+            ctx,
+            f"{spec.display_name} needs a call and a put at the same strike. This chain does not quote both, so the structure was not built.",
+        )
+    strike = float(call_c["strike"])
     if strip:
         legs = [lg for lg in [
             make_option_leg("buy", call_c, expiry=ctx.front_expiry),
@@ -750,12 +827,16 @@ def _build_condor(ctx: BuildContext, side: Side) -> tuple[list[dict[str, Any]], 
 
 
 def _build_ratio(ctx: BuildContext, side: Side, *, long_qty: int = 1, short_qty: int = 2) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    long_c = pick_strike(ctx.contracts, side, ctx.spot, 0.55) or nearest_strike_contract(ctx.contracts, side, ctx.spot)
-    short_c = next_higher_strike(ctx.contracts, side, float(long_c["strike"])) if long_c and side == "call" else next_lower_strike(ctx.contracts, side, float(long_c["strike"])) if long_c else None
+    pair = short_and_wing(ctx.contracts, side, ctx.spot, 0.55)
+    if not pair:
+        return _wing_not_listed(ctx, "ratio_spread")
+    long_c, short_c = pair
     legs = [lg for lg in [
         make_option_leg("buy", long_c, expiry=ctx.front_expiry, quantity=long_qty),
         make_option_leg("sell", short_c, expiry=ctx.front_expiry, quantity=short_qty),
     ] if lg]
+    if len(legs) != 2:
+        return _wing_not_listed(ctx, "ratio_spread")
     net, nt = net_debit_credit(legs)
     net_long = long_qty > short_qty
     payoff = invoke_payoff(
@@ -776,12 +857,16 @@ def _build_ratio(ctx: BuildContext, side: Side, *, long_qty: int = 1, short_qty:
 
 
 def _build_backspread(ctx: BuildContext, side: Side) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    short_c = pick_strike(ctx.contracts, side, ctx.spot, 0.45) or nearest_strike_contract(ctx.contracts, side, ctx.spot)
-    long_c = next_higher_strike(ctx.contracts, side, float(short_c["strike"]), wide=True) if short_c and side == "call" else next_lower_strike(ctx.contracts, side, float(short_c["strike"]), wide=True) if short_c else None
+    pair = short_and_wing(ctx.contracts, side, ctx.spot, 0.45, wide=True)
+    if not pair:
+        return _wing_not_listed(ctx, "call_backspread")
+    short_c, long_c = pair
     legs = [lg for lg in [
         make_option_leg("sell", short_c, expiry=ctx.front_expiry),
         make_option_leg("buy", long_c, expiry=ctx.front_expiry, quantity=2),
     ] if lg]
+    if len(legs) != 2:
+        return _wing_not_listed(ctx, "call_backspread")
     net, nt = net_debit_credit(legs)
     payoff = invoke_payoff(
         "payoff_backspread",
@@ -797,17 +882,25 @@ def _build_backspread(ctx: BuildContext, side: Side) -> tuple[list[dict[str, Any
 
 def _build_jade_lizard(ctx: BuildContext, *, reverse: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if reverse:
-        sc = pick_strike(ctx.contracts, "call", ctx.spot, 0.20)
-        sp = pick_strike(ctx.contracts, "put", ctx.spot, 0.20)
-        lp = next_lower_strike(ctx.contracts, "put", float(sp["strike"])) if sp else None
-        legs = [lg for lg in [make_option_leg("sell", sc, expiry=ctx.front_expiry), make_option_leg("sell", sp, expiry=ctx.front_expiry), make_option_leg("buy", lp, expiry=ctx.front_expiry)] if lg]
+        sc = best_quoted(ctx.contracts, "call", ctx.spot, 0.20)
+        put_pair = short_and_wing(ctx.contracts, "put", ctx.spot, 0.20)
+        if sc is None or not put_pair:
+            return _wing_not_listed(ctx, "reverse_jade_lizard")
+        sp, lp = put_pair
+        legs = [lg for lg in [make_option_leg("sell", sc, expiry=ctx.front_expiry), make_option_leg("sell", sp, expiry=ctx.front_expiry), make_option_leg("buy", lp, expiry=ctx.front_expiry)] if lg and lg.get("symbol")]
+        if len(legs) != 3:
+            return _wing_not_listed(ctx, "reverse_jade_lizard")
         net, nt = net_debit_credit(legs)
         payoff = invoke_payoff("payoff_multi_leg_scan", legs=legs, spot=ctx.spot, contract_multiplier=ctx.contract_multiplier, unlimited_loss=True)
     else:
-        sp = pick_strike(ctx.contracts, "put", ctx.spot, 0.20)
-        sc = pick_strike(ctx.contracts, "call", ctx.spot, 0.20)
-        lc = next_higher_strike(ctx.contracts, "call", float(sc["strike"])) if sc else None
-        legs = [lg for lg in [make_option_leg("sell", sp, expiry=ctx.front_expiry), make_option_leg("sell", sc, expiry=ctx.front_expiry), make_option_leg("buy", lc, expiry=ctx.front_expiry)] if lg]
+        sp = best_quoted(ctx.contracts, "put", ctx.spot, 0.20)
+        call_pair = short_and_wing(ctx.contracts, "call", ctx.spot, 0.20)
+        if sp is None or not call_pair:
+            return _wing_not_listed(ctx, "jade_lizard")
+        sc, lc = call_pair
+        legs = [lg for lg in [make_option_leg("sell", sp, expiry=ctx.front_expiry), make_option_leg("sell", sc, expiry=ctx.front_expiry), make_option_leg("buy", lc, expiry=ctx.front_expiry)] if lg and lg.get("symbol")]
+        if len(legs) != 3:
+            return _wing_not_listed(ctx, "jade_lizard")
         net, nt = net_debit_credit(legs)
         credit = -net if net < 0 else net
         payoff = invoke_payoff(
@@ -1683,7 +1776,7 @@ def build_registry_metrics(
         return None
 
     _, metrics = builder(ctx)
-    return apply_equity_holdings(
+    metrics = apply_equity_holdings(
         spec,
         metrics,
         ticker=ctx.ticker,
@@ -1696,6 +1789,7 @@ def build_registry_metrics(
         ask=ctx.stock_ask,
         contracts=1,
     )
+    return _without_partial_legs(ctx, spec, metrics)
 
 
 def from_display_name(

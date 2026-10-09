@@ -93,6 +93,121 @@ def next_lower_strike(contracts: list[dict[str, Any]], side: str, strike: float,
     return pool[min(idx, len(pool) - 1)]
 
 
+def has_live_quote(contract: dict[str, Any] | None) -> bool:
+    """A listed contract with a symbol and a bid/ask or last. Missing fields are not filled in."""
+    if not contract or not contract.get("symbol") or contract.get("strike") is None:
+        return False
+    return mid(contract) is not None
+
+
+def _delta_distance(contract: dict[str, Any], side: str, delta_target: float) -> float | None:
+    raw = contract.get("delta")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    delta = float(raw)
+    if side == "call":
+        return abs(delta - delta_target)
+    return abs(delta + delta_target)
+
+
+def _quoted_pool(contracts: list[dict[str, Any]], side: str) -> list[dict[str, Any]]:
+    return [c for c in contracts if c.get("side") == side and has_live_quote(c)]
+
+
+def protective_wing(
+    contracts: list[dict[str, Any]],
+    side: str,
+    strike: float,
+    *,
+    higher: bool,
+    wide: bool = False,
+) -> dict[str, Any] | None:
+    """Next further strike that itself has a quote. An unquoted neighbor is not used."""
+    quoted = _quoted_pool(contracts, side)
+    if higher:
+        return next_higher_strike(quoted, side, strike, wide=wide)
+    return next_lower_strike(quoted, side, strike, wide=wide)
+
+
+def best_quoted(
+    contracts: list[dict[str, Any]],
+    side: str,
+    spot: float,
+    delta_target: float,
+) -> dict[str, Any] | None:
+    """Closest quoted contract. A missing delta ranks by distance from spot, not list order."""
+    higher = side == "call"
+
+    def rank(contract: dict[str, Any]) -> tuple[float, ...]:
+        strike = float(contract["strike"])
+        distance = _delta_distance(contract, side, delta_target)
+        otm = (strike - spot) if higher else (spot - strike)
+        if distance is None:
+            if otm > 0:
+                return (1.0, otm, abs(strike - spot))
+            return (2.0, abs(strike - spot), strike)
+        return (0.0, distance, 0.0 if otm > 0 else 1.0, abs(otm))
+
+    pool = _quoted_pool(contracts, side)
+    if not pool:
+        return None
+    return sorted(pool, key=rank)[0]
+
+
+def short_and_wing(
+    contracts: list[dict[str, Any]],
+    side: str,
+    spot: float,
+    delta_target: float,
+    *,
+    wide: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Inner strike plus a further out-of-the-money wing. Both must be quoted.
+
+    A missing delta is not treated as zero, which would pin the short on the
+    first listed strike and leave no wing. The nearest quoted short that has a
+    further quoted wing is used instead. If no such pair is listed, return None.
+    """
+    higher = side == "call"
+    pool = _quoted_pool(contracts, side)
+
+    def rank(contract: dict[str, Any]) -> tuple[float, ...]:
+        strike = float(contract["strike"])
+        distance = _delta_distance(contract, side, delta_target)
+        otm = (strike - spot) if side == "call" else (spot - strike)
+        if distance is None:
+            if otm > 0:
+                return (1.0, otm, abs(strike - spot))
+            return (2.0, abs(strike - spot), strike)
+        return (0.0, distance, 0.0 if otm > 0 else 1.0, abs(otm))
+
+    for short in sorted(pool, key=rank):
+        wing = protective_wing(contracts, side, float(short["strike"]), higher=higher, wide=wide)
+        if wing is None:
+            continue
+        if abs(float(wing["strike"]) - float(short["strike"])) < 0.01:
+            continue
+        return short, wing
+    return None
+
+
+def quoted_body_wings(
+    contracts: list[dict[str, Any]],
+    spot: float,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]] | None:
+    """Same-strike short put and short call, each with a quoted wing."""
+    puts = {round(float(c["strike"]), 4): c for c in _quoted_pool(contracts, "put")}
+    calls = {round(float(c["strike"]), 4): c for c in _quoted_pool(contracts, "call")}
+    shared = sorted(set(puts) & set(calls), key=lambda strike: (abs(strike - spot), strike))
+    for strike in shared:
+        lower = [key for key in puts if key < strike - 0.001]
+        higher = [key for key in calls if key > strike + 0.001]
+        if not lower or not higher:
+            continue
+        return puts[strike], calls[strike], puts[max(lower)], calls[min(higher)]
+    return None
+
+
 def sorted_strikes(contracts: list[dict[str, Any]], side: str) -> list[float]:
     return sorted({float(c["strike"]) for c in contracts if c.get("side") == side and c.get("strike") is not None})
 

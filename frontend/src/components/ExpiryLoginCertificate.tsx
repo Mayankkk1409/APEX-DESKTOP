@@ -37,7 +37,7 @@ export function ExpiryLoginCertificate({ items, isPaper, onDismiss }: Props) {
         className="order-cert-card w-full max-w-lg"
       >
         <div className="order-cert-frame">
-          <div className="order-cert-inner">
+          <div className="order-cert-inner order-cert-stack">
             {isPaper ? (
               <p className="order-cert-paper-banner" data-testid="expiry-login-paper-banner">
                 PAPER TRADE
@@ -54,15 +54,15 @@ export function ExpiryLoginCertificate({ items, isPaper, onDismiss }: Props) {
             </div>
 
             {items.length === 0 ? (
-              <p className="sf-panel-note mb-3" data-testid="expiry-login-empty">
+              <p className="order-cert-copy sf-panel-note" data-testid="expiry-login-empty">
                 {EXPIRY_LOGIN_NONE}
               </p>
             ) : (
               <>
                 {notes.length > 0 ? (
-                  <div className="mb-3 space-y-1" data-testid="expiry-login-copy">
+                  <div className="order-cert-copy-group" data-testid="expiry-login-copy">
                     {notes.map((note) => (
-                      <p key={note} className="sf-panel-note">
+                      <p key={note} className="order-cert-copy sf-panel-note">
                         {note}
                       </p>
                     ))}

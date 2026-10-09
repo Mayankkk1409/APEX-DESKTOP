@@ -9,8 +9,16 @@ from app.services.daily_pnl import (
     assemble_daily_pnl,
     bars_from_option_snapshot,
     book_daily_pnl,
+    clear_daily_mark_cache,
     position_daily_pnl,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_mark_cache():
+    clear_daily_mark_cache()
+    yield
+    clear_daily_mark_cache()
 
 
 def test_position_daily_pnl_renders_each_session_and_keeps_a_gap() -> None:
@@ -148,6 +156,7 @@ async def test_assemble_uses_vendor_closes_and_drops_demo_quotes() -> None:
     assert days[1]["pnl"] == pytest.approx(2.0)
     assert payload["book"][1]["pnl"] == pytest.approx(2.0)
 
+    clear_daily_mark_cache()
     empty = await assemble_daily_pnl(
         [pos],
         _Bars([], SimpleNamespace(price=50.0, status="live", source="demo", asset_class="us_equity")),
@@ -335,3 +344,42 @@ async def test_demo_option_fill_is_not_an_entry_baseline() -> None:
     )
     assert payload["positions"][0]["days"][0]["status"] == "unavailable"
     assert payload["positions"][0]["days"][0]["pnl"] is None
+
+
+class _CountingFeed:
+    def __init__(self) -> None:
+        self.bars = 0
+        self.quotes = 0
+
+    async def vendor_daily_bars(self, symbol: str, *, start: str, end: str) -> list[dict]:
+        _ = (symbol, start, end)
+        self.bars += 1
+        return []
+
+    async def quote(self, symbol: str) -> SimpleNamespace:
+        _ = symbol
+        self.quotes += 1
+        return SimpleNamespace(price=110.0, change=1.0, status="live", source="Alpaca", asset_class="us_equity")
+
+
+@pytest.mark.asyncio
+async def test_second_daily_pnl_reuses_cached_close() -> None:
+    pos = Position(
+        id="eq",
+        user_id="u1",
+        symbol="NVDA",
+        qty=1,
+        avg_cost=100.0,
+        current_price=0.0,
+        asset_class="us_equity",
+        created_at=datetime(2026, 10, 5, 15, 0, tzinfo=timezone.utc),
+    )
+    feed = _CountingFeed()
+    first = await assemble_daily_pnl([pos], feed, as_of=date(2026, 10, 6))
+    second = await assemble_daily_pnl([pos], feed, as_of=date(2026, 10, 6))
+    assert feed.bars == 1
+    assert feed.quotes == 1
+    assert first["positions"][0]["days"][0]["pnl"] == pytest.approx(9.0)
+    assert first["positions"][0]["days"][1]["pnl"] == pytest.approx(1.0)
+    assert second["positions"][0]["days"] == first["positions"][0]["days"]
+    assert second["book"][1]["pnl"] == pytest.approx(1.0)

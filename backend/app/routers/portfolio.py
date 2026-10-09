@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -12,7 +14,7 @@ from app.models.user import User
 from app.services.fills import execute_market_fill, execute_strategy_legs
 from app.strategies.validator import validate_strategy_output
 from app.services.orders import account_impact, estimate_order_cost
-from app.services.daily_pnl import assemble_daily_pnl
+from app.services.daily_pnl import assemble_daily_pnl, quotes_for_positions
 from app.services.portfolio_pnl import account_baseline, pnl_history_points, symbol_pnl_rows
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
@@ -44,6 +46,16 @@ class OrderIn(BaseModel):
     spread_confirmed: bool = False
     user_override: bool = False
     override_reasons: list[str] = Field(default_factory=list)
+
+
+async def _mark_positions(positions: list[Position], adapter: Any) -> list[Any]:
+    """Apply live or cached closes. Quotes for a cold book run together."""
+    quotes = await quotes_for_positions(positions, adapter)
+    for pos, quote in zip(positions, quotes):
+        price = getattr(quote, "price", None)
+        if price is not None:
+            pos.current_price = price
+    return quotes
 
 
 def _position_row(pos: Position) -> dict:
@@ -83,10 +95,8 @@ async def portfolio(user: User = Depends(current_user), db: AsyncSession = Depen
     positions = (await db.scalars(select(Position).where(Position.user_id == user.id))).all()
     live_value = user.cash_balance
     movers = []
-    for pos in positions:
-        q = await adapter.quote(pos.symbol)
-        if q.price is not None:
-            pos.current_price = q.price
+    quotes = await _mark_positions(list(positions), adapter)
+    for pos, q in zip(positions, quotes):
         live_value += pos.market_value
         movers.append(
             {
@@ -125,10 +135,7 @@ async def portfolio_pnl_history(
     adapter=Depends(get_adapter),
 ) -> dict:
     positions = (await db.scalars(select(Position).where(Position.user_id == user.id))).all()
-    for pos in positions:
-        q = await adapter.quote(pos.symbol)
-        if q.price is not None:
-            pos.current_price = q.price
+    await _mark_positions(list(positions), adapter)
     orders = (await db.scalars(select(Order).where(Order.user_id == user.id))).all()
     baseline = account_baseline(user)
     points = pnl_history_points(user, list(orders), list(positions))
@@ -158,10 +165,7 @@ async def portfolio_overall_pnl(
     adapter=Depends(get_adapter),
 ) -> dict:
     positions = (await db.scalars(select(Position).where(Position.user_id == user.id))).all()
-    for pos in positions:
-        q = await adapter.quote(pos.symbol)
-        if q.price is not None:
-            pos.current_price = q.price
+    await _mark_positions(list(positions), adapter)
     orders = (await db.scalars(select(Order).where(Order.user_id == user.id))).all()
     rows = symbol_pnl_rows(list(orders), list(positions))
     await db.commit()
@@ -184,12 +188,8 @@ async def portfolio_overall_pnl(
 @router.get("/positions")
 async def positions(user: User = Depends(current_user), db: AsyncSession = Depends(get_db), adapter=Depends(get_adapter)) -> dict:
     rows = (await db.scalars(select(Position).where(Position.user_id == user.id))).all()
-    out = []
-    for pos in rows:
-        q = await adapter.quote(pos.symbol)
-        if q.price is not None:
-            pos.current_price = q.price
-        out.append(_position_row(pos))
+    await _mark_positions(list(rows), adapter)
+    out = [_position_row(pos) for pos in rows]
     await db.commit()
     return {"positions": out}
 
@@ -366,8 +366,16 @@ async def place_order(
                         order_legs=[leg.model_dump() for leg in body.legs],
                     )
                     if not validation.valid:
+                        from loguru import logger
+
                         detail = validation.errors[0].to_log_dict() if validation.errors else {"check": "validation"}
-                        raise HTTPException(400, f"Strategy validation failed: {detail}")
+                        logger.warning("strategy validation failed {}", detail)
+                        message = (
+                            validation.errors[0].trader_message()
+                            if validation.errors
+                            else "Strategy validation failed. This check is enough to hold the order."
+                        )
+                        raise HTTPException(400, message)
                 equity_legs = (layers.get("risk_review") or {}).get("equity_legs") or []
                 from app.services.stock_leg import submission_equity
 
@@ -449,7 +457,7 @@ async def place_order(
     mult = 100 if body.asset_class == "us_option" else 1
     cost = estimate_order_cost(body.qty, px, asset_class=body.asset_class, multiplier=mult)  # type: ignore[arg-type]
     if body.side == "buy" and cost > user.buying_power:
-        raise HTTPException(400, "Insufficient buying power")
+        raise HTTPException(400, "Insufficient buying power. The account cannot cover the order.")
     try:
         order = await execute_market_fill(
             user=user,
