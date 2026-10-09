@@ -257,6 +257,72 @@ async def test_correct_code_completes_login_without_returning_it(
 
 
 @pytest.mark.asyncio
+async def test_expired_code_is_rejected(tmp_path: Path) -> None:
+    """A shared row past its TTL is refused and is not left reusable."""
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import select
+
+    from app.models.otp_device import OtpCode
+    from app.services.otp import issue_otp, verify_otp
+
+    db_file = tmp_path / "expired-otp.db"
+    url = f"sqlite+aiosqlite:///{db_file}"
+    engine = create_async_engine(url)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    Session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    settings = get_settings()
+
+    async def _run() -> None:
+        async with Session() as db:
+            code = await issue_otp(settings, "expired1", ttl_seconds=600, db=db)
+            row = await db.scalar(select(OtpCode).where(OtpCode.username == "expired1"))
+            assert row is not None
+            row.expires_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+            await db.commit()
+            assert await verify_otp(settings, "expired1", code, db=db) is False
+            leftover = await db.scalar(select(OtpCode).where(OtpCode.username == "expired1"))
+            assert leftover is None
+            fresh = await issue_otp(settings, "expired1", ttl_seconds=600, db=db)
+            assert await verify_otp(settings, "expired1", fresh, db=db) is True
+            assert await verify_otp(settings, "expired1", fresh, db=db) is False
+            assert code not in "refused"
+            assert fresh not in "refused"
+
+    await _run()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_wrong_code_is_not_consumed(tmp_path: Path) -> None:
+    """A mismatch leaves the pending row so the emailed code can still be used."""
+    from sqlalchemy import select
+
+    from app.models.otp_device import OtpCode
+    from app.services.otp import issue_otp, verify_otp
+
+    db_file = tmp_path / "wrong-otp.db"
+    url = f"sqlite+aiosqlite:///{db_file}"
+    engine = create_async_engine(url)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    Session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    settings = get_settings()
+    async with Session() as db:
+        code = await issue_otp(settings, "wrongkeep", ttl_seconds=600, db=db)
+        wrong = "000000" if code != "000000" else "111111"
+        assert await verify_otp(settings, "wrongkeep", f"  {wrong} ", db=db) is False
+        row = await db.scalar(select(OtpCode).where(OtpCode.username == "wrongkeep"))
+        assert row is not None
+        spaced = f"{code[:3]} {code[3:]}"
+        assert await verify_otp(settings, "wrongkeep", spaced, db=db) is True
+        assert await verify_otp(settings, "wrongkeep", code, db=db) is False
+        assert code not in "kept"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_wrong_code_does_not_log_in(client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
     sent = _capture(monkeypatch)
     await _signup(client, "wrongcode", "wrongcode@example.com")

@@ -9,7 +9,13 @@ import { LoginCodeDialog } from "../components/LoginCodeDialog";
 import { SignupNoticeDialog } from "../components/SignupNoticeDialog";
 import { api, AUTH_REDIRECT_KEY, getAccessToken, restoreSession, setAccessToken } from "../api";
 import { loginFailureDialog, type LoginFailureDialog } from "../lib/apiError";
-import { loginCodeNotice, type LoginCodeNotice } from "../lib/loginCode";
+import {
+  loginCodeNotice,
+  resendCooling,
+  resendReadyAt,
+  signInDigits,
+  type LoginCodeNotice,
+} from "../lib/loginCode";
 import {
   expiryLoginArrivalAlreadyShown,
   expiryLoginRows,
@@ -63,6 +69,8 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
   const [flow, setFlow] = useState<Flow>("login");
   const [stage, setStage] = useState<Stage>("identify");
   const [submitting, setSubmitting] = useState(false);
+  const [resendAt, setResendAt] = useState(0);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const formRef = useRef<HTMLFormElement>(null);
   const verifyBusy = useRef(false);
   const flowRef = useRef<Flow>("login");
@@ -116,6 +124,12 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
       return "skip";
     }
   }
+
+  useEffect(() => {
+    if (stage !== "code") return;
+    const timer = window.setInterval(() => setNowMs(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, [stage]);
 
   useEffect(() => {
     if (expiryRows === null || !expiryUserId || !expiryMarketDay) return;
@@ -194,6 +208,7 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
   async function beginOtpStage(name: string, recovery: boolean) {
     setOtpUser(name);
     await mintCode(name, recovery);
+    armResendCooldown();
     setStage("code");
   }
 
@@ -239,11 +254,18 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
     setOtpUser("");
   }
 
+  function armResendCooldown() {
+    const now = Date.now();
+    setNowMs(now);
+    setResendAt(resendReadyAt(now));
+  }
+
   function openCodeStep(name: string) {
     setOtpUser(name);
     setCode("");
     setAutofill(null);
     setOtpNonce((n) => n + 1);
+    armResendCooldown();
     setStage("code");
   }
 
@@ -313,7 +335,7 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
   }
 
   async function getCode() {
-    if (submitting) return;
+    if (submitting || resendCooling(Date.now(), resendAt)) return;
     setErr("");
     setCodeNotice(null);
     setFailure(null);
@@ -322,12 +344,13 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
     try {
       if (flowRef.current === "recovery") {
         await mintCode(name, true);
-        return;
+      } else {
+        await api.resendLoginCode(name, password);
+        setCode("");
+        setAutofill(null);
+        setOtpNonce((n) => n + 1);
       }
-      await api.resendLoginCode(name, password);
-      setCode("");
-      setAutofill(null);
-      setOtpNonce((n) => n + 1);
+      armResendCooldown();
     } catch (ex) {
       presentLoginError((ex as Error).message);
     } finally {
@@ -341,14 +364,15 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
     setFailure(null);
     setCodeNotice(null);
     const name = otpUser || username.trim();
+    const digits = signInDigits(code);
     if (submitting || verifyBusy.current) return;
     verifyBusy.current = true;
     setSubmitting(true);
     try {
       const res =
         flowRef.current === "recovery"
-          ? await api.forgotPasswordVerify(name, code)
-          : await api.otpVerify(name, code);
+          ? await api.forgotPasswordVerify(name, digits)
+          : await api.otpVerify(name, digits);
       await enterDesk(res);
     } catch (ex) {
       presentLoginError((ex as Error).message);
@@ -358,6 +382,7 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
     }
   }
 
+  const resendWait = resendCooling(nowMs, resendAt);
   const isRecovery = flow === "recovery";
   const showPassword = flow === "login" && stage === "identify";
   const showRecoveryPasswords = isRecovery && stage === "identify";
@@ -491,7 +516,7 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
               maxLength={32}
               className="mt-2 w-full rounded-md border border-line bg-ink px-3 py-3 text-center font-mono text-lg tracking-[0.3em]"
               value={code}
-              onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+              onChange={(e) => setCode(signInDigits(e.target.value))}
             />
             <div className="mt-3 text-center">
               <button
@@ -499,9 +524,9 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
                 data-testid="get-code"
                 className="text-xs text-subtle underline disabled:opacity-60"
                 onClick={getCode}
-                disabled={submitting}
+                disabled={submitting || resendWait}
               >
-                Email a new code
+                {resendWait ? `Email a new code in ${Math.ceil((resendAt - nowMs) / 1000)}s` : "Email a new code"}
               </button>
             </div>
           </div>
@@ -515,9 +540,9 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
                 data-testid="get-code"
                 className="text-xs text-subtle underline disabled:opacity-60"
                 onClick={getCode}
-                disabled={submitting}
+                disabled={submitting || resendWait}
               >
-                Get new code
+                {resendWait ? `Get new code in ${Math.ceil((resendAt - nowMs) / 1000)}s` : "Get new code"}
               </button>
             </div>
             <OtpBoxes

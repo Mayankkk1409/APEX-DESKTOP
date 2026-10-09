@@ -1,3 +1,19 @@
+/** Wait after a sign-in email before another one can be requested. */
+export const RESEND_COOLDOWN_MS = 30_000;
+
+/** Digits only, capped at the six the sign-in form sends. */
+export function signInDigits(value: string): string {
+  return value.replace(/\D/g, "").slice(0, 6);
+}
+
+export function resendReadyAt(nowMs: number, cooldownMs = RESEND_COOLDOWN_MS): number {
+  return nowMs + cooldownMs;
+}
+
+export function resendCooling(nowMs: number, readyAtMs: number): boolean {
+  return readyAtMs > nowMs;
+}
+
 /** Shown when an account has no address to receive a sign-in code. */
 export const NO_SIGNIN_EMAIL = "This account has no email for a sign-in code.";
 

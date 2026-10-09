@@ -250,6 +250,10 @@ async def claim_login_code(
         return LoginCodeClaim(code)
 
 
+def _otp_digits(code: object) -> str:
+    return "".join(ch for ch in str(code) if ch.isdigit())
+
+
 async def verify_otp(
     settings: Settings,
     username: str,
@@ -261,11 +265,14 @@ async def verify_otp(
     key = _key(username)
     # SQLite is the store every API process shares. A hash left in this
     # process's memory (or a different worker) must not hide the emailed code.
-    shared = await _read_db_hash(db, username)
-    stored = shared if shared else await redis.get(key)
+    # A mismatch does not delete the row. Only a matching code is consumed.
+    shared = await _read_db_hash(db, username) if db is not None else None
+    # When a database session is present, it is the only store. Memory must
+    # not accept a code the shared row has expired, replaced, or never held.
+    stored = shared if db is not None else await redis.get(key)
     if not stored:
         return False
-    if not otp_matches(code, stored):
+    if not otp_matches(_otp_digits(code), stored):
         return False
     await redis.delete(key)
     await _delete_db_hash(db, username, expected=stored)
