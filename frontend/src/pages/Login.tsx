@@ -486,7 +486,7 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
               data-testid="login-code"
               inputMode="numeric"
               autoComplete="one-time-code"
-              maxLength={6}
+              maxLength={32}
               className="mt-2 w-full rounded-md border border-line bg-ink px-3 py-3 text-center font-mono text-lg tracking-[0.3em]"
               value={code}
               onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import time
+from pathlib import Path
 
 import pytest
 import smtplib
@@ -99,6 +102,106 @@ async def test_emailed_code_verifies_after_the_memory_store_is_cleared(
     assert sent[0]["code"] not in verify.text
     second = await client.post("/auth/otp/verify", json={"username": "reloadotp", "code": sent[0]["code"]})
     assert second.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_shared_hash_wins_when_process_memory_has_a_different_code(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another worker's memory must not hide the code stored for the latest email."""
+    sent = _capture(monkeypatch)
+    await _signup(client, "shadowotp", "shadowotp@example.com")
+    login = await client.post("/auth/login", json={"username": "shadowotp", "password": _PASSWORD})
+    assert login.status_code == 200, login.text
+    code = sent[0]["code"]
+    other = "000000" if code != "000000" else "111111"
+    redis = await get_redis(get_settings())
+    await redis.set(_key("shadowotp"), hash_otp(other), ex=600)
+    spaced = f"{code[:3]} {code[3:]}"
+    verify = await client.post("/auth/otp/verify", json={"username": "shadowotp", "code": spaced})
+    assert verify.status_code == 200, verify.text
+    assert code not in verify.text
+    assert "access_token" in verify.json()
+
+
+@pytest.mark.asyncio
+async def test_memory_wipe_does_not_replace_a_fresh_shared_code(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent = _capture(monkeypatch)
+    await _signup(client, "keepotp", "keepotp@example.com")
+    first = await client.post("/auth/login", json={"username": "keepotp", "password": _PASSWORD})
+    assert first.status_code == 200, first.text
+    reset_redis_for_tests()
+    second = await client.post("/auth/login", json={"username": "keepotp", "password": _PASSWORD})
+    assert second.status_code == 200, second.text
+    assert len(sent) == 1
+    verify = await client.post("/auth/otp/verify", json={"username": "keepotp", "code": sent[0]["code"]})
+    assert verify.status_code == 200, verify.text
+    assert sent[0]["code"] not in verify.text
+
+
+def test_new_process_verifies_the_code_the_letter_renders(tmp_path: Path) -> None:
+    """The hash lives in SQLite, so a process that did not issue the code can verify it."""
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    from app.database import Base
+    from app.services.otp import issue_otp
+    from app.services.signup_email import login_code_body, login_code_html
+
+    db_file = tmp_path / "shared-otp.db"
+    url = f"sqlite+aiosqlite:///{db_file}"
+
+    async def _issue() -> str:
+        engine = create_async_engine(url, connect_args={"check_same_thread": False})
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        Session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+        async with Session() as db:
+            issued = await issue_otp(get_settings(), "crossproc", ttl_seconds=600, db=db)
+        await engine.dispose()
+        return issued
+
+    code = asyncio.run(_issue())
+    plain = login_code_body(full_name="Ada Lovelace", code=code)
+    html_body = login_code_html(full_name="Ada Lovelace", code=code)
+    assert code in plain
+    assert f"\n{code}\n" in html_body
+
+    script = """
+import asyncio, os, sys
+os.environ["DATABASE_URL"] = sys.argv[1]
+from app.config import get_settings
+get_settings.cache_clear()
+from app.redis_client import reset_redis_for_tests
+reset_redis_for_tests()
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from app.services.otp import verify_otp
+
+async def main():
+    engine = create_async_engine(sys.argv[1])
+    Session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    async with Session() as db:
+        ok = await verify_otp(get_settings(), "crossproc", sys.argv[2], db=db)
+    await engine.dispose()
+    print("accepted" if ok else "rejected")
+
+asyncio.run(main())
+"""
+    proc = subprocess.run(
+        [sys.executable, "-c", script, url, code],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip().splitlines()[-1] == "accepted"
+    assert code not in proc.stdout
+    assert code not in proc.stderr
 
 
 @pytest.mark.asyncio
