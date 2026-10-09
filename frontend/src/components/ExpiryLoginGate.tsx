@@ -97,20 +97,16 @@ export function ExpiryLoginGate() {
     }
   }, [rows, userId, marketDay]);
 
-  if (rows !== null) {
-    return (
-      <ExpiryLoginCertificate
-        items={rows}
-        isPaper={isPaper}
-        onDismiss={() => {
-          setRows(null);
-          setPending(false);
-        }}
-      />
-    );
-  }
+  if (rows === null) return null;
 
-  if (!pending || expiryLoginArrivalAlreadyShown()) return null;
-
-  return <div className="order-cert-backdrop fixed inset-0 z-[60]" data-testid="expiry-login-hold" aria-hidden />;
+  return (
+    <ExpiryLoginCertificate
+      items={rows}
+      isPaper={isPaper}
+      onDismiss={() => {
+        setRows(null);
+        setPending(false);
+      }}
+    />
+  );
 }

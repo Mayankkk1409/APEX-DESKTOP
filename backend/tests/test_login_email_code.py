@@ -306,13 +306,19 @@ def test_login_letter_is_addressed_to_the_given_recipient(monkeypatch: pytest.Mo
             assert from_addr == "desk@example.com"
             assert to_addrs == ["ada.lovelace@company.com"]
             delivered.append((str(message["To"]), str(message["Subject"]), str(message["From"])))  # type: ignore[index]
-            assert message.get_content_type() == "multipart/alternative"  # type: ignore[attr-defined]
-            plain = message.get_body(preferencelist=("plain",))  # type: ignore[attr-defined]
-            html_part = message.get_body(preferencelist=("html",))  # type: ignore[attr-defined]
-            text = plain.get_content() if plain is not None else ""
-            html_body = html_part.get_content() if html_part is not None else ""
+            assert message.get_content_type() == "multipart/related"  # type: ignore[attr-defined]
+            walked = [part.get_content_type() for part in message.walk()]  # type: ignore[attr-defined]
+            assert "multipart/alternative" in walked
+            parts = list(message.walk())  # type: ignore[attr-defined]
+            plain = next(part for part in parts if part.get_content_type() == "text/plain")
+            html_part = next(part for part in parts if part.get_content_type() == "text/html")
+            text = plain.get_content()
+            html_body = html_part.get_content()
+            header_text = "\n".join(f"{key}: {value}" for key, value in message.items())  # type: ignore[attr-defined]
+            assert code not in header_text
             assert code in text
             assert code in html_body
+            assert f"\n{code}\n" in html_body
             assert "Hello Ada Lovelace," in text
             assert "Hello Ada Lovelace," in html_body
             assert "This code expires in 10 minutes." in text
@@ -364,6 +370,8 @@ def test_login_letter_is_addressed_to_the_given_recipient(monkeypatch: pytest.Mo
     assert "If you did not request this, ignore this email." in body
     assert body.rstrip().endswith("Trading involves risk. Not financial advice.")
     assert "Hello Ada Lovelace," in html_body
+    assert f">{code}<" not in html_body
+    assert f"\n{code}\n" in html_body
     assert 'src="cid:apex-logo"' in html_body
     assert "<svg" not in html_body.lower()
     assert "This code expires in 10 minutes." in html_body

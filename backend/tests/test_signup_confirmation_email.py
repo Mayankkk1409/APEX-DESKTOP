@@ -76,7 +76,9 @@ def _assert_inline_png(message: object) -> None:
     assert "image/png" in raw
     assert "content-disposition: attachment" not in raw
     assert "<svg" not in raw
-    assert message.get_content_type() == "multipart/alternative"  # type: ignore[attr-defined]
+    assert message.get_content_type() == "multipart/related"  # type: ignore[attr-defined]
+    walked = [part.get_content_type() for part in message.walk()]  # type: ignore[attr-defined]
+    assert "multipart/alternative" in walked
     images = [part for part in message.walk() if part.get_content_maintype() == "image"]  # type: ignore[attr-defined]
     assert len(images) == 1
     image = images[0]

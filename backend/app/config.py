@@ -29,10 +29,9 @@ class Settings(BaseSettings):
     # Does not extend the access token. 900s lifetime refreshes at 840s.
     access_token_refresh_skew_seconds: int = 60
     refresh_token_ttl_seconds: int = 604800
-    # Refresh cookie. Secure stays on in every environment: browsers reject it on
-    # insecure hosts other than localhost, where MDN allows the Secure attribute.
-    # SameSite=Strict is the OWASP preference for a session cookie. The dev server
-    # proxies API calls same-origin, so Strict cookies are still sent on refresh.
+    # Default for public HTTPS. Loopback HTTP omits Secure in cookie_secure_for_request:
+    # browsers drop a Secure cookie on http://127.0.0.1, so the device cookie never returns.
+    # SameSite=Strict still applies. The dev server proxies API calls same-origin.
     cookie_secure: bool = True
     cookie_samesite: Literal["lax", "strict", "none"] = "strict"
     otp_ttl_seconds: int = 90

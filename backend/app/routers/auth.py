@@ -53,23 +53,43 @@ NO_SIGNIN_EMAIL = "This account has no email for a sign-in code."
 SIGNIN_CODE_NOT_SENT = "The sign-in code could not be sent."
 
 
-def _set_refresh(response: Response, token: str, settings: Settings) -> None:
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def cookie_secure_for_request(request: Request, settings: Settings) -> bool:
+    """Whether this response may mark cookies Secure.
+
+    ``http://127.0.0.1`` and ``http://localhost`` are different sites. Browsers
+    also drop a Secure cookie on plain HTTP to 127.0.0.1 (Safari rejects it;
+    the page the desk actually opens is that host). Loopback HTTP therefore
+    omits Secure so the httpOnly device cookie is stored and sent. HTTPS keeps
+    the Secure flag.
+    """
+    if request.url.scheme == "https":
+        return True
+    host = (request.url.hostname or "").lower().strip("[]").rstrip(".")
+    if host in _LOOPBACK_HOSTS or host.endswith(".localhost"):
+        return False
+    return bool(settings.cookie_secure)
+
+
+def _set_refresh(response: Response, token: str, settings: Settings, *, secure: bool) -> None:
     response.set_cookie(
         REFRESH_COOKIE,
         token,
         httponly=True,
         samesite=settings.cookie_samesite,
-        secure=settings.cookie_secure,
+        secure=secure,
         max_age=settings.refresh_token_ttl_seconds,
         path="/",
     )
 
 
-def _clear_refresh(response: Response, settings: Settings) -> None:
+def _clear_refresh(response: Response, settings: Settings, *, secure: bool) -> None:
     response.delete_cookie(
         REFRESH_COOKIE,
         path="/",
-        secure=settings.cookie_secure,
+        secure=secure,
         httponly=True,
         samesite=settings.cookie_samesite,
     )
@@ -105,7 +125,7 @@ def _bind_device(request: Request, response: Response, settings: Settings) -> st
         _sign_device(settings, device_id),
         httponly=True,
         samesite=settings.cookie_samesite,
-        secure=settings.cookie_secure,
+        secure=cookie_secure_for_request(request, settings),
         max_age=DEVICE_COOKIE_MAX_AGE,
         path="/",
     )
@@ -207,6 +227,8 @@ async def _issue_session(
     response: Response,
     db: AsyncSession,
     settings: Settings,
+    *,
+    secure: bool,
 ) -> TokenResponse:
     jti = secrets.token_hex(16)
     expires = datetime.now(timezone.utc) + timedelta(seconds=settings.refresh_token_ttl_seconds)
@@ -214,7 +236,7 @@ async def _issue_session(
     await db.commit()
     access = create_access_token(settings, UUID(user.id), {"mode": user.account_mode})
     refresh = create_refresh_token(settings, UUID(user.id), jti)
-    _set_refresh(response, refresh, settings)
+    _set_refresh(response, refresh, settings, secure=secure)
     return _token_response(user, access, settings, show_connect_modal=True)
 
 
@@ -306,7 +328,9 @@ async def login(
     now = datetime.now(timezone.utc)
     device_id = _bind_device(request, response, settings)
     if await _verified_for_device(db, user.id, device_id, now):
-        token = await _issue_session(user, response, db, settings)
+        token = await _issue_session(
+            user, response, db, settings, secure=cookie_secure_for_request(request, settings)
+        )
         payload = token.model_dump()
         payload["otp_required"] = False
         return payload
@@ -362,7 +386,9 @@ async def otp_verify(
     now = datetime.now(timezone.utc)
     device_id = _bind_device(request, response, settings)
     await _remember_otp_verification(db, user.id, device_id, now)
-    return await _issue_session(user, response, db, settings)
+    return await _issue_session(
+        user, response, db, settings, secure=cookie_secure_for_request(request, settings)
+    )
 
 
 # TODO(security): Replace with production password reset via email link + new password.
@@ -384,6 +410,7 @@ async def forgot_password(
 @router.post("/forgot-password/verify", response_model=TokenResponse)
 async def forgot_password_verify(
     body: ForgotPasswordVerifyRequest,
+    request: Request,
     response: Response,
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
@@ -397,7 +424,9 @@ async def forgot_password_verify(
     user.password_hash = pending_hash
     await db.commit()
     await db.refresh(user)
-    return await _issue_session(user, response, db, settings)
+    return await _issue_session(
+        user, response, db, settings, secure=cookie_secure_for_request(request, settings)
+    )
 
 
 @router.post("/refresh", response_model=TokenResponse)
@@ -413,19 +442,19 @@ async def refresh(
     try:
         payload = decode_token(settings, raw, expected_type="refresh")
     except Exception as exc:  # noqa: BLE001
-        _clear_refresh(response, settings)
+        _clear_refresh(response, settings, secure=cookie_secure_for_request(request, settings))
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid refresh") from exc
     jti = payload.get("jti")
     if not isinstance(jti, str) or not jti or not payload.get("sub"):
-        _clear_refresh(response, settings)
+        _clear_refresh(response, settings, secure=cookie_secure_for_request(request, settings))
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid refresh")
     row = await db.scalar(select(RefreshToken).where(RefreshToken.jti == jti))
     if not row or row.revoked or row.user_id != payload["sub"] or _aware(row.expires_at) <= datetime.now(timezone.utc):
-        _clear_refresh(response, settings)
+        _clear_refresh(response, settings, secure=cookie_secure_for_request(request, settings))
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Refresh revoked")
     user = await db.get(User, payload["sub"])
     if not user:
-        _clear_refresh(response, settings)
+        _clear_refresh(response, settings, secure=cookie_secure_for_request(request, settings))
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User not found")
     # Keep this refresh cookie until logout or its own exp. Rotating it on every
     # silent refresh lets a second in-flight call present the old cookie, get
@@ -446,7 +475,7 @@ async def logout(request: Request, response: Response, db: AsyncSession = Depend
                 await db.commit()
         except Exception:
             pass
-    _clear_refresh(response, settings)
+    _clear_refresh(response, settings, secure=cookie_secure_for_request(request, settings))
     return {"ok": True}
 
 
