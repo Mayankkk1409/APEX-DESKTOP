@@ -39,7 +39,6 @@ from app.security import (
     password_strength,
     verify_password,
 )
-from app.services.market_session import getLastMarketOpen
 from app.services.otp import claim_login_code, invalidate_login_code, issue_otp, verify_otp
 from app.services.password_reset import consume_pending_reset, store_pending_reset
 from app.services.signup_email import send_login_code, send_signup_confirmation
@@ -49,6 +48,7 @@ REFRESH_COOKIE = "apex_refresh"
 DEVICE_COOKIE = "apex_device"
 DEVICE_COOKIE_MAX_AGE = 60 * 60 * 24 * 400
 LOGIN_CODE_TTL_SECONDS = 600
+OTP_SKIP_WINDOW = timedelta(hours=24)
 NO_SIGNIN_EMAIL = "This account has no email for a sign-in code."
 SIGNIN_CODE_NOT_SENT = "The sign-in code could not be sent."
 
@@ -112,11 +112,20 @@ def _bind_device(request: Request, response: Response, settings: Settings) -> st
     return device_id
 
 
-async def _verified_since_open(db: AsyncSession, user_id: str, device_id: str, now: datetime) -> bool:
+def otp_skip_active(verified_at: datetime, now: datetime) -> bool:
+    """True while this device's last successful code is less than 24 hours old.
+
+    The window is only ``otp_verified_at``. It does not end at 9:30 and it does
+    not change on weekends, holidays, or any other market session.
+    """
+    return now < _aware(verified_at) + OTP_SKIP_WINDOW
+
+
+async def _verified_for_device(db: AsyncSession, user_id: str, device_id: str, now: datetime) -> bool:
     row = await db.scalar(select(OtpDevice).where(OtpDevice.user_id == user_id, OtpDevice.device_id == device_id))
     if row is None or row.otp_verified_at is None:
         return False
-    return _aware(row.otp_verified_at) >= getLastMarketOpen(now)
+    return otp_skip_active(row.otp_verified_at, now)
 
 
 async def _remember_otp_verification(db: AsyncSession, user_id: str, device_id: str, now: datetime) -> None:
@@ -157,7 +166,13 @@ async def _resolve_user(db: AsyncSession, identifier: str) -> User | None:
     return await db.scalar(select(User).where(User.email == ident.lower()))
 
 
-async def _email_login_code(user: User, settings: Settings, *, force_new: bool = False) -> None:
+async def _email_login_code(
+    user: User,
+    settings: Settings,
+    db: AsyncSession,
+    *,
+    force_new: bool = False,
+) -> None:
     """Mail one sign-in code to this account. No session is created.
 
     A pending code issued in the last 45 seconds is reused and not mailed again.
@@ -171,6 +186,7 @@ async def _email_login_code(user: User, settings: Settings, *, force_new: bool =
         user.username,
         ttl_seconds=LOGIN_CODE_TTL_SECONDS,
         force_new=force_new,
+        db=db,
     )
     if claim.code is None:
         logger.info("Sign-in code already pending; email not sent again")
@@ -182,7 +198,7 @@ async def _email_login_code(user: User, settings: Settings, *, force_new: bool =
         code=claim.code,
     )
     if not sent:
-        await invalidate_login_code(settings, user.username)
+        await invalidate_login_code(settings, user.username, code=claim.code, db=db)
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, SIGNIN_CODE_NOT_SENT)
 
 
@@ -289,12 +305,12 @@ async def login(
     settings = get_settings()
     now = datetime.now(timezone.utc)
     device_id = _bind_device(request, response, settings)
-    if await _verified_since_open(db, user.id, device_id, now):
+    if await _verified_for_device(db, user.id, device_id, now):
         token = await _issue_session(user, response, db, settings)
         payload = token.model_dump()
         payload["otp_required"] = False
         return payload
-    await _email_login_code(user, settings)
+    await _email_login_code(user, settings, db)
     return {
         "ok": True,
         "username": user.username,
@@ -313,7 +329,7 @@ async def resend_login_code(
     user = await db.scalar(select(User).where(User.username == body.username))
     if not user or not verify_password(body.password, user.password_hash):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid username or password")
-    await _email_login_code(user, settings, force_new=True)
+    await _email_login_code(user, settings, db, force_new=True)
     return {"ok": True, "ttl_seconds": LOGIN_CODE_TTL_SECONDS}
 
 
@@ -326,7 +342,7 @@ async def otp_request(
     user = await db.scalar(select(User).where(User.username == body.username))
     if not user:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown username")
-    code = await issue_otp(settings, user.username)
+    code = await issue_otp(settings, user.username, db=db)
     return _otp_request_payload(settings, code)
 
 
@@ -341,7 +357,7 @@ async def otp_verify(
     user = await db.scalar(select(User).where(User.username == body.username))
     if not user:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown username")
-    if not await verify_otp(settings, user.username, body.code):
+    if not await verify_otp(settings, user.username, body.code, db=db):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired code")
     now = datetime.now(timezone.utc)
     device_id = _bind_device(request, response, settings)
@@ -360,7 +376,7 @@ async def forgot_password(
     if not user:
         return _otp_request_payload(settings)
     await store_pending_reset(settings, user.username, hash_password(body.password))
-    code = await issue_otp(settings, user.username)
+    code = await issue_otp(settings, user.username, db=db)
     return _otp_request_payload(settings, code)
 
 
@@ -373,7 +389,7 @@ async def forgot_password_verify(
     settings: Settings = Depends(get_settings),
 ) -> TokenResponse:
     user = await _resolve_user(db, body.username)
-    if not user or not await verify_otp(settings, user.username, body.code):
+    if not user or not await verify_otp(settings, user.username, body.code, db=db):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired code")
     pending_hash = await consume_pending_reset(settings, user.username)
     if not pending_hash:

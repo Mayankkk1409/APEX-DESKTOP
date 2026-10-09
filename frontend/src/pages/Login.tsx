@@ -64,6 +64,7 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
   const [stage, setStage] = useState<Stage>("identify");
   const [submitting, setSubmitting] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
+  const verifyBusy = useRef(false);
   const flowRef = useRef<Flow>("login");
   const afterExpiryPath = useRef("/app");
   flowRef.current = flow;
@@ -336,7 +337,8 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
     setFailure(null);
     setCodeNotice(null);
     const name = otpUser || username.trim();
-    if (submitting) return;
+    if (submitting || verifyBusy.current) return;
+    verifyBusy.current = true;
     setSubmitting(true);
     try {
       const res =
@@ -347,6 +349,7 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
     } catch (ex) {
       presentLoginError((ex as Error).message);
     } finally {
+      verifyBusy.current = false;
       setSubmitting(false);
     }
   }

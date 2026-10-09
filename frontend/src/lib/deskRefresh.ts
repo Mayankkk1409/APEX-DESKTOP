@@ -21,13 +21,20 @@ export const DESK_STALE_MS = 20_000;
  * Missing responses are left untouched — this does not invent bars or P&L.
  */
 export function refreshDeskQueries(qc: QueryClient): void {
-  const fresh = { staleTime: 0 };
-  void qc.fetchQuery({ queryKey: ["port"], queryFn: () => api.portfolio(), ...fresh });
-  void qc.fetchQuery({ queryKey: ["pos"], queryFn: () => api.positions(), ...fresh });
-  void qc.fetchQuery({ queryKey: ["orders"], queryFn: () => api.orderHistory(), ...fresh });
-  void qc.fetchQuery({ queryKey: ["pnl-history"], queryFn: () => api.pnlHistory(), ...fresh });
-  void qc.fetchQuery({ queryKey: ["daily-pnl"], queryFn: () => api.dailyPnl(), ...fresh });
-  void qc.fetchQuery({ queryKey: ["overall-pnl"], queryFn: () => api.overallPnl(), ...fresh });
+  const specs = [
+    { queryKey: ["port"], queryFn: () => api.portfolio() },
+    { queryKey: ["pos"], queryFn: () => api.positions() },
+    { queryKey: ["orders"], queryFn: () => api.orderHistory() },
+    { queryKey: ["pnl-history"], queryFn: () => api.pnlHistory() },
+    { queryKey: ["daily-pnl"], queryFn: () => api.dailyPnl() },
+    { queryKey: ["overall-pnl"], queryFn: () => api.overallPnl() },
+  ] as const;
+  for (const spec of specs) {
+    // Drop a pre-fill request so it cannot satisfy this refresh for the 20s stale window.
+    void qc.cancelQueries({ queryKey: spec.queryKey }).then(() => {
+      void qc.fetchQuery({ ...spec, staleTime: 0 });
+    });
+  }
   void qc.invalidateQueries({ queryKey: ["brokerage"], refetchType: "all" });
 }
 
@@ -56,13 +63,12 @@ export function applyReturnedFillBalances(
   }
 
   qc.setQueryData<PortfolioSnapshot>(["port"], (current) => {
-    if (!current) return current;
-    return {
-      ...current,
-      ...(typeof fill.balance === "number" ? { balance: fill.balance } : {}),
-      ...(typeof fill.buying_power === "number" ? { buying_power: fill.buying_power } : {}),
-      ...(typeof fill.portfolio_value === "number" ? { portfolio_value: fill.portfolio_value } : {}),
-    };
+    const patch: PortfolioSnapshot = {};
+    if (typeof fill.balance === "number") patch.balance = fill.balance;
+    if (typeof fill.buying_power === "number") patch.buying_power = fill.buying_power;
+    if (typeof fill.portfolio_value === "number") patch.portfolio_value = fill.portfolio_value;
+    if (!Object.keys(patch).length) return current;
+    return { ...(current ?? {}), ...patch };
   });
 }
 

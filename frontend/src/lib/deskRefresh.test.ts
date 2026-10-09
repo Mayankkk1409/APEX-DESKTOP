@@ -49,7 +49,7 @@ vi.mock("../api", () => ({
   },
 }));
 
-import { refreshDeskQueries } from "./deskRefresh";
+import { applyReturnedFillBalances, refreshDeskQueries } from "./deskRefresh";
 
 describe("refreshDeskQueries", () => {
   it("requests positions, daily P&L, and the equity graph together", async () => {
@@ -65,5 +65,15 @@ describe("refreshDeskQueries", () => {
       h.release();
       await h.gate;
     }
+  });
+
+  it("writes the order response onto an empty portfolio cache", () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    applyReturnedFillBalances(qc, { balance: 24000, buying_power: 18000, portfolio_value: 25100 });
+    expect(qc.getQueryData(["port"])).toEqual({
+      balance: 24000,
+      buying_power: 18000,
+      portfolio_value: 25100,
+    });
   });
 });

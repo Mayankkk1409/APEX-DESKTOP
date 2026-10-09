@@ -1,5 +1,5 @@
 from app.models.brokerage import AccountBalance, AuditLog, BrokerageAccount, BrokerageConnection
-from app.models.otp_device import OtpDevice
+from app.models.otp_device import OtpCode, OtpDevice
 from app.models.trading import Order, Position, Scan, WatchlistItem
 from app.models.user import LoginAudit, RefreshToken, User
 from app.models.user_settings import PaperBalanceAudit, UserTradingSettings
@@ -19,4 +19,5 @@ __all__ = [
     "UserTradingSettings",
     "PaperBalanceAudit",
     "OtpDevice",
+    "OtpCode",
 ]

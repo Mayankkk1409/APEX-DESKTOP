@@ -83,6 +83,25 @@ async def client_db():
 
 
 @pytest.mark.asyncio
+async def test_emailed_code_verifies_after_the_memory_store_is_cleared(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reload wipes the in-memory stand-in. The emailed code must still verify."""
+    sent = _capture(monkeypatch)
+    await _signup(client, "reloadotp", "reloadotp@example.com")
+    login = await client.post("/auth/login", json={"username": "reloadotp", "password": _PASSWORD})
+    assert login.status_code == 200, login.text
+    assert len(sent) == 1
+    reset_redis_for_tests()
+    verify = await client.post("/auth/otp/verify", json={"username": "reloadotp", "code": sent[0]["code"]})
+    assert verify.status_code == 200, verify.text
+    assert verify.json()["access_token"]
+    assert sent[0]["code"] not in verify.text
+    second = await client.post("/auth/otp/verify", json={"username": "reloadotp", "code": sent[0]["code"]})
+    assert second.status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_correct_code_completes_login_without_returning_it(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -277,6 +296,12 @@ def test_login_letter_is_addressed_to_the_given_recipient(monkeypatch: pytest.Mo
         def login(self, *_args: object, **_kwargs: object) -> None:
             raise AssertionError("login is unused when SMTP username is empty")
 
+        def quit(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
         def send_message(self, message: object, from_addr: str | None = None, to_addrs: list[str] | None = None) -> None:
             assert from_addr == "desk@example.com"
             assert to_addrs == ["ada.lovelace@company.com"]
@@ -347,6 +372,44 @@ def test_login_letter_is_addressed_to_the_given_recipient(monkeypatch: pytest.Mo
     assert mask_password(_PASSWORD) not in html_body
     assert _PASSWORD not in body
     assert _PASSWORD not in html_body
+
+
+def test_quit_failure_after_accepted_data_still_delivers(monkeypatch: pytest.MonkeyPatch) -> None:
+    code = generate_otp()
+
+    class _QuitFails:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            self.sock = None
+
+        def ehlo(self) -> None:
+            return None
+
+        def starttls(self) -> None:
+            return None
+
+        def login(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def data(self, _payload: bytes) -> tuple[int, bytes]:
+            return 250, b"queued"
+
+        def send_message(self, *_args: object, **_kwargs: object) -> dict[str, tuple[int, bytes]]:
+            return {}
+
+        def quit(self) -> None:
+            raise smtplib.SMTPResponseException(250, b"closing")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(smtplib, "SMTP", _QuitFails)
+    ok = _deliver_login_code(
+        Settings(smtp_host="127.0.0.1", smtp_port=587, smtp_from="desk@example.com", smtp_username=""),
+        full_name="Ada Lovelace",
+        email="ada@example.com",
+        code=code,
+    )
+    assert ok is True
 
 
 def test_unconfigured_smtp_does_not_log_the_code(monkeypatch: pytest.MonkeyPatch) -> None:

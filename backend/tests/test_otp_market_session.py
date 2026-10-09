@@ -1,5 +1,7 @@
-"""Sign-in OTP is required once per NYSE session, per user and device.
+"""A verified device skips the sign-in code for 24 hours from otp_verified_at.
 
+The skip does not follow the exchange calendar. The getLastMarketOpen cases
+below still describe that calendar helper; they are not the sign-in rule.
 Holiday used below: Thanksgiving Day, Thursday 2026-11-26 (NYSE full close).
 Christmas Day, Friday 2026-12-25, covers a Saturday whose Friday is closed.
 """
@@ -21,7 +23,7 @@ from app.database import Base, get_db
 from app.main import create_app
 from app.models.otp_device import OtpDevice
 from app.redis_client import reset_redis_for_tests
-from app.routers.auth import DEVICE_COOKIE
+from app.routers.auth import DEVICE_COOKIE, otp_skip_active
 from app.services.market_session import NYSE_HOLIDAYS, getLastMarketOpen
 
 _PASSWORD = "ApexDesk!23"
@@ -97,6 +99,16 @@ def test_naive_clock_is_rejected() -> None:
         getLastMarketOpen(datetime(2026, 10, 7, 11, 0))
 
 
+def test_skip_lasts_twenty_four_hours_including_weekends() -> None:
+    verified = _at(2026, 10, 9, 16, 0)  # Friday
+    assert otp_skip_active(verified, _at(2026, 10, 10, 15, 59)) is True  # Saturday, still inside 24h
+    assert otp_skip_active(verified, verified + timedelta(hours=24)) is False
+    assert otp_skip_active(verified, _at(2026, 10, 10, 16, 1)) is False
+    # A Monday morning code does not expire at 9:30.
+    monday = _at(2026, 10, 12, 8, 0)
+    assert otp_skip_active(monday, _at(2026, 10, 12, 15, 0)) is True
+
+
 def _cookie_jar(response) -> http.cookies.SimpleCookie:
     jar: http.cookies.SimpleCookie = http.cookies.SimpleCookie()
     for header in response.headers.get_list("set-cookie"):
@@ -169,7 +181,7 @@ async def api() -> AsyncIterator[tuple[AsyncClient, async_sessionmaker[AsyncSess
 
 
 @pytest.mark.asyncio
-async def test_verified_device_skips_otp_until_the_next_open(
+async def test_verified_device_skips_otp_for_twenty_four_hours(
     api: tuple[AsyncClient, async_sessionmaker[AsyncSession]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, session_factory = api
@@ -204,11 +216,11 @@ async def test_verified_device_skips_otp_until_the_next_open(
     assert me.status_code == 200
     assert me.json()["username"] == "session1"
 
-    last_open = getLastMarketOpen(datetime.now(timezone.utc))
+    now = datetime.now(timezone.utc)
     async with session_factory() as session:
         row = await session.scalar(select(OtpDevice).where(OtpDevice.device_id == device_id))
         assert row is not None and row.otp_verified_at is not None
-        row.otp_verified_at = last_open.astimezone(timezone.utc) - timedelta(seconds=1)
+        row.otp_verified_at = now - timedelta(hours=24)
         await session.commit()
 
     required = await client.post("/auth/login", json={"username": "session1", "password": _PASSWORD})
@@ -220,7 +232,7 @@ async def test_verified_device_skips_otp_until_the_next_open(
     async with session_factory() as session:
         row = await session.scalar(select(OtpDevice).where(OtpDevice.device_id == device_id))
         assert row is not None
-        row.otp_verified_at = last_open.astimezone(timezone.utc)
+        row.otp_verified_at = now - timedelta(hours=24) + timedelta(seconds=30)
         await session.commit()
     skipped = await client.post("/auth/login", json={"username": "session1", "password": _PASSWORD})
     assert skipped.status_code == 200, skipped.text

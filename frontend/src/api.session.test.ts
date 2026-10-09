@@ -190,4 +190,37 @@ describe("silent session refresh", () => {
     expect(assign).toHaveBeenCalledWith("/login");
     expect(mem.get("apex_auth_redirect")).toBe("Invalid access token");
   });
+
+  it("stays signed in when a portfolio refresh is rejected and the access token is still valid", async () => {
+    const assign = vi.fn();
+    vi.stubGlobal("window", { location: { pathname: "/app", assign } });
+    const token = jwt(Math.floor(Date.now() / 1000) + ACCESS_TTL_SEC);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        if (String(input).includes("/auth/refresh")) return jsonResponse({ detail: "Invalid refresh" }, 401);
+        return jsonResponse({ detail: "Invalid access token" }, 401);
+      }),
+    );
+    setAccessToken(token, ACCESS_TTL_SEC, REFRESH_IN_SEC);
+    const { api } = await import("./api");
+    await expect(api.portfolio()).rejects.toThrow("Invalid access token");
+    expect(getAccessToken()).toBe(token);
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  it("does not clear the session when a sign-in code is rejected", async () => {
+    const assign = vi.fn();
+    vi.stubGlobal("window", { location: { pathname: "/login", assign } });
+    const token = jwt(Math.floor(Date.now() / 1000) + ACCESS_TTL_SEC);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ detail: "Invalid or expired code" }, 401)),
+    );
+    setAccessToken(token, ACCESS_TTL_SEC, REFRESH_IN_SEC);
+    const { api } = await import("./api");
+    await expect(api.otpVerify("ada", "000000")).rejects.toThrow("Invalid or expired code");
+    expect(getAccessToken()).toBe(token);
+    expect(assign).not.toHaveBeenCalled();
+  });
 });

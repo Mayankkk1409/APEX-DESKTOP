@@ -296,41 +296,54 @@ def _transmit(settings: Settings, message: EmailMessage, recipient: str, *, labe
         return 0
     sender = _address_message(message, settings, recipient)
     try:
-        with smtplib.SMTP(settings.smtp_host.strip(), settings.smtp_port, timeout=20) as smtp:
-            smtp.ehlo()
-            if settings.smtp_starttls:
-                smtp.starttls()
-                smtp.ehlo()
-            sock = getattr(smtp, "sock", None)
-            if sock is not None:
-                sock.settimeout(20)
-            smtp_username = settings.smtp_username.strip()
-            smtp_password = "".join(settings.smtp_password.split())
-            if smtp_username:
-                smtp.login(smtp_username, smtp_password)
-            data_code: dict[str, int | None] = {"code": None}
-            if callable(getattr(smtp, "data", None)):
-                original_data = smtp.data
-
-                def _data(payload: bytes) -> tuple[int, bytes]:
-                    code, reply = original_data(payload)
-                    data_code["code"] = code
-                    return code, reply
-
-                smtp.data = _data  # type: ignore[method-assign]
-            refused = smtp.send_message(message, from_addr=sender, to_addrs=[recipient])
-            if refused:
-                raise smtplib.SMTPRecipientsRefused(refused)
-            code = data_code["code"]
-            if code is None:
-                code = 250
-            if code != 250:
-                raise smtplib.SMTPDataError(code, b"DATA rejected")
-        logger.info("SMTP accepted code={} recipient={}", code, recipient)
-        return code
+        smtp = smtplib.SMTP(settings.smtp_host.strip(), settings.smtp_port, timeout=20)
     except Exception as exc:
         _log_smtp_failure(label, exc, recipient, settings)
         return 0
+    try:
+        smtp.ehlo()
+        if settings.smtp_starttls:
+            smtp.starttls()
+            smtp.ehlo()
+        sock = getattr(smtp, "sock", None)
+        if sock is not None:
+            sock.settimeout(20)
+        smtp_username = settings.smtp_username.strip()
+        smtp_password = "".join(settings.smtp_password.split())
+        if smtp_username:
+            smtp.login(smtp_username, smtp_password)
+        data_code: dict[str, int | None] = {"code": None}
+        if callable(getattr(smtp, "data", None)):
+            original_data = smtp.data
+
+            def _data(payload: bytes) -> tuple[int, bytes]:
+                code, reply = original_data(payload)
+                data_code["code"] = code
+                return code, reply
+
+            smtp.data = _data  # type: ignore[method-assign]
+        refused = smtp.send_message(message, from_addr=sender, to_addrs=[recipient])
+        if refused:
+            raise smtplib.SMTPRecipientsRefused(refused)
+        code = data_code["code"]
+        if code is None:
+            code = 250
+        if code != 250:
+            raise smtplib.SMTPDataError(code, b"DATA rejected")
+    except Exception as exc:
+        _log_smtp_failure(label, exc, recipient, settings)
+        return 0
+    finally:
+        # QUIT is not delivery. A non-221 close after DATA 250 must not erase the code.
+        try:
+            smtp.quit()
+        except Exception:
+            try:
+                smtp.close()
+            except Exception:
+                pass
+    logger.info("SMTP accepted code={} recipient={}", code, recipient)
+    return code
 
 
 def _attach_inline_logo(message: EmailMessage) -> None:

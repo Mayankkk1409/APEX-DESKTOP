@@ -12,6 +12,16 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
 
+class OtpCode(Base):
+    """Hashed sign-in code. Survives a process restart when Redis is down."""
+
+    __tablename__ = "otp_codes"
+
+    username: Mapped[str] = mapped_column(String(80), primary_key=True)
+    code_hash: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class OtpDevice(Base):
     __tablename__ = "otp_devices"
     __table_args__ = (UniqueConstraint("user_id", "device_id", name="uq_otp_device_user_device"),)

@@ -87,13 +87,26 @@ function clearRefreshTimer() {
   }
 }
 
+function accessTokenStillValid(): boolean {
+  const token = getAccessToken();
+  if (!token) return false;
+  const exp = accessTokenExpiryMs(token);
+  return exp != null && exp > Date.now();
+}
+
 function armRefreshTimer(token: string, expiresInSec?: number, refreshInSec?: number) {
   clearRefreshTimer();
   const delay = refreshDelayMs({ token, expiresInSec, refreshInSec });
   if (delay == null) return;
   refreshTimer = setTimeout(() => {
     void refreshAccessToken().then((next) => {
-      if (!next) endSession("Session expired — please sign in again.");
+      if (next) return;
+      const current = getAccessToken();
+      if (current && accessTokenStillValid()) {
+        armRefreshTimer(current, undefined, 30);
+        return;
+      }
+      endSession("Session expired — please sign in again.");
     });
   }, delay);
 }
@@ -205,12 +218,14 @@ async function req<T>(path: string, init: RequestInit = {}, retried = false): Pr
     if (res.status >= 500 && (detail === "Internal Server Error" || detail === res.statusText)) {
       detail = "Brokerage service error. Try Refresh — if it persists, restart the backend.";
     }
-    if (res.status === 401 && !retried && !ANONYMOUS_AUTH.has(path)) {
-      const next = await refreshAccessToken();
-      if (next) return req<T>(path, init, true);
-      endSession(detail);
-    } else if (res.status === 401) {
-      endSession(detail);
+    if (res.status === 401 && !ANONYMOUS_AUTH.has(path)) {
+      if (!retried) {
+        const next = await refreshAccessToken();
+        if (next) return req<T>(path, init, true);
+      }
+      // A desk refresh after a fill can 401 while the access token is still good
+      // (refresh cookie blip, in-flight request). That must not send the user to login.
+      if (!accessTokenStillValid()) endSession(detail);
     }
     throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
   }

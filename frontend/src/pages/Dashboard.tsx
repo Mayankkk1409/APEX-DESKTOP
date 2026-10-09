@@ -280,9 +280,9 @@ export function Dashboard() {
         portfolio_value: brokerage.stats.portfolio_value,
       }
     : {
-        balance: live.balance ?? portfolio.data?.balance ?? user?.cash_balance ?? 0,
-        buying_power: live.buying_power ?? portfolio.data?.buying_power ?? user?.buying_power ?? 0,
-        portfolio_value: live.portfolio_value ?? portfolio.data?.portfolio_value ?? user?.portfolio_value ?? 0,
+        balance: portfolio.data?.balance ?? user?.cash_balance ?? live.balance ?? 0,
+        buying_power: portfolio.data?.buying_power ?? user?.buying_power ?? live.buying_power ?? 0,
+        portfolio_value: portfolio.data?.portfolio_value ?? user?.portfolio_value ?? live.portfolio_value ?? 0,
       };
 
   const displayPositions: PositionRow[] = brokerage.usingBrokerage

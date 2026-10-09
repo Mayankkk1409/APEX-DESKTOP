@@ -85,7 +85,7 @@ async def test_concurrent_login_emails_once(monkeypatch: pytest.MonkeyPatch) -> 
     user = SimpleNamespace(username="race-mail", email="race-mail@example.com", full_name="Ada Lovelace")
     settings = get_settings()
     await asyncio.gather(
-        _email_login_code(user, settings),
-        _email_login_code(user, settings),
+        _email_login_code(user, settings, None),
+        _email_login_code(user, settings, None),
     )
     assert len(sent) == 1
