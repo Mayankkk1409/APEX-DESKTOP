@@ -5,8 +5,8 @@ through SMTP to the address on that account. An empty SMTP_HOST or SMTP_FROM
 skips delivery and reports that the message was not sent.
 
 Both letters share one sober HTML table. The wordmark is the site PNG, attached
-once as an inline CID image on a multipart/related part. It is not an SVG and
-not a separate download.
+once as an inline CID image. The root is multipart/related so the image stays
+inside the letter. It is not an SVG and not a separate download.
 """
 
 from __future__ import annotations
@@ -347,17 +347,11 @@ def _transmit(settings: Settings, message: EmailMessage, recipient: str, *, labe
 
 
 def _attach_inline_logo(message: EmailMessage) -> None:
-    """Put the PNG on the HTML part as multipart/related, inline, one CID.
-
-    The root stays multipart/alternative, so the image is not a mixed-part download.
-    """
-    payload = message.get_payload()
-    if not isinstance(payload, list) or len(payload) < 2:
-        return
+    """Add the PNG to a multipart/related root. Disposition stays inline."""
     logo = _logo_bytes()
     if logo is None:
         return
-    payload[1].add_related(
+    message.add_related(
         logo,
         "image",
         "png",
@@ -367,13 +361,21 @@ def _attach_inline_logo(message: EmailMessage) -> None:
 
 
 def _compose(subject: str, recipient: str, settings: Settings, plain: str, html_body: str) -> EmailMessage:
+    """Related root, alternative inside it, logo inline on that related part.
+
+    Nesting the image under the HTML alternative makes some clients offer the
+    PNG as a download and skip the HTML, so the sign-in code never appears.
+    """
+    alternative = EmailMessage()
+    alternative.set_content(plain, cte=_transfer_encoding(plain))
+    alternative.add_alternative(html_body, subtype="html", cte=_transfer_encoding(html_body))
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = settings.smtp_from.strip()
     message["To"] = recipient
     message["Date"] = formatdate(localtime=False)
-    message.set_content(plain)
-    message.add_alternative(html_body, subtype="html")
+    message.make_related()
+    message.attach(alternative)
     try:
         _attach_inline_logo(message)
     except Exception as exc:
@@ -465,23 +467,38 @@ def login_code_body(*, full_name: str, code: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _transfer_encoding(payload: str) -> str:
+    """7bit when the letter is ASCII so a soft break cannot land on the code."""
+    try:
+        payload.encode("ascii")
+    except UnicodeEncodeError:
+        return "8bit"
+    return "7bit"
+
+
 def login_code_html(*, full_name: str, code: str) -> str:
     name = full_name.strip()
     greeting = html.escape(f"Hello {name}," if name else "Hello,")
     visible = html.escape(code)
-    code_line = (
-        f'<p style="margin:0;font-family:{_MONO};font-size:28px;letter-spacing:0.28em;color:#1c1c1c;">{visible}</p>'
+    # Digits are the cell text, on their own line. A nested <p> is dropped by
+    # some clients, and a quoted-printable break after the digits hides them.
+    code_row = (
+        '<tr><td colspan="2" style="padding:8px 32px 16px;background-color:#ffffff;'
+        f"font-family:{_MONO};font-size:28px;line-height:1.4;letter-spacing:0.18em;"
+        'color:#111111;text-align:left;">\n'
+        f"{visible}\n"
+        "</td></tr>"
     )
     rows_html = (
         _text_row(greeting, padding="28px 32px 12px")
         + _text_row("Your sign-in code is", padding="0 32px 8px")
-        + _text_row(code_line, padding="0 32px 16px")
+        + code_row
         + _text_row(html.escape(_LOGIN_EXPIRES), padding="0 32px 12px")
         + _text_row(html.escape(_LOGIN_IGNORE), padding="0 32px 22px")
     )
     return render_transactional_email(
         title="Your APEX sign-in code",
-        preheader=_LOGIN_EXPIRES,
+        preheader=f"Your sign-in code is {visible}.",
         rows_html=rows_html,
     )
 

@@ -2791,6 +2791,41 @@ textarea::placeholder {
   filter: drop-shadow(0 0 40px rgba(196, 165, 106, 0.14));
 }
 
+/* Sign-in reminder: a compact centered dialog. The backdrop covers the page;
+   the card does not grow to the viewport. Long copy scrolls in the body. */
+.expiry-login-backdrop {
+  align-items: center;
+  justify-content: center;
+}
+
+.expiry-login-card {
+  align-self: center;
+  flex: 0 0 auto;
+  width: min(32rem, calc(100vw - 2rem));
+  height: auto;
+  min-height: 0;
+  max-height: calc(100dvh - 2rem);
+}
+
+.expiry-login-frame,
+.expiry-login-inner {
+  height: auto;
+  min-height: 0;
+  max-height: 100%;
+}
+
+.expiry-login-inner {
+  overflow: hidden;
+}
+
+.expiry-login-body {
+  width: 100%;
+  min-height: 0;
+  max-height: min(24rem, calc(100dvh - 16rem));
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
 .order-cert-frame {
   border: 1px solid rgba(196, 165, 106, 0.45);
   border-radius: 1.25rem;
@@ -3721,6 +3756,11 @@ html[data-theme="light"] .apex-draw-stroke {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .expiry-login-card {
+    animation: none;
+    transition: none;
+  }
+
   .desk {
     --desk-dur: 140ms;
   }

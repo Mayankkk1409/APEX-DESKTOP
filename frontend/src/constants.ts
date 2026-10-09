@@ -1,3 +1,5 @@
+import { browserApiBase } from "./lib/browserApiBase";
+
 /** Splash: logo draw, hold, lift, then disclaimer readable before login. */
 export const SPLASH_DURATION_MS = Number(import.meta.env.VITE_SPLASH_DURATION_MS ?? 7200);
 
@@ -22,7 +24,10 @@ export const SCAN_SLIDE_LAYERS = [
 /** Slides that own the left/right arrow keys for their own internal card carousel. */
 export const CAROUSEL_LAYERS: readonly string[] = ["technical", "options_chain_greeks", "volatility"];
 
-export const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
+export const API_BASE =
+  typeof location !== "undefined"
+    ? browserApiBase(import.meta.env.VITE_API_BASE_URL, location.origin)
+    : (import.meta.env.VITE_API_BASE_URL ?? "");
 export const WS_BASE =
   import.meta.env.VITE_WS_BASE_URL ??
   `${typeof location !== "undefined" && location.protocol === "https:" ? "wss" : "ws"}://${typeof location !== "undefined" ? location.host : "localhost:5173"}`;

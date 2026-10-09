@@ -269,8 +269,10 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
     setSubmitting(true);
     try {
       const res = await api.login(name, password);
-      if (res.otp_required === false && res.access_token && res.expires_in != null && res.refresh_in != null) {
-        await enterDesk({ access_token: res.access_token, expires_in: res.expires_in, refresh_in: res.refresh_in });
+      if (res.otp_required === false) {
+        if (res.access_token && res.expires_in != null && res.refresh_in != null) {
+          await enterDesk({ access_token: res.access_token, expires_in: res.expires_in, refresh_in: res.refresh_in });
+        }
         return;
       }
       flowRef.current = "login";

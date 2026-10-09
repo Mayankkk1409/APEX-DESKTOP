@@ -13,8 +13,17 @@ const trap = vi.fn((_active: boolean) => ({ current: null }));
 
 vi.mock("framer-motion", () => ({
   motion: {
-    div: ({ children, ...props }: React.ComponentProps<"div">) => <div {...props}>{children}</div>,
+    div: ({
+      children,
+      initial: _initial,
+      animate: _animate,
+      transition: _transition,
+      ...props
+    }: React.ComponentProps<"div"> & { initial?: unknown; animate?: unknown; transition?: unknown }) => (
+      <div {...props}>{children}</div>
+    ),
   },
+  useReducedMotion: () => true,
 }));
 
 vi.mock("../hooks/useFocusTrap", () => ({
@@ -42,6 +51,9 @@ describe("ExpiryLoginCertificate", () => {
     );
     expect(html).toContain('role="dialog"');
     expect(html).toContain('aria-labelledby="expiry-login-title"');
+    expect(html).toContain("expiry-login-card");
+    expect(html).toContain("expiry-login-body");
+    expect(html).not.toMatch(/min-h-screen|h-screen|100vh|flex-grow|flex-1/);
     expect(html).toContain("Expiring positions");
     expect(html).toContain(EXPIRY_LOGIN_NONE);
     expect(html).toContain('data-testid="expiry-login-empty"');

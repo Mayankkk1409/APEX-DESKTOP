@@ -23,7 +23,7 @@ from app.database import Base, get_db
 from app.main import create_app
 from app.models.otp_device import OtpDevice
 from app.redis_client import reset_redis_for_tests
-from app.routers.auth import DEVICE_COOKIE, otp_skip_active
+from app.routers.auth import DEVICE_COOKIE, cookie_secure_for_request, otp_skip_active
 from app.services.market_session import NYSE_HOLIDAYS, getLastMarketOpen
 
 _PASSWORD = "ApexDesk!23"
@@ -277,3 +277,69 @@ async def test_other_device_user_and_forged_cookie_still_require_otp(
     assert tampered.status_code == 200, tampered.text
     assert tampered.json()["otp_required"] is True
     assert "access_token" not in tampered.json()
+
+
+@pytest.mark.asyncio
+async def test_second_login_on_loopback_skips_the_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The browser stores the device cookie on http://127.0.0.1 and the next login sends no email."""
+    reset_redis_for_tests()
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
+    async def override_db() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    app = create_app()
+    app.dependency_overrides[get_db] = override_db
+    sent = _capture(monkeypatch)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+        await _signup(client, "loopback", "loopback@example.com")
+        login = await client.post("/auth/login", json={"username": "loopback", "password": _PASSWORD})
+        assert login.status_code == 200, login.text
+        assert login.json()["otp_required"] is True
+        assert len(sent) == 1
+        jar = _cookie_jar(login)
+        assert DEVICE_COOKIE in jar
+        assert not jar[DEVICE_COOKIE]["secure"]
+        assert jar[DEVICE_COOKIE]["httponly"]
+        verify = await client.post("/auth/otp/verify", json={"username": "loopback", "code": sent[0]["code"]})
+        assert verify.status_code == 200, verify.text
+        again = await client.post("/auth/login", json={"username": "loopback", "password": _PASSWORD})
+        assert again.status_code == 200, again.text
+        assert again.json()["otp_required"] is False
+        assert again.json()["access_token"]
+        assert len(sent) == 1
+    await engine.dispose()
+
+
+def test_https_keeps_the_secure_cookie_flag() -> None:
+    from starlette.requests import Request
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "https",
+        "path": "/",
+        "raw_path": b"/",
+        "query_string": b"",
+        "headers": [(b"host", b"desk.example")],
+        "client": ("203.0.113.5", 443),
+        "server": ("desk.example", 443),
+    }
+    request = Request(scope)
+    from app.config import Settings
+
+    assert cookie_secure_for_request(request, Settings(cookie_secure=True)) is True

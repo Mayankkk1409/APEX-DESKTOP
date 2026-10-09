@@ -1,4 +1,4 @@
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import { useEscapeKey, useFocusTrap } from "../hooks/useFocusTrap";
 import {
   EXPIRY_LOGIN_NONE,
@@ -19,25 +19,26 @@ type Props = {
 export function ExpiryLoginCertificate({ items, isPaper, onDismiss }: Props) {
   const trapRef = useFocusTrap(true);
   useEscapeKey(true, onDismiss);
+  const reduceMotion = useReducedMotion();
   const notes = expiryLoginNotes(items, isPaper);
 
   return (
     <div
       ref={trapRef}
-      className="order-cert-backdrop fixed inset-0 z-[60] flex items-center justify-center p-4"
+      className="order-cert-backdrop expiry-login-backdrop fixed inset-0 z-[60] flex items-center justify-center p-4"
       data-testid="expiry-login-certificate"
       role="dialog"
       aria-labelledby="expiry-login-title"
       aria-modal="true"
     >
       <motion.div
-        initial={{ opacity: 0, scale: 0.96, y: 12 }}
+        initial={reduceMotion ? false : { opacity: 0, scale: 0.96, y: 12 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
-        transition={{ duration: 0.35, ease: [0.22, 0.82, 0.2, 1] }}
-        className="order-cert-card w-full max-w-lg"
+        transition={reduceMotion ? { duration: 0 } : { duration: 0.35, ease: [0.22, 0.82, 0.2, 1] }}
+        className="order-cert-card expiry-login-card"
       >
-        <div className="order-cert-frame">
-          <div className="order-cert-inner order-cert-stack">
+        <div className="order-cert-frame expiry-login-frame">
+          <div className="order-cert-inner order-cert-stack expiry-login-inner">
             {isPaper ? (
               <p className="order-cert-paper-banner" data-testid="expiry-login-paper-banner">
                 PAPER TRADE
@@ -53,71 +54,73 @@ export function ExpiryLoginCertificate({ items, isPaper, onDismiss }: Props) {
               <p className="order-cert-status">Next 7 days</p>
             </div>
 
-            {items.length === 0 ? (
-              <p className="order-cert-copy sf-panel-note" data-testid="expiry-login-empty">
-                {EXPIRY_LOGIN_NONE}
-              </p>
-            ) : (
-              <>
-                {notes.length > 0 ? (
-                  <div className="order-cert-copy-group" data-testid="expiry-login-copy">
-                    {notes.map((note) => (
-                      <p key={note} className="order-cert-copy sf-panel-note">
-                        {note}
-                      </p>
-                    ))}
-                  </div>
-                ) : null}
+            <div className="expiry-login-body">
+              {items.length === 0 ? (
+                <p className="order-cert-copy sf-panel-note" data-testid="expiry-login-empty">
+                  {EXPIRY_LOGIN_NONE}
+                </p>
+              ) : (
+                <>
+                  {notes.length > 0 ? (
+                    <div className="order-cert-copy-group" data-testid="expiry-login-copy">
+                      {notes.map((note) => (
+                        <p key={note} className="order-cert-copy sf-panel-note">
+                          {note}
+                        </p>
+                      ))}
+                    </div>
+                  ) : null}
 
-                <div className="order-cert-legs" data-testid="expiry-login-list">
-                  <p className="order-cert-legs-label">Open trades</p>
-                  <ul>
-                    {items.map((item) => (
-                      <li key={item.key} data-testid={`expiry-login-row-${item.key}`}>
-                        <dl className="order-cert-grid">
-                          <div className="order-cert-row">
-                            <dt>Symbol</dt>
-                            <dd data-testid={`expiry-login-symbol-${item.key}`}>{item.symbol}</dd>
-                          </div>
-                          {item.strategy ? (
+                  <div className="order-cert-legs" data-testid="expiry-login-list">
+                    <p className="order-cert-legs-label">Open trades</p>
+                    <ul>
+                      {items.map((item) => (
+                        <li key={item.key} data-testid={`expiry-login-row-${item.key}`}>
+                          <dl className="order-cert-grid">
                             <div className="order-cert-row">
-                              <dt>Strategy</dt>
-                              <dd data-testid={`expiry-login-strategy-${item.key}`}>{item.strategy}</dd>
+                              <dt>Symbol</dt>
+                              <dd data-testid={`expiry-login-symbol-${item.key}`}>{item.symbol}</dd>
                             </div>
-                          ) : null}
-                          <div className="order-cert-row">
-                            <dt>Expiry</dt>
-                            <dd className="order-cert-leg-expiry" data-testid={`expiry-login-expiry-${item.key}`}>
-                              {item.expiryLabel}
-                            </dd>
-                          </div>
-                          <div className="order-cert-row">
-                            <dt>Strike</dt>
-                            <dd data-testid={`expiry-login-strike-${item.key}`}>{item.strikeLabel}</dd>
-                          </div>
-                          <div className="order-cert-row">
-                            <dt>Call/Put</dt>
-                            <dd data-testid={`expiry-login-right-${item.key}`}>{formatRightLabel(item.right)}</dd>
-                          </div>
-                          <div className="order-cert-row">
-                            <dt>Long/Short</dt>
-                            <dd data-testid={`expiry-login-direction-${item.key}`}>
-                              {formatDirectionLabel(item.direction)}
-                            </dd>
-                          </div>
-                          <div className="order-cert-row">
-                            <dt>Settles</dt>
-                            <dd data-testid={`expiry-login-settles-${item.key}`}>
-                              {isDeskManaged(item, isPaper) ? "APEX auto-close" : "Your broker"}
-                            </dd>
-                          </div>
-                        </dl>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              </>
-            )}
+                            {item.strategy ? (
+                              <div className="order-cert-row">
+                                <dt>Strategy</dt>
+                                <dd data-testid={`expiry-login-strategy-${item.key}`}>{item.strategy}</dd>
+                              </div>
+                            ) : null}
+                            <div className="order-cert-row">
+                              <dt>Expiry</dt>
+                              <dd className="order-cert-leg-expiry" data-testid={`expiry-login-expiry-${item.key}`}>
+                                {item.expiryLabel}
+                              </dd>
+                            </div>
+                            <div className="order-cert-row">
+                              <dt>Strike</dt>
+                              <dd data-testid={`expiry-login-strike-${item.key}`}>{item.strikeLabel}</dd>
+                            </div>
+                            <div className="order-cert-row">
+                              <dt>Call/Put</dt>
+                              <dd data-testid={`expiry-login-right-${item.key}`}>{formatRightLabel(item.right)}</dd>
+                            </div>
+                            <div className="order-cert-row">
+                              <dt>Long/Short</dt>
+                              <dd data-testid={`expiry-login-direction-${item.key}`}>
+                                {formatDirectionLabel(item.direction)}
+                              </dd>
+                            </div>
+                            <div className="order-cert-row">
+                              <dt>Settles</dt>
+                              <dd data-testid={`expiry-login-settles-${item.key}`}>
+                                {isDeskManaged(item, isPaper) ? "APEX auto-close" : "Your broker"}
+                              </dd>
+                            </div>
+                          </dl>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </>
+              )}
+            </div>
 
             <button type="button" className="order-cert-dismiss" data-testid="expiry-login-dismiss" onClick={onDismiss}>
               Dismiss
