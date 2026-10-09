@@ -277,7 +277,9 @@ def test_login_letter_is_addressed_to_the_given_recipient(monkeypatch: pytest.Mo
         def login(self, *_args: object, **_kwargs: object) -> None:
             raise AssertionError("login is unused when SMTP username is empty")
 
-        def send_message(self, message: object) -> None:
+        def send_message(self, message: object, from_addr: str | None = None, to_addrs: list[str] | None = None) -> None:
+            assert from_addr == "desk@example.com"
+            assert to_addrs == ["ada.lovelace@company.com"]
             delivered.append((str(message["To"]), str(message["Subject"]), str(message["From"])))  # type: ignore[index]
             assert message.get_content_type() == "multipart/alternative"  # type: ignore[attr-defined]
             plain = message.get_body(preferencelist=("plain",))  # type: ignore[attr-defined]
@@ -290,8 +292,8 @@ def test_login_letter_is_addressed_to_the_given_recipient(monkeypatch: pytest.Mo
             assert "Hello Ada Lovelace," in html_body
             assert "This code expires in 10 minutes." in text
             assert "This code expires in 10 minutes." in html_body
-            assert "If you did not request this code, ignore this message." in text
-            assert "If you did not request this code, ignore this message." in html_body
+            assert "If you did not request this, ignore this email." in text
+            assert "If you did not request this, ignore this email." in html_body
             assert text.rstrip().endswith("Trading involves risk. Not financial advice.")
             assert html_body.lower().count("<table") == 1
             assert "max-width:600px" in html_body
@@ -334,13 +336,13 @@ def test_login_letter_is_addressed_to_the_given_recipient(monkeypatch: pytest.Mo
     assert body.startswith("Hello Ada Lovelace,\n")
     assert f"Your sign-in code is {code}." in body
     assert "This code expires in 10 minutes." in body
-    assert "If you did not request this code, ignore this message." in body
+    assert "If you did not request this, ignore this email." in body
     assert body.rstrip().endswith("Trading involves risk. Not financial advice.")
     assert "Hello Ada Lovelace," in html_body
     assert 'src="cid:apex-logo"' in html_body
     assert "<svg" not in html_body.lower()
     assert "This code expires in 10 minutes." in html_body
-    assert "If you did not request this code, ignore this message." in html_body
+    assert "If you did not request this, ignore this email." in html_body
     assert mask_password(_PASSWORD) not in body
     assert mask_password(_PASSWORD) not in html_body
     assert _PASSWORD not in body

@@ -17,6 +17,7 @@ export function LoginCodeDialog({ kind, message, onClose }: Props) {
         message={OTP_CODE_INVALID}
         testId="login-code-invalid"
         onClose={onClose}
+        plain
       />
     );
   }
@@ -27,6 +28,7 @@ export function LoginCodeDialog({ kind, message, onClose }: Props) {
         message={message || NO_SIGNIN_EMAIL}
         testId="login-no-email"
         onClose={onClose}
+        plain
       />
     );
   }
@@ -36,6 +38,7 @@ export function LoginCodeDialog({ kind, message, onClose }: Props) {
       message={message || SIGNIN_CODE_NOT_SENT}
       testId="login-code-not-sent"
       onClose={onClose}
+      plain
     />
   );
 }

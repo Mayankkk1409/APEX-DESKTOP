@@ -30,7 +30,7 @@ _DISCLAIMER = "Trading involves risk. Not financial advice."
 _CONFIRMATION = "Your APEX account is confirmed."
 _SUPPORT = "If you did not create this account, reply to this message."
 _LOGIN_EXPIRES = "This code expires in 10 minutes."
-_LOGIN_IGNORE = "If you did not request this code, ignore this message."
+_LOGIN_IGNORE = "If you did not request this, ignore this email."
 _NEXT_STEPS = (
     "Sign in with your username and password.",
     "Enter the sign-in code sent to this address.",
@@ -301,8 +301,9 @@ def _transmit(settings: Settings, message: EmailMessage, recipient: str, *, labe
             if settings.smtp_starttls:
                 smtp.starttls()
                 smtp.ehlo()
-            if smtp.sock is not None:
-                smtp.sock.settimeout(20)
+            sock = getattr(smtp, "sock", None)
+            if sock is not None:
+                sock.settimeout(20)
             smtp_username = settings.smtp_username.strip()
             smtp_password = "".join(settings.smtp_password.split())
             if smtp_username:
@@ -480,32 +481,21 @@ def _deliver_login_code(settings: Settings, *, full_name: str, email: str, code:
         login_code_body(full_name=full_name, code=code),
         login_code_html(full_name=full_name, code=code),
     )
-    try:
-        with smtplib.SMTP(settings.smtp_host.strip(), settings.smtp_port, timeout=15) as smtp:
-            smtp.ehlo()
-            if settings.smtp_starttls:
-                smtp.starttls()
-                smtp.ehlo()
-            smtp_username = settings.smtp_username.strip()
-            smtp_password = "".join(settings.smtp_password.split())
-            if smtp_username:
-                smtp.login(smtp_username, smtp_password)
-            smtp.send_message(message)
-        return True
-    except Exception:
-        logger.warning(_LOGIN_NOT_SENT)
-        return False
+    return _transmit(settings, message, recipient, label=_LOGIN_NOT_SENT) == 250
 
 
 async def send_login_code(settings: Settings, *, full_name: str, email: str, code: str) -> bool:
     """Email a sign-in code with the same SMTP settings as the signup letter."""
     try:
-        return await asyncio.to_thread(
-            _deliver_login_code,
-            settings,
-            full_name=full_name,
-            email=email,
-            code=code,
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                _deliver_login_code,
+                settings,
+                full_name=full_name,
+                email=email,
+                code=code,
+            ),
+            timeout=30,
         )
     except Exception:
         logger.warning(_LOGIN_NOT_SENT)

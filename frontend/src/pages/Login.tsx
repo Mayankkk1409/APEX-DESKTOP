@@ -308,10 +308,12 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
   }
 
   async function getCode() {
+    if (submitting) return;
     setErr("");
     setCodeNotice(null);
     setFailure(null);
     const name = otpUser || username.trim();
+    setSubmitting(true);
     try {
       if (flowRef.current === "recovery") {
         await mintCode(name, true);
@@ -323,6 +325,8 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
       setOtpNonce((n) => n + 1);
     } catch (ex) {
       presentLoginError((ex as Error).message);
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -390,13 +394,14 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
         message={failure.message}
         testId={failure.testId}
         onClose={() => setFailure(null)}
+        plain
       />
     ) : null}
     <main className="min-h-screen flex items-center justify-center px-4">
       <form
         ref={formRef}
         onSubmit={stage === "identify" ? (isRecovery ? onRequestRecoveryCode : onLogin) : verify}
-        className="w-full max-w-md rounded-2xl border border-line bg-panel/80 p-8 shadow-glow"
+        className="w-full max-w-md rounded-2xl border border-line bg-panel p-8"
         data-testid="login-form"
       >
         <div className="flex justify-center">
@@ -408,15 +413,19 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
             Set a new password, then verify with your security code
           </p>
         )}
-        <label className="block text-xs text-bronze">Username</label>
-        <input
-          data-testid="username"
-          className="mt-1 mb-3 w-full rounded-md border border-line bg-ink px-3 py-2"
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          autoComplete="username"
-          readOnly={showOtp && isRecovery}
-        />
+        {!(showOtp && !isRecovery) && (
+          <>
+            <label className="block text-xs text-bronze">Username</label>
+            <input
+              data-testid="username"
+              className="mt-1 mb-3 w-full rounded-md border border-line bg-ink px-3 py-2"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              autoComplete="username"
+              readOnly={showOtp && isRecovery}
+            />
+          </>
+        )}
         {showPassword && (
           <>
             <PasswordField
@@ -459,16 +468,48 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
             />
           </>
         )}
-        {showOtp && (
+        {showOtp && !isRecovery && (
           <div className="mb-4">
-            {!isRecovery && (
-              <p className="mb-3 text-center text-sm text-subtle" data-testid="login-code-hint">
-                Enter the sign-in code emailed to the address on this account.
-              </p>
-            )}
+            <p className="mb-3 text-center text-sm text-subtle" data-testid="login-code-hint">
+              Enter the sign-in code emailed to the address on this account.
+            </p>
+            <label className="block text-center text-xs text-bronze" htmlFor="login-code">
+              Sign-in code
+            </label>
+            <input
+              id="login-code"
+              data-testid="login-code"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              maxLength={6}
+              className="mt-2 w-full rounded-md border border-line bg-ink px-3 py-3 text-center font-mono text-lg tracking-[0.3em]"
+              value={code}
+              onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+            />
+            <div className="mt-3 text-center">
+              <button
+                type="button"
+                data-testid="get-code"
+                className="text-xs text-subtle underline disabled:opacity-60"
+                onClick={getCode}
+                disabled={submitting}
+              >
+                Email a new code
+              </button>
+            </div>
+          </div>
+        )}
+        {showOtp && isRecovery && (
+          <div className="mb-4">
             <div className="mb-2 flex items-center justify-between">
-              <span className="text-xs text-bronze">{isRecovery ? "Security code" : "One-time code"}</span>
-              <button type="button" data-testid="get-code" className="text-xs text-gold underline" onClick={getCode}>
+              <span className="text-xs text-bronze">Security code</span>
+              <button
+                type="button"
+                data-testid="get-code"
+                className="text-xs text-subtle underline disabled:opacity-60"
+                onClick={getCode}
+                disabled={submitting}
+              >
                 Get new code
               </button>
             </div>
@@ -476,7 +517,7 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
               key={otpNonce}
               value={code}
               onChange={setCode}
-              autofill={isRecovery ? autofill : null}
+              autofill={autofill}
               onAutofillComplete={() => formRef.current?.requestSubmit()}
             />
           </div>

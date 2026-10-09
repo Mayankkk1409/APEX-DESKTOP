@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -172,6 +173,7 @@ async def _email_login_code(user: User, settings: Settings, *, force_new: bool =
         force_new=force_new,
     )
     if claim.code is None:
+        logger.info("Sign-in code already pending; email not sent again")
         return
     sent = await send_login_code(
         settings,
