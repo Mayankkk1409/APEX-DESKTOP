@@ -1,0 +1,57 @@
+APEX-DESKTOP-source.zip
+Bytes: 8302011
+Files: 506
+
+Included top-level entries:
+- .cursor
+- .env.example
+- .github
+- .gitignore
+- .pre-commit-config.yaml
+- APEX_Options_Platform_Full_Document.pdf
+- Feature.pdf
+- Project_APEX.pdf
+- README.md
+- Screenshot_2026-08-23_at_7.51.56_PM-removebg-preview.png
+- backend
+- docker-compose.yml
+- docs
+- frontend
+- infra
+- package-lock.json
+- package.json
+- portfolio-verify.png
+
+Exclusion rules:
+- .env (any env file other than .env.example)
+- *.db
+- *-journal and *.db-journal
+- backend/.data/audit/token.json
+- backend/.data/prodcheck.token
+- node_modules
+- .venv
+- __pycache__
+- .git
+- dist
+- coverage
+- a file that assigns ALPACA_API_SECRET_KEY, ALPACA_API_KEY_ID starting with PK, or a non-placeholder SMTP_PASSWORD
+- docs/handoff/package (this delivery folder, so the zip does not contain itself)
+- caches also left out: .pytest_cache, .hypothesis, test-results, playwright-report, .mypy_cache, htmlcov, .DS_Store
+
+Live-key scan: no included candidate assigned ALPACA_API_SECRET_KEY, ALPACA_API_KEY_ID=PK, or a non-placeholder SMTP_PASSWORD. README.md and infra/secret-scan.sh mention a key id the repo itself marks as burned. Those files were included because they are project source, not a live credential assignment. The id is not copied here.
+
+Required paths present in the zip:
+- frontend/package.json: yes
+- frontend/package-lock.json: yes
+- backend/requirements.txt: yes
+- package.json: yes
+- docker-compose.yml: yes
+- README.md: yes
+- .env.example: yes
+- .cursor/rules/apex-encyclopedia-strategy.mdc: yes
+- backend/alembic.ini: yes
+- backend/alembic/: yes
+- frontend/: yes
+- backend/: yes
+- docs/: yes
+- infra/: yes
