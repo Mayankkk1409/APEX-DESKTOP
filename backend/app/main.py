@@ -35,7 +35,28 @@ async def lifespan(_app: FastAPI):
     scheduler = start_expiry_scheduler()
     if scheduler is not None:
         asyncio.create_task(expiry_close_job())
+    queue_stop = asyncio.Event()
+
+    async def _queued_orders() -> None:
+        from app.database import SessionLocal
+        from app.deps import get_adapter
+        from app.services.order_queue import process_queued_orders
+
+        while not queue_stop.is_set():
+            try:
+                async with SessionLocal() as session:
+                    await process_queued_orders(session, get_adapter(settings))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("queued order pass failed ({})", type(exc).__name__)
+            try:
+                await asyncio.wait_for(queue_stop.wait(), timeout=60)
+            except TimeoutError:
+                continue
+
+    queue_task = asyncio.create_task(_queued_orders())
     yield
+    queue_stop.set()
+    queue_task.cancel()
     if scheduler is not None:
         scheduler.shutdown(wait=False)
 

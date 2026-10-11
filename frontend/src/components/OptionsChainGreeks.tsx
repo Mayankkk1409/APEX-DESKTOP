@@ -68,7 +68,10 @@ export function OptionsChainGreeks({
     staleTime: 15_000,
   });
 
-  const analysis: ChainAnalysis | null = chain.data ?? initial ?? null;
+  const analysis: ChainAnalysis | null =
+    (chain.data && (!expiry || chain.data.expiry === expiry) ? chain.data : null) ??
+    (initial && (!expiry || !initial.expiry || initial.expiry === expiry) ? initial : null) ??
+    null;
   const tier = scoreTier(analysis?.execution_score ?? executionScore ?? null);
   const blocked = tier === "blocked";
   const chainExpiry = analysis?.expiry ?? expiry ?? null;
@@ -100,7 +103,10 @@ export function OptionsChainGreeks({
       wrap.querySelector<HTMLElement>(".chain-row");
     const strikeCell = focusRow?.querySelector<HTMLElement>(".chain-strike");
     if (strikeCell) wrap.scrollLeft = Math.max(0, strikeCell.offsetLeft + strikeCell.offsetWidth / 2 - wrap.clientWidth / 2);
-    if (focusRow) wrap.scrollTop = Math.max(0, focusRow.offsetTop - wrap.clientHeight / 2);
+    if (focusRow) {
+      focusRow.scrollIntoView({ block: "center", inline: "nearest" });
+      wrap.scrollTop = Math.max(0, focusRow.offsetTop - wrap.clientHeight / 2);
+    }
   }, [ladder, highlights]);
 
   useEffect(() => {
@@ -182,6 +188,10 @@ export function OptionsChainGreeks({
             {analysis.symbol}
             {analysis.expiry ? ` · ${analysis.expiry}` : ""}
           </h1>
+          <p className="chain-sub" data-testid="chain-strike-count">
+            {ladder.length} {ladder.length === 1 ? "strike" : "strikes"}
+            {contracts.length ? ` · ${contracts.length} contracts` : ""}
+          </p>
         </div>
         {!src.is_live && (
           <p className="chain-source-quiet is-degraded" data-testid="chain-source-badge" role="status">

@@ -202,8 +202,9 @@ async def test_fetch_positions_normalizes_results_payload() -> None:
 async def test_fetch_day_pnl_from_return_percent() -> None:
     response = type("R", (), {"body": {"data": [{"timeframe": "1D", "return_percent": -1.2}]}})()
     with patch.object(st, "_call", AsyncMock(return_value=response)):
-        day_pnl = await st.fetch_day_pnl("user", "secret", "acc-1", 50000.0)
+        day_pnl, note = await st.fetch_day_pnl("user", "secret", "acc-1", 50000.0)
     assert day_pnl == pytest.approx(-600.0)
+    assert note is None
 
 
 @pytest.mark.asyncio
@@ -578,3 +579,127 @@ async def test_missing_snaptrade_config(client: AsyncClient) -> None:
         mock_settings.return_value.configured = False
         res = await client.post("/api/brokerage/register-user", headers=headers)
     assert res.status_code == 503
+
+
+class _Map:
+    """Stand-in for a SnapTrade model: mapping protocol, not a dict."""
+
+    def __init__(self, data: dict):
+        self._data = data
+
+    def keys(self):
+        return self._data.keys()
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+
+def test_history_and_orders_read_model_objects() -> None:
+    history = st._history_rows(_Map({"history": [_Map({"date": "2020-01-02", "total_value": "100"})]}))
+    assert history[0]["date"] == "2020-01-02"
+    orders = st._order_rows(
+        [
+            _Map(
+                {
+                    "brokerage_order_id": "ord-9",
+                    "universal_symbol": _Map({"symbol": "AAPL"}),
+                    "action": "BUY",
+                    "total_quantity": "10",
+                    "filled_quantity": "4",
+                    "limit_price": "180",
+                    "order_type": "Limit",
+                    "status": "PENDING",
+                    "time_placed": "2026-08-01T14:00:00Z",
+                    "brokerage_group_order_id": "grp-1",
+                }
+            )
+        ]
+    )
+    row = st._normalize_order(orders[0])
+    assert row["symbol"] == "AAPL"
+    assert row["qty"] == 10
+    assert row["filled_qty"] == 4
+    assert row["fill_price"] is None
+    assert row["limit_price"] == 180
+    assert row["status"] == "PENDING"
+    assert row["group_id"] == "grp-1"
+
+
+def test_activity_trades_do_not_duplicate_orders() -> None:
+    orders = [
+        {
+            "id": "ord-1",
+            "symbol": "AAPL",
+            "side": "buy",
+            "qty": 5.0,
+            "created_at": "2024-01-02T15:00:00Z",
+            "source": "order",
+        }
+    ]
+    activities = [
+        {"id": "act-same", "type": "BUY", "symbol": _Map({"symbol": "AAPL"}), "units": 5, "price": 10, "trade_date": "2024-01-02"},
+        {"id": "act-old", "type": "SELL", "symbol": _Map({"symbol": "MSFT"}), "units": -2, "price": 20, "trade_date": "2023-06-01"},
+        {"id": "div", "type": "DIVIDEND", "symbol": _Map({"symbol": "AAPL"}), "amount": 1, "trade_date": "2023-06-02"},
+    ]
+    merged = st._merge_order_rows(orders, activities)
+    ids = [row["id"] for row in merged]
+    assert ids == ["ord-1", "act-old"]
+    assert merged[1]["source"] == "activity"
+    assert merged[1]["fill_price"] == 20
+    assert merged[1]["status"] == "SELL"
+
+
+@pytest.mark.asyncio
+async def test_fetch_day_pnl_reads_model_return() -> None:
+    response = type("R", (), {"body": _Map({"data": [_Map({"timeframe": "1D", "return_percent": 0.5})]})})()
+    with patch.object(st, "_call", AsyncMock(return_value=response)):
+        day_pnl, note = await st.fetch_day_pnl("user", "secret", "acc-1", 10000.0)
+    assert day_pnl == pytest.approx(50.0)
+    assert note is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_orders_keeps_pending_limit_separate_from_fill() -> None:
+    response = type(
+        "R",
+        (),
+        {
+            "body": [
+                _Map(
+                    {
+                        "brokerage_order_id": "ord-9",
+                        "universal_symbol": _Map({"symbol": "AAPL"}),
+                        "action": "BUY",
+                        "total_quantity": "10",
+                        "filled_quantity": "0",
+                        "limit_price": "180",
+                        "order_type": "Limit",
+                        "status": "PENDING",
+                        "time_placed": "2026-08-01T14:00:00Z",
+                    }
+                )
+            ]
+        },
+    )()
+    with (
+        patch.object(st, "_call", AsyncMock(return_value=response)),
+        patch.object(st, "_paged_activities", AsyncMock(return_value=([], True))),
+    ):
+        rows = await st.fetch_orders("user", "secret", "acc-1")
+    assert rows[0]["status"] == "PENDING"
+    assert rows[0]["fill_price"] is None
+    assert rows[0]["limit_price"] == 180
+    assert rows[0]["filled_qty"] == 0
+
+
+def test_activity_only_order_note_does_not_call_rows_filled() -> None:
+    note = st.order_history_note(
+        [
+            {"source": "activity", "created_at": "2024-11-01", "status": "BUY"},
+            {"source": "activity", "created_at": "2026-09-30", "status": "SELL"},
+        ]
+    )
+    assert "no orders for the last 90 days" in note
+    assert "2024-11-01" in note
+    assert "2026-09-30" in note
+    assert "not marked filled" in note

@@ -24,7 +24,15 @@ const proxy = {
   "/health": apiProxyOptions(API),
   "/market": apiProxyOptions(API),
   "/volatility": apiProxyOptions(API),
-  "/scan": apiProxyOptions(API),
+  "/scan": {
+    ...apiProxyOptions(API),
+    // The desk page is also /scan. A document load must stay in Vite; API calls are POST or JSON.
+    bypass(req: { method?: string; headers?: { accept?: string | string[] } }) {
+      const accept = req.headers?.accept;
+      const header = Array.isArray(accept) ? accept.join(",") : accept ?? "";
+      if (req.method === "GET" && header.includes("text/html")) return "/index.html";
+    },
+  },
   "/watchlist": apiProxyOptions(API),
   "/sentiment": apiProxyOptions(API),
   "/ws": wsProxy,

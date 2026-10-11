@@ -48,9 +48,9 @@ export function resetExpiryLoginArrival(): void {
 }
 
 /**
- * Password, OTP, and cookie/session restore all show the certificate.
- * An empty book still shows. The painted-day key and credentialLogin do not hide it.
- * alreadyPresented is the in-memory desk latch, not sessionStorage.
+ * The expiry certificate is part of the code-entry step only.
+ * A password login, a cookie restore, and any later visit stay quiet.
+ * paintedMarketDay is written when the certificate is shown, so it does not repeat.
  */
 export function shouldShowExpiryLoginCertificate(input: {
   rowCount: number;
@@ -59,13 +59,15 @@ export function shouldShowExpiryLoginCertificate(input: {
   legacyNoticeDay: string | null;
   credentialLogin: boolean;
   alreadyPresented?: boolean;
+  otpEntry?: boolean;
 }): boolean {
-  if (input.alreadyPresented) return false;
   void input.rowCount;
   void input.marketDay;
-  void input.paintedMarketDay;
   void input.legacyNoticeDay;
   void input.credentialLogin;
+  if (!input.otpEntry) return false;
+  if (input.alreadyPresented) return false;
+  if (input.paintedMarketDay) return false;
   return true;
 }
 

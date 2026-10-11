@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { ApexLogo } from "../components/ApexLogo";
 import { PasswordField } from "../components/PasswordField";
 import { OtpBoxes } from "../components/OtpBoxes";
@@ -34,19 +34,13 @@ import { useSession } from "../store";
 type Flow = "login" | "recovery";
 type Stage = "identify" | "code";
 
-const RESTORED_SCREENS = ["/dashboard", "/app", "/scan", "/portfolio", "/settings"];
-
-/** After a reload, Guard sends the user to /login with the screen they were on. */
-export function pathAfterSessionRestore(from: unknown): string {
-  if (typeof from !== "string" || !from.startsWith("/")) return "/dashboard";
-  const path = from.split("?")[0]?.split("#")[0] ?? "";
-  if (RESTORED_SCREENS.some((screen) => path === screen || path.startsWith(`${screen}/`))) return path;
-  return "/dashboard";
+/** Successful sign-in opens Portfolio. A prior route does not override that. */
+export function pathAfterSessionRestore(_from: unknown): string {
+  return "/portfolio";
 }
 
 export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boolean } = {}) {
   const nav = useNavigate();
-  const loc = useLocation();
   const setUser = useSession((s) => s.setUser);
   const setModal = useSession((s) => s.setConnectModal);
   const setExpiryNoticeOnLogin = useSession((s) => s.setExpiryNoticeOnLogin);
@@ -71,16 +65,18 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
   const [submitting, setSubmitting] = useState(false);
   const [resendAt, setResendAt] = useState(0);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [emailHint, setEmailHint] = useState("");
+  const [codeReused, setCodeReused] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
   const verifyBusy = useRef(false);
   const flowRef = useRef<Flow>("login");
-  const afterExpiryPath = useRef("/dashboard");
+  const afterExpiryPath = useRef("/portfolio");
   flowRef.current = flow;
 
   async function maybeShowExpiry(
     me: import("../types").User,
     isCancelled: () => boolean,
-    credentialLogin: boolean,
+    otpEntry: boolean,
   ): Promise<ExpiryLoginCheck> {
     try {
       const watch = await api.expiryWatch();
@@ -102,8 +98,9 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
           marketDay: watch.market_day,
           paintedMarketDay,
           legacyNoticeDay,
-          credentialLogin,
+          credentialLogin: otpEntry,
           alreadyPresented: expiryLoginArrivalAlreadyShown(),
+          otpEntry,
         })
       ) {
         setExpiryNoticeOnLogin(false);
@@ -143,7 +140,6 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
   useEffect(() => {
     if (skipSessionRestore) return;
     let cancelled = false;
-    const from = (loc.state as { from?: unknown } | null)?.from;
     const tokenBefore = getAccessToken();
     (async () => {
       const restored = await restoreSession();
@@ -154,18 +150,10 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
         return;
       }
       if (restored) {
-        try {
-          const me = (await api.me()) as import("../types").User;
-          if (cancelled) return;
-          setUser(me);
-          afterExpiryPath.current = pathAfterSessionRestore(from);
-          const expiryCheck = await maybeShowExpiry(me, () => cancelled, false);
-          if (cancelled || !expiryLoginShouldNavigate(expiryCheck)) return;
-          nav(afterExpiryPath.current, { replace: true });
-          return;
-        } catch {
-          /* refresh cookie was not enough to read the profile */
-        }
+        // A saved session still starts on the sign-in form. Submitting it
+        // opens the desk, or the code step when this login requires one.
+        setCheckingSession(false);
+        return;
       }
       const redirectMsg = sessionStorage.getItem(AUTH_REDIRECT_KEY);
       if (redirectMsg) {
@@ -260,8 +248,10 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
     setResendAt(resendReadyAt(now));
   }
 
-  function openCodeStep(name: string) {
+  function openCodeStep(name: string, hint = "", reused = false) {
     setOtpUser(name);
+    setEmailHint(hint);
+    setCodeReused(reused);
     setCode("");
     setAutofill(null);
     setOtpNonce((n) => n + 1);
@@ -269,18 +259,20 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
     setStage("code");
   }
 
-  async function enterDesk(res: { access_token: string; expires_in: number; refresh_in: number }) {
+  async function enterDesk(
+    res: { access_token: string; expires_in: number; refresh_in: number },
+    otpEntry = false,
+  ) {
     setAccessToken(res.access_token, res.expires_in, res.refresh_in);
     const me = (await api.me()) as import("../types").User;
     setUser(me);
     setModal(true);
-    const from = (loc.state as { from?: unknown } | null)?.from;
-    const next = pathAfterSessionRestore(from);
+    const next = pathAfterSessionRestore(null);
     afterExpiryPath.current = next;
     resetExpiryLoginArrival();
-    const expiryCheck = await maybeShowExpiry(me, () => false, true);
+    const expiryCheck = await maybeShowExpiry(me, () => false, otpEntry);
     if (!expiryLoginShouldNavigate(expiryCheck)) return;
-    nav(next);
+    nav(next, { replace: true });
   }
 
   async function onLogin(e: FormEvent) {
@@ -300,7 +292,7 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
         return;
       }
       flowRef.current = "login";
-      openCodeStep(name);
+      openCodeStep(res.username || name, res.email_hint || "", Boolean(res.code_reused));
     } catch (ex) {
       presentLoginError((ex as Error).message);
     } finally {
@@ -345,7 +337,10 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
       if (flowRef.current === "recovery") {
         await mintCode(name, true);
       } else {
-        await api.resendLoginCode(name, password);
+        const resent = await api.resendLoginCode(name, password);
+        if (resent.username) setOtpUser(resent.username);
+        if (resent.email_hint) setEmailHint(resent.email_hint);
+        setCodeReused(false);
         setCode("");
         setAutofill(null);
         setOtpNonce((n) => n + 1);
@@ -373,7 +368,7 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
         flowRef.current === "recovery"
           ? await api.forgotPasswordVerify(name, digits)
           : await api.otpVerify(name, digits);
-      await enterDesk(res);
+      await enterDesk(res, flowRef.current !== "recovery");
     } catch (ex) {
       presentLoginError((ex as Error).message);
     } finally {
@@ -447,8 +442,9 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
         )}
         {!(showOtp && !isRecovery) && (
           <>
-            <label className="block text-xs text-bronze">Username</label>
+            <label className="block text-xs text-bronze" htmlFor="login-username">Username</label>
             <input
+              id="login-username"
               data-testid="username"
               className="mt-1 mb-3 w-full rounded-md border border-line bg-ink px-3 py-2"
               value={username}
@@ -503,7 +499,9 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
         {showOtp && !isRecovery && (
           <div className="mb-4">
             <p className="mb-3 text-center text-sm text-subtle" data-testid="login-code-hint">
-              Enter the sign-in code emailed to the address on this account.
+              {codeReused
+                ? `Use the code already sent to ${emailHint || "the address on this account"}. A new email was not sent.`
+                : `Enter the sign-in code emailed to ${emailHint || "the address on this account"}.`}
             </p>
             <label className="block text-center text-xs text-bronze" htmlFor="login-code">
               Sign-in code

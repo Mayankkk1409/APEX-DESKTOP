@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
-import { ApexLogo } from "../components/ApexLogo";
+import { ApexWordmark } from "../components/ApexWordmark";
 import { LegalFooter } from "../components/LegalFooter";
 import { LogoutButton } from "../components/LogoutButton";
 import { PositionCertificateModal } from "../components/PositionCertificateModal";
@@ -133,6 +133,12 @@ export function Portfolio() {
     enabled: usingBrokerage && Boolean(brokerage.activeAccountId),
   });
 
+  const cancelQueued = useMutation({
+    mutationFn: (id: string) => api.cancelQueuedOrder(id),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["orders"] });
+    },
+  });
   const close = useMutation({
     mutationFn: (positionId: string) => api.closePosition(positionId),
     onSuccess: (res) => {
@@ -151,14 +157,14 @@ export function Portfolio() {
   const historyQuery = usingBrokerage ? brokerageEquityHistory : paperPnlHistory;
   const rawPoints = historyQuery.data?.points ?? [];
   const points = useMemo(() => filterPnlPoints(rawPoints, chartTimeframe), [rawPoints, chartTimeframe]);
-  const fallbackBalance =
-    historyQuery.data?.starting_balance ??
-    summary.data?.starting_balance ??
-    user?.starting_balance ??
-    summary.data?.portfolio_value ??
-    brokerage.stats?.portfolio_value ??
-    user?.portfolio_value ??
-    0;
+  const fallbackBalance = usingBrokerage
+    ? (historyQuery.data?.starting_balance ?? brokerage.stats?.portfolio_value ?? 0)
+    : (historyQuery.data?.starting_balance ??
+      summary.data?.starting_balance ??
+      user?.starting_balance ??
+      summary.data?.portfolio_value ??
+      user?.portfolio_value ??
+      0);
   const openPositions: PositionRow[] = usingBrokerage
     ? brokerage.positionRows
     : ((positions.data?.positions as PositionRow[] | undefined) ?? []);
@@ -170,10 +176,19 @@ export function Portfolio() {
   const orderRows: OrderHistoryRow[] = usingBrokerage
     ? ((brokerageOrders.data?.orders as OrderHistoryRow[] | undefined) ?? [])
     : ((paperOrders.data?.orders as OrderHistoryRow[] | undefined) ?? []);
+  const queuedRows = usingBrokerage
+    ? []
+    : orderRows.filter((row) => row.status === "queued" || row.status === "submitting" || row.status === "unknown");
+  const historyRows = usingBrokerage
+    ? orderRows
+    : orderRows.filter((row) => row.status !== "queued" && row.status !== "submitting" && row.status !== "unknown");
+  const historyOverall =
+    usingBrokerage && rawPoints.length > 0 ? (rawPoints[rawPoints.length - 1]?.cumulative_pl ?? null) : null;
+  const displayedOverall = usingBrokerage ? historyOverall : accountPnl.total;
   const ordersLoading = usingBrokerage ? brokerageOrders.isLoading : paperOrders.isLoading;
   const overallRows = accountPnl.rows;
   const overallLoading = accountPnl.loading;
-  const totalPnl = accountPnl.total;
+  const totalPnl = displayedOverall;
   const loadError =
     summary.error?.message ??
     historyQuery.error?.message ??
@@ -187,8 +202,7 @@ export function Portfolio() {
     <div className="min-h-screen bg-ink text-champagne" data-testid="portfolio-page">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3">
         <div className="flex flex-wrap items-center gap-3">
-          <ApexLogo size={36} className="shrink-0" />
-          <p className="font-display text-xl tracking-[0.2em]">APEX</p>
+          <ApexWordmark />
           <Link to="/app" className="rounded-md border border-line bg-panel px-3 py-1.5 text-sm text-gold hover:bg-gold/10" data-testid="desk-link">
             Dashboard
           </Link>
@@ -205,9 +219,40 @@ export function Portfolio() {
           <p className="mt-1 text-sm text-subtle" data-testid="portfolio-header-balance">
             {headerLabel} {fmtBalance(headerBalance)}
           </p>
+          {usingBrokerage && (
+            <p className="mt-1 text-sm" data-testid="portfolio-header-pnl">
+              <span
+                className={
+                  brokerage.stats?.day_pnl == null
+                    ? "text-faint"
+                    : brokerage.stats.day_pnl > 0
+                      ? "num-up"
+                      : brokerage.stats.day_pnl < 0
+                        ? "num-down"
+                        : ""
+                }
+              >
+                Daily P&amp;L{" "}
+                {brokerage.stats?.day_pnl == null
+                  ? "Unavailable"
+                  : `${fmtMoney(brokerage.stats.day_pnl)}${
+                      brokerage.balance?.day_pnl_percent != null ? ` (${brokerage.balance.day_pnl_percent.toFixed(2)}%)` : ""
+                    }`}
+              </span>
+              <span className="text-faint"> · </span>
+              <span className={totalPnl == null ? "text-faint" : totalPnl > 0 ? "num-up" : totalPnl < 0 ? "num-down" : ""}>
+                Overall P&amp;L {fmtMoney(totalPnl)}
+              </span>
+            </p>
+          )}
           {usingBrokerage && brokerage.activeAccount && (
             <p className="mt-1 text-xs text-faint" data-testid="portfolio-brokerage-account">
               {brokerage.activeAccount.account_name} · {brokerage.activeAccount.broker_name}
+            </p>
+          )}
+          {usingBrokerage && (
+            <p className="mt-1 text-xs text-bronze" data-testid="portfolio-read-only">
+              Read-only. You can view this brokerage account, but you can’t place trades from APEX.
             </p>
           )}
           {!usingBrokerage && (
@@ -233,7 +278,41 @@ export function Portfolio() {
             valueLabel={usingBrokerage ? "Equity" : "Portfolio value"}
             pending={historyQuery.isFetching && !historyQuery.data}
             overallTotal={totalPnl}
+            emptyLabel={rawPoints.length > 0 ? "No portfolio history in this range." : "No equity history yet."}
           />
+          {historyQuery.data?.history_note && (
+            <p className="mt-2 text-xs text-faint" data-testid="portfolio-history-note">
+              {historyQuery.data.history_note}
+            </p>
+          )}
+          {usingBrokerage && (
+            <div className="mt-3 rounded-xl border border-line bg-panel px-4 py-3" data-testid="brokerage-daily-pnl">
+              <p className="text-[10px] uppercase tracking-wider text-bronze">Daily P&amp;L</p>
+              <p
+                className={`mt-1 font-mono text-sm ${
+                  brokerage.stats?.day_pnl == null
+                    ? "text-faint"
+                    : brokerage.stats.day_pnl > 0
+                      ? "num-up"
+                      : brokerage.stats.day_pnl < 0
+                        ? "num-down"
+                        : "text-champagne"
+                }`}
+                data-testid="brokerage-daily-pnl-value"
+              >
+                {brokerage.balance == null
+                  ? "Loading…"
+                  : brokerage.stats?.day_pnl == null
+                    ? "Unavailable"
+                    : fmtMoney(brokerage.stats.day_pnl)}
+              </p>
+              <p className="mt-1 text-xs text-faint">
+                {brokerage.balance?.day_pnl_note ||
+                  "SnapTrade’s 1-day account return, in dollars of current equity. This is not Overall P&L."}
+                {brokerage.balance?.as_of_timestamp ? ` As of ${fmtTs(brokerage.balance.as_of_timestamp)} local time.` : ""}
+              </p>
+            </div>
+          )}
           {!usingBrokerage && dailyPnl.data && dailyPnl.data.book.length > 0 && (
             <div className="mt-3 rounded-xl border border-line bg-panel px-4 py-3" data-testid="book-daily-pnl">
               <p className="text-[10px] uppercase tracking-wider text-bronze">Book daily P&L</p>
@@ -331,15 +410,78 @@ export function Portfolio() {
           )}
         </Collapsible>
 
-        <Collapsible title="Order History" testId="portfolio-orders-section" defaultOpen={false}>
+        <Collapsible title="Queued" testId="portfolio-queued-section" defaultOpen>
           {ordersLoading ? (
-            <p className="mt-3 text-sm text-faint">Loading orders…</p>
-          ) : orderRows.length === 0 ? (
-            <p className="mt-3 text-sm text-faint">
-              {usingBrokerage ? "No recent brokerage orders." : "No orders yet."}
+            <p className="mt-3 text-sm text-faint">Loading queued orders…</p>
+          ) : queuedRows.length === 0 ? (
+            <p className="mt-3 text-sm text-faint" data-testid="queued-empty">
+              No orders are waiting for a price.
             </p>
           ) : (
             <div className="apex-table-wrap">
+              <table className="apex-table mt-3" data-testid="portfolio-queued">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Strategy</th>
+                    <th>Symbol</th>
+                    <th className="apex-num">Qty</th>
+                    <th>Status</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {queuedRows.map((o) => (
+                    <tr key={o.id} data-testid={`queued-row-${o.id}`}>
+                      <td className="text-subtle">{fmtTs(o.created_at)}</td>
+                      <td>{o.strategy_name || "—"}</td>
+                      <td className="font-mono">{o.symbol}</td>
+                      <td className="apex-num">{fmtPlain(o.qty)}</td>
+                      <td>
+                        Queued
+                        {o.queue_reason ? <p className="text-xs text-faint">{o.queue_reason}</p> : null}
+                      </td>
+                      <td>
+                        {o.status === "queued" ? (
+                          <button
+                            type="button"
+                            className="text-gold"
+                            data-testid={`cancel-queued-${o.id}`}
+                            disabled={cancelQueued.isPending}
+                            onClick={() => cancelQueued.mutate(o.id)}
+                          >
+                            Cancel
+                          </button>
+                        ) : null}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Collapsible>
+
+        <Collapsible
+          key={usingBrokerage ? "broker-orders" : "paper-orders"}
+          title="Order History"
+          testId="portfolio-orders-section"
+          defaultOpen={usingBrokerage}
+        >
+          {ordersLoading ? (
+            <p className="mt-3 text-sm text-faint">Loading orders…</p>
+          ) : historyRows.length === 0 ? (
+            <p className="mt-3 text-sm text-faint">
+              {usingBrokerage ? "No brokerage orders in the available history." : "No orders yet."}
+            </p>
+          ) : (
+            <div className="apex-table-wrap">
+            {usingBrokerage && (
+              <p className="mt-3 text-xs text-faint" data-testid="brokerage-orders-note">
+                {brokerageOrders.data?.history_note ||
+                  "Broker order records cover the last 90 days. Times are shown in your local timezone."}
+              </p>
+            )}
             <table className="apex-table mt-3" data-testid="portfolio-orders">
               <thead>
                 <tr>
@@ -350,22 +492,32 @@ export function Portfolio() {
                   <th>Expiry</th>
                   <th className="apex-num">Qty</th>
                   <th>Type</th>
+                  <th className="apex-num">Limit</th>
                   <th className="apex-num">Fill</th>
                   <th>Status</th>
                 </tr>
               </thead>
               <tbody>
-                {orderRows.map((o) => {
+                {historyRows.map((o) => {
                   const parsed = parseOccSymbol(o.symbol);
+                  const qtyLabel =
+                    o.filled_qty != null && o.filled_qty !== o.qty
+                      ? `${fmtPlain(o.filled_qty)} / ${fmtPlain(o.qty)}`
+                      : fmtPlain(o.qty);
                   return (
                     <tr key={o.id}>
                       <td className="text-subtle">{fmtTs(o.filled_at ?? o.created_at)}</td>
                       <td>{o.side.toUpperCase()}</td>
-                      <td className="font-mono">{o.symbol}</td>
+                      <td className="font-mono">
+                        {o.symbol}
+                        {o.group_id ? <p className="text-xs text-faint">Leg group {o.group_id}</p> : null}
+                        {o.source === "activity" ? <p className="text-xs text-faint">Account activity</p> : null}
+                      </td>
                       <td>{parsed ? parsed.strike : "—"}</td>
                       <td>{parsed ? formatOptionExpiration(parsed.expiry) : "—"}</td>
-                      <td className="apex-num">{fmtPlain(o.qty)}</td>
+                      <td className="apex-num">{qtyLabel}</td>
                       <td>{o.order_type || "market"}</td>
+                      <td className="apex-num">{fmtPlain(o.limit_price)}</td>
                       <td className="apex-num">{fmtPlain(o.fill_price)}</td>
                       <td>{o.status}</td>
                     </tr>
@@ -401,6 +553,12 @@ export function Portfolio() {
           defaultOpen={false}
           footer={<OverallPnlTotal value={totalPnl} />}
         >
+          {usingBrokerage && (
+            <p className="mt-3 text-xs text-faint" data-testid="brokerage-overall-note">
+              Overall P&amp;L matches the chart: account value change since the first available day, after deposits and withdrawals.
+              Open-position rows below are unrealized only.
+            </p>
+          )}
           {overallLoading ? (
             <p className="mt-3 text-sm text-faint">Loading P&amp;L breakdown…</p>
           ) : overallRows.length === 0 ? (

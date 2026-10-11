@@ -477,10 +477,14 @@ class AlpacaAdapter:
         if not rows:
             return []
         seen: set[str] = set()
+        counts: dict[str, int] = {}
         out: list[Expiration] = []
         for row in rows:
             exp = row.get("expiration_date")
-            if not exp or exp in seen:
+            if not exp:
+                continue
+            counts[exp] = counts.get(exp, 0) + 1
+            if exp in seen:
                 continue
             try:
                 exp_d = date.fromisoformat(exp)
@@ -491,7 +495,9 @@ class AlpacaAdapter:
             seen.add(exp)
             dte = (exp_d - today).days
             kind = "weekly" if dte <= 21 else "monthly" if dte <= 120 else "leaps"
-            out.append(Expiration(date=exp, dte=dte, kind=kind, near_expiry=dte <= 2))
+            out.append(Expiration(date=exp, dte=dte, kind=kind, near_expiry=dte <= 2, listed=counts[exp]))
+        for exp in out:
+            exp.listed = counts.get(exp.date, exp.listed)
         out.sort(key=lambda e: e.date)
         return out
 
@@ -564,54 +570,56 @@ class AlpacaAdapter:
                 dte=dte,
                 allow_simulator=False,
             )
-        if not snaps:
-            return await self._degraded_chain(
-                symbol,
-                expiry,
-                "empty" if status_code == 200 else "unavailable",
-                [
-                    f"Alpaca returned no option snapshots for {symbol} {expiry}"
-                    + (f" (HTTP {status_code})." if status_code not in {0, 200} else ".")
-                ],
-                dte=dte,
-                allow_simulator=False,
-            )
 
         quote = await self.quote(symbol)
         spot = quote.price
         spot_source = quote.source if spot is not None else None
-        # Contract metadata for THIS expiry only — full pagination, no other dates mixed in.
+        # Every listed contract for this expiry. Snapshots supply quotes; the contract
+        # list supplies strikes the snapshot page did not include.
         meta = {row.get("symbol"): row for row in await self._option_contracts(symbol, expiry) if row.get("symbol")}
         contracts: list[OptionContract] = []
         received = datetime.now(timezone.utc)
         from app.services.live_quotes import regular_market_sessions
 
         sessions = await regular_market_sessions(self.settings)
+        seen: set[str] = set()
         for occ, snap in snaps.items():
             contract = _parse_snapshot(occ, snap, meta.get(occ))
-            if contract is not None:
-                contract.quote_meta = QuoteMetaModel.model_validate(
-                    build_quote_meta(
-                        provider="Alpaca",
-                        feed=self.feed,
-                        quoted_at=contract.quote_as_of,
-                        received_at=received,
-                        bid=contract.bid,
-                        ask=contract.ask,
-                        bid_size=contract.bid_size,
-                        ask_size=contract.ask_size,
-                        now=received,
-                        sessions=sessions,
-                    )
+            if contract is None:
+                continue
+            seen.add(occ)
+            contract.quote_meta = QuoteMetaModel.model_validate(
+                build_quote_meta(
+                    provider="Alpaca",
+                    feed=self.feed,
+                    quoted_at=contract.quote_as_of,
+                    received_at=received,
+                    bid=contract.bid,
+                    ask=contract.ask,
+                    bid_size=contract.bid_size,
+                    ask_size=contract.ask_size,
+                    now=received,
+                    sessions=sessions,
                 )
-                contracts.append(contract)
+            )
+            contracts.append(contract)
+        for occ, row in meta.items():
+            if occ in seen:
+                continue
+            contract = _parse_snapshot(occ, {}, row if isinstance(row, dict) else None)
+            if contract is None:
+                continue
+            contracts.append(contract)
         contracts.sort(key=lambda c: (c.strike, c.side))
         if not contracts:
             return await self._degraded_chain(
                 symbol,
                 expiry,
-                "empty",
-                [f"Alpaca returned {len(snaps)} snapshots for {symbol} {expiry} but none carried a usable strike."],
+                "empty" if status_code in {0, 200} else "unavailable",
+                [
+                    f"Alpaca returned no option contracts for {symbol} {expiry}"
+                    + (f" (HTTP {status_code})." if status_code not in {0, 200} else ".")
+                ],
                 dte=dte,
                 allow_simulator=False,
             )

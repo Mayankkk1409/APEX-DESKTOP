@@ -689,13 +689,20 @@ async def _load_bundle(symbol: str, settings: Settings) -> _Bundle:
 
 
 async def _fetch_bundle(symbol: str, settings: Settings) -> _Bundle:
+    from app.services.occ_symbol import parse_occ
+
     now = time.monotonic()
     meta = _index_meta(symbol)
+    option = parse_occ(symbol) is not None
     bundle = _Bundle(
         symbol=symbol,
         name=(meta["name"] if meta else symbol),
-        asset_class=(meta["asset_class"] if meta else "stock"),
+        asset_class="us_option" if option else (meta["asset_class"] if meta else "stock"),
     )
+    # An OCC symbol is not a stock. The stock snapshot endpoint rejects it.
+    if option:
+        _bundle_cache[symbol] = (now, bundle)
+        return bundle
 
     cnbc_symbol = meta["cnbc"] if meta else symbol
     alpaca_task = (

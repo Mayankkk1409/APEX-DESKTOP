@@ -32,7 +32,7 @@ export function Splash() {
     >
       <div className="splash-stage">
         <div className="splash-logo-wrap">
-          <ApexLogo size={196} animate />
+          <ApexLogo size={196} animate uncropped src="/brand/apex-splash.png" />
         </div>
         <div className="splash-fade">
           <p className="splash-wordmark">APEX</p>

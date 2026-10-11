@@ -44,11 +44,38 @@ class Position(Base):
 
     @property
     def market_value(self) -> float:
-        return self.qty * self.current_price * self.multiplier
+        if self.current_price is None or self.qty is None:
+            return 0.0
+        return float(self.qty) * float(self.current_price) * self.multiplier
 
     @property
     def unrealized_pl(self) -> float:
-        return (self.current_price - self.avg_cost) * self.qty * self.multiplier
+        if self.current_price is None or self.qty is None or self.avg_cost is None:
+            return 0.0
+        return (float(self.current_price) - float(self.avg_cost)) * float(self.qty) * self.multiplier
+
+
+class QueuedOrder(Base):
+    """A confirmed order waiting for a usable price. It is not a broker submission."""
+
+    __tablename__ = "queued_orders"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    scan_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    strategy_name: Mapped[Optional[str]] = mapped_column(String(160), nullable=True)
+    symbol: Mapped[str] = mapped_column(String(32))
+    side: Mapped[str] = mapped_column(String(8))
+    qty: Mapped[float] = mapped_column(Float)
+    order_type: Mapped[str] = mapped_column(String(16), default="limit")
+    payload: Mapped[dict] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    reason: Mapped[str] = mapped_column(Text, default="")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    broker_order_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    order_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class Order(Base):

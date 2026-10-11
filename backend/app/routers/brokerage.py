@@ -15,7 +15,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import Settings, get_settings
 from app.database import get_db
-from app.deps import current_user
+from app.deps import current_user, get_adapter
 from app.models.brokerage import AccountBalance, AuditLog, BrokerageAccount, BrokerageConnection
 from app.models.user import User
 from app.redis_client import get_redis
@@ -124,12 +124,31 @@ async def _latest_balance(db: AsyncSession, account_pk: str) -> AccountBalance |
     )
 
 
-def _balance_out(row: AccountBalance) -> AccountBalanceOut:
+def _day_pnl_parts(raw: object) -> tuple[float | None, str | None]:
+    if isinstance(raw, tuple):
+        value = raw[0] if len(raw) > 0 else None
+        note = raw[1] if len(raw) > 1 else None
+        return value if isinstance(value, (int, float)) or value is None else None, note if isinstance(note, str) else None
+    if isinstance(raw, (int, float)) or raw is None:
+        return raw, None
+    return None, None
+
+
+def _balance_out(
+    row: AccountBalance,
+    *,
+    day_pnl_note: str | None = None,
+    day_pnl_percent: float | None = None,
+    overall_pnl: float | None = None,
+) -> AccountBalanceOut:
     return AccountBalanceOut(
         cash_balance=row.cash_balance,
         buying_power=row.buying_power,
         total_equity=row.total_equity,
         day_pnl=row.day_pnl,
+        day_pnl_percent=day_pnl_percent,
+        day_pnl_note=day_pnl_note,
+        overall_pnl=overall_pnl,
         currency=row.currency,
         as_of_timestamp=row.as_of_timestamp,
     )
@@ -183,11 +202,13 @@ async def sync_connection(
             snap_id,
             account_row=row,
         )
-        day_pnl = await st.fetch_day_pnl(
-            connection.snaptrade_user_id,
-            user_secret,
-            snap_id,
-            balance["total_equity"],
+        day_pnl, _day_note = _day_pnl_parts(
+            await st.fetch_day_pnl(
+                connection.snaptrade_user_id,
+                user_secret,
+                snap_id,
+                balance["total_equity"],
+            )
         )
         db.add(
             AccountBalance(
@@ -529,6 +550,7 @@ async def account_balance(
     request: Request,
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
+    adapter=Depends(get_adapter),
 ) -> AccountBalanceOut:
     user_id = user.id
     connection = await _connection_for_user(db, user_id)
@@ -546,12 +568,34 @@ async def account_balance(
     secret = _decrypt_connection_secret(connection)
     try:
         balance = await st.fetch_balance(connection.snaptrade_user_id, secret, account_id)
-        day_pnl = await st.fetch_day_pnl(
-            connection.snaptrade_user_id,
-            secret,
-            account_id,
-            balance["total_equity"],
+        day_pnl, day_note = _day_pnl_parts(
+            await st.fetch_day_pnl(
+                connection.snaptrade_user_id,
+                secret,
+                account_id,
+                balance["total_equity"],
+            )
         )
+        day_pct = None
+        overall = None
+        if day_pnl is None:
+            from app.services.broker_replay import cached_activity_series
+
+            series = await cached_activity_series(
+                adapter,
+                user_id=connection.snaptrade_user_id,
+                user_secret=secret,
+                account_id=account_id,
+            )
+            if series:
+                overall = series.get("overall_pnl")
+                if series.get("day_pnl") is not None:
+                    day_pnl = series["day_pnl"]
+                    day_pct = series.get("day_pnl_percent")
+                    day_note = (
+                        "Daily P&L is the change in this account’s value since the previous session close, "
+                        "after deposits and withdrawals. It is not Overall P&L."
+                    )
         row = AccountBalance(
             id=str(uuid4()),
             account_id=account_pk,
@@ -566,7 +610,7 @@ async def account_balance(
         connection.last_synced_at = datetime.now(timezone.utc)
         await db.commit()
         await _audit(db, user_id=user_id, action="brokerage.balance_refresh", result="ok", request=request)
-        return _balance_out(row)
+        return _balance_out(row, day_pnl_note=day_note, day_pnl_percent=day_pct, overall_pnl=overall)
     except HTTPException:
         await _rollback_db(db)
         raise
@@ -628,10 +672,60 @@ async def account_equity_history(
     account_id: str,
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
+    adapter=Depends(get_adapter),
 ) -> EquityHistoryResponse:
     account = await _account_for_user(db, user.id, account_id)
-    starting, points = await brokerage_equity_history_points(db, account.id)
-    return EquityHistoryResponse(starting_balance=starting, account_mode="real_brokerage", points=points)
+    connection = await _connection_for_user(db, user.id)
+    if connection is not None:
+        secret = _decrypt_connection_secret(connection)
+        disabled_note = None
+        try:
+            broker = await st.fetch_account_value_history(
+                connection.snaptrade_user_id,
+                secret,
+                account_id,
+            )
+        except st.BrokerHistoryDisabled:
+            disabled_note = (
+                "The broker refused account-value history (HTTP 403). "
+                "That history is not enabled on this connection, so this chart is not the account’s full history."
+            )
+            broker = None
+            from app.services.broker_replay import cached_activity_series
+
+            series = await cached_activity_series(
+                adapter,
+                user_id=connection.snaptrade_user_id,
+                user_secret=secret,
+                account_id=account_id,
+            )
+            if series and series.get("points"):
+                return EquityHistoryResponse(
+                    starting_balance=series["starting"],
+                    account_mode="real_brokerage",
+                    points=series["points"],
+                    history_note=series["note"],
+                )
+        except Exception as exc:  # noqa: BLE001
+            st.log_safe_error("account_balance_history", exc)
+            broker = None
+        if broker:
+            starting, points, note = broker
+            return EquityHistoryResponse(
+                starting_balance=starting,
+                account_mode="real_brokerage",
+                points=points,
+                history_note=note,
+            )
+    starting, points, note = await brokerage_equity_history_points(db, account.id)
+    if connection is not None and disabled_note:
+        note = f"{disabled_note} {note}"
+    return EquityHistoryResponse(
+        starting_balance=starting,
+        account_mode="real_brokerage",
+        points=points,
+        history_note=note,
+    )
 
 
 @router.get("/accounts/{account_id}/orders", response_model=OrdersResponse)
@@ -653,7 +747,10 @@ async def account_orders(
         connection.last_synced_at = datetime.now(timezone.utc)
         await db.commit()
         await _audit(db, user_id=user_id, action="brokerage.orders_refresh", result="ok", request=request)
-        return OrdersResponse(orders=[OrderOut(**row) for row in rows])
+        return OrdersResponse(
+            orders=[OrderOut(**row) for row in rows],
+            history_note=st.order_history_note(rows),
+        )
     except HTTPException:
         await _rollback_db(db)
         raise

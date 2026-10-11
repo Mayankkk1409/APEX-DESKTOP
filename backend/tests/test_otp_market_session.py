@@ -101,14 +101,15 @@ def test_naive_clock_is_rejected() -> None:
         getLastMarketOpen(datetime(2026, 10, 7, 11, 0))
 
 
-def test_fresh_login_follows_the_regular_open_not_a_rolling_day() -> None:
+def test_fresh_login_skips_the_code_for_24_hours_on_the_same_device() -> None:
     verified = _at(2026, 10, 9, 16, 0)  # Friday after the close
     assert otp_skip_active(verified, _at(2026, 10, 9, 18, 0)) is True
-    assert otp_skip_active(verified, _at(2026, 10, 12, 8, 0)) is True  # Monday pre-open
-    assert otp_skip_active(verified, _at(2026, 10, 10, 12, 0)) is False  # Saturday fresh login
-    assert otp_skip_active(verified, _at(2026, 10, 12, 9, 30)) is False  # next regular open
+    assert otp_skip_active(verified, _at(2026, 10, 10, 12, 0)) is True  # Saturday, still inside 24 hours
+    assert otp_skip_active(verified, _at(2026, 10, 10, 16, 0)) is False  # exactly 24 hours later
+    assert otp_skip_active(verified, _at(2026, 10, 12, 8, 0)) is False  # Monday is a new window
     assert date(2026, 11, 26) in NYSE_HOLIDAYS
-    assert otp_skip_active(_at(2026, 11, 25, 15, 0), _at(2026, 11, 26, 12, 0)) is False
+    assert otp_skip_active(_at(2026, 11, 25, 15, 0), _at(2026, 11, 26, 12, 0)) is True
+    assert otp_skip_active(_at(2026, 11, 25, 15, 0), _at(2026, 11, 26, 15, 0)) is False
     assert verification_current(verified, _at(2026, 10, 10, 12, 0)) is True
     assert verification_current(verified, _at(2026, 10, 12, 9, 30)) is False
 

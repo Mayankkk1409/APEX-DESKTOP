@@ -52,7 +52,7 @@ test("dashboard mounts TradingView Advanced Chart embed", async ({ page, request
   await expect(chart).toHaveAttribute("data-chart-engine", "tradingview");
   await expect(chart).toHaveAttribute("data-tv-symbol", /FOREXCOM:SPXUSD|AMEX:SPY/);
   await expect(page.getByTestId("tv-embed")).toBeVisible();
-  await expect(page.getByTestId("chart-overlay")).toBeVisible();
+  await expect(page.getByTestId("chart-overlay")).toHaveCount(0);
   // TV logo is covered; chrome (sidebars / timeframes) stays inside the embed.
   await expect(page.locator(".tv-logo-cover")).toHaveCount(1);
 });
@@ -99,9 +99,7 @@ test("exactly one watchlist toggle is mounted on the dashboard", async ({ page, 
 test("price-pane overlay never covers TV chrome hit targets", async ({ page, request }) => {
   await login(page, request, "overlay");
   await chartReady(page);
-  const overlay = page.getByTestId("chart-overlay");
-  await expect(overlay).toBeVisible();
-  await expect(overlay).toHaveCSS("pointer-events", "none");
+  await expect(page.getByTestId("chart-overlay")).toHaveCount(0);
   // Overlay is EMA-only; SuperTrend / Traditional pivots are not drawn.
   const pivotCount = await page.locator("[data-testid^='pivot-']").count();
   expect(pivotCount).toBe(0);

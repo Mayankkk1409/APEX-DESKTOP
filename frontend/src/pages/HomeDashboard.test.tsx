@@ -53,6 +53,7 @@ describe("HomeDashboard", () => {
     expect(html).not.toContain("Popular");
     expect(html).toContain("Paper");
     expect(html).toContain("Brokerage");
-    expect(html).toContain('href="/dashboard"');
+    expect(html).toContain('href="/portfolio"');
+    expect(html).toContain('src="/brand/apex-wordmark.png"');
   });
 });

@@ -45,3 +45,6 @@ logs/
 
 # CI workflows need a PAT with workflow scope to push
 .github/workflows/
+
+# local review captures
+test-results/

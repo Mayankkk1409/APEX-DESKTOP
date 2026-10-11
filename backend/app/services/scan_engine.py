@@ -1037,6 +1037,24 @@ def _restore_scored_strategy_layer(
     layer["composite_score"] = composite
     tier = "auto_exec" if composite >= threshold else "caution"
     layer["execution_tier"] = tier
+    # The playbook was built with a lifted score so legs would still render.
+    # Eligibility and the sentence the risk review shows have to use the real score.
+    if "auto_execute_eligible" in layer or "auto_exec_line" in layer:
+        from app.services.executability import AutoExecuteDecision, eligibility_sentence
+
+        was_eligible = bool(layer.get("auto_execute_eligible"))
+        score_ok = float(composite) >= float(threshold)
+        eligible = was_eligible and score_ok
+        if eligible:
+            decision = AutoExecuteDecision(True, [])
+        elif not score_ok:
+            decision = AutoExecuteDecision(False, ["Composite is below your minimum."])
+            layer["clears_threshold"] = False
+        else:
+            reasons = [str(note) for note in (layer.get("auto_exec_reasons") or []) if str(note).strip()]
+            decision = AutoExecuteDecision(False, reasons or ["pre-trade checks did not pass"])
+        layer["auto_execute_eligible"] = eligible
+        layer["auto_exec_line"] = eligibility_sentence(float(composite), float(threshold), decision)
     why = layer.get("why_recommended")
     if not isinstance(why, str) or not why.startswith("Composite "):
         return

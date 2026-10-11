@@ -1,33 +1,27 @@
 import type { OptionReviewRow } from "../lib/orderTicket";
 
-/** One options order row: OCC, side, contracts, type, premium, and account impact. */
+/** Option legs side by side on a wide screen, stacked when the screen is narrow. */
 export function RiskReviewLegs({ rows }: { rows: OptionReviewRow[] }) {
   return (
-    <ul className="space-y-2 text-sm" data-testid="strategy-legs-review">
+    <ul className="rr-legs" data-testid="strategy-legs-review">
       {rows.map((leg) => (
-        <li key={`${leg.side}-${leg.symbol}`} className="rounded border border-line/60 px-3 py-2 font-mono text-xs" data-testid="strategy-leg">
-          <span data-testid="strategy-leg-side">{leg.sideLabel}</span>{" "}
-          <span data-testid="strategy-leg-contracts">{leg.contracts}</span>
-          {leg.optionSide ? " contract" : ""}
-          {" × "}
-          <span data-testid="strategy-leg-occ">{leg.symbol}</span>
-          {leg.optionSide && leg.strike != null
-            ? ` (${leg.optionSide} ${leg.strike}${leg.expiry ? ` · ${leg.expiry}` : ""})`
-            : ""}
-          {" · "}
-          <span data-testid="strategy-leg-type">{leg.orderTypeLabel}</span>
-          {leg.premiumLabel ? (
-            <>
-              {" · "}
-              <span data-testid="strategy-leg-premium">{leg.premiumLabel}</span>
-            </>
-          ) : null}
-          {leg.impactLabel ? (
-            <>
-              {" · "}
-              <span data-testid="strategy-leg-impact">{leg.impactLabel}</span>
-            </>
-          ) : null}
+        <li key={`${leg.side}-${leg.symbol}`} className="rr-leg" data-testid="strategy-leg">
+          <p className="rr-leg-side" data-testid="strategy-leg-side">
+            {leg.sideLabel}
+          </p>
+          <p>
+            <span data-testid="strategy-leg-contracts">{leg.contracts}</span>
+            {leg.optionSide ? " contract" : ""}
+            {leg.optionSide ? ` ${leg.optionSide}` : ""}
+            {leg.strike != null ? ` ${leg.strike}` : ""}
+          </p>
+          {leg.expiry ? <p>Expiry {leg.expiry}</p> : null}
+          <p className="rr-leg-symbol" data-testid="strategy-leg-occ">
+            {leg.symbol}
+          </p>
+          <p data-testid="strategy-leg-type">{leg.orderTypeLabel}</p>
+          {leg.premiumLabel ? <p data-testid="strategy-leg-premium">{leg.premiumLabel}</p> : null}
+          {leg.impactLabel ? <p data-testid="strategy-leg-impact">{leg.impactLabel}</p> : null}
         </li>
       ))}
     </ul>

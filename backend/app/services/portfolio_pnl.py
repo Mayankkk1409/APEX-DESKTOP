@@ -51,39 +51,101 @@ def _order_ts(order: Order) -> datetime:
     return _as_utc(raw)
 
 
-def replay_filled_orders(orders: list[Order]) -> dict[str, _Book]:
-    books: dict[str, _Book] = {}
-    filled = [o for o in orders if o.status == "filled" and o.fill_price is not None]
+def _lot_key(symbol: str, asset_class: str | None) -> tuple[str, str]:
+    """Equity and option fills on the same ticker are different instruments."""
+    return (symbol.upper(), asset_class or "us_equity")
+
+
+def _priced_fill(order: Order) -> float | None:
+    """Execution price, or None when the stored price is missing.
+
+    A non-positive fill with no cost is an unavailable quote, not a free trade.
+    """
+    if order.status != "filled" or order.fill_price is None:
+        return None
+    try:
+        price = float(order.fill_price)
+    except (TypeError, ValueError):
+        return None
+    if price <= 0:
+        return None
+    return price
+
+
+def replay_filled_orders(orders: list[Order]) -> dict[tuple[str, str], _Book]:
+    books, _events = _replay_fills(orders)
+    return books
+
+
+def realized_pnl_events(orders: list[Order]) -> list[tuple[datetime, float]]:
+    """Realized trade P&L after each priced fill. Unrealized is not invented here."""
+    _books, events = _replay_fills(orders)
+    return events
+
+
+def _replay_fills(orders: list[Order]) -> tuple[dict[tuple[str, str], _Book], list[tuple[datetime, float]]]:
+    books: dict[tuple[str, str], _Book] = {}
+    events: list[tuple[datetime, float]] = []
+    filled = [o for o in orders if _priced_fill(o) is not None]
     filled.sort(key=_order_ts)
     for order in filled:
-        sym = order.symbol.upper()
-        book = books.setdefault(sym, _Book(asset_class=order.asset_class))
-        book.asset_class = order.asset_class
-        mult = position_multiplier(order.asset_class)
-        px = float(order.fill_price)
-        if order.side == "buy":
-            if book.qty > 0:
-                book.avg_cost = (book.avg_cost * book.qty + px * order.qty) / (book.qty + order.qty)
-                book.qty += order.qty
-            elif book.qty < 0:
-                cover = min(order.qty, abs(book.qty))
-                book.realized_pl += (book.avg_cost - px) * cover * mult
-                book.qty += order.qty
-                if book.qty > 0:
-                    book.avg_cost = px
-                elif book.qty == 0:
-                    book.avg_cost = 0.0
-            else:
+        key = _lot_key(order.symbol, order.asset_class)
+        book = books.setdefault(key, _Book(asset_class=order.asset_class))
+        book.asset_class = key[1]
+        _apply_fill(book, order, key[1])
+        realized = round(sum(row.realized_pl for row in books.values()), 2)
+        events.append((_order_ts(order), realized))
+    return books, events
+
+
+def _apply_fill(book: _Book, order: Order, asset_class: str) -> None:
+    mult = position_multiplier(asset_class)
+    px = float(order.fill_price)
+    if order.side == "buy":
+        if book.qty < 0:
+            cover = min(order.qty, abs(book.qty))
+            book.realized_pl += (book.avg_cost - px) * cover * mult
+            book.qty += cover
+            leftover = order.qty - cover
+            if abs(book.qty) < 1e-9:
+                book.qty = 0.0
+                book.avg_cost = 0.0
+            if leftover > 0:
+                book.qty = leftover
                 book.avg_cost = px
-                book.qty += order.qty
+        elif book.qty > 0:
+            book.avg_cost = (book.avg_cost * book.qty + px * order.qty) / (book.qty + order.qty)
+            book.qty += order.qty
         else:
-            sell_qty = min(order.qty, book.qty) if book.qty > 0 else order.qty
-            if sell_qty > 0 and book.qty > 0:
-                book.realized_pl += (px - book.avg_cost) * sell_qty * mult
-                book.qty -= sell_qty
-                if book.qty == 0:
-                    book.avg_cost = 0.0
-    return books
+            book.avg_cost = px
+            book.qty = order.qty
+    elif book.qty > 0:
+        close = min(order.qty, book.qty)
+        book.realized_pl += (px - book.avg_cost) * close * mult
+        book.qty -= close
+        leftover = order.qty - close
+        if abs(book.qty) < 1e-9:
+            book.qty = 0.0
+            book.avg_cost = 0.0
+        if leftover > 0:
+            book.qty = -leftover
+            book.avg_cost = px
+    elif book.qty < 0:
+        book.avg_cost = (book.avg_cost * abs(book.qty) + px * order.qty) / (abs(book.qty) + order.qty)
+        book.qty -= order.qty
+    else:
+        book.qty = -order.qty
+        book.avg_cost = px
+
+
+def account_trade_pnl(orders: list[Order], positions: list[Position]) -> float:
+    """The Overall P&L total: realized plus unrealized, in cents, summed.
+
+    This is the figure Portfolio labels Overall P&L. It is not portfolio value
+    minus the starting balance.
+    """
+    total = sum((_dec(row.total_pl) for row in symbol_pnl_rows(orders, positions)), Decimal(0))
+    return _money(total)
 
 
 def _money(amount: Decimal) -> float:
@@ -105,17 +167,17 @@ def symbol_pnl_rows(orders: list[Order], positions: list[Position]) -> list[Symb
     Order rows have no fee field; this function does not invent one.
     """
     books = replay_filled_orders(orders)
-    pos_by_sym = {p.symbol.upper(): p for p in positions}
-    symbols = set(books) | set(pos_by_sym)
+    pos_by_key = {_lot_key(p.symbol, p.asset_class): p for p in positions}
+    keys = set(books) | set(pos_by_key)
     rows: list[SymbolPnlRow] = []
-    for sym in sorted(symbols):
-        book = books.get(sym, _Book())
-        pos = pos_by_sym.get(sym)
-        asset_class = pos.asset_class if pos else book.asset_class
+    for sym, asset_class in sorted(keys):
+        book = books.get((sym, asset_class), _Book())
+        pos = pos_by_key.get((sym, asset_class))
+        asset_class = pos.asset_class if pos else asset_class
         mult = position_multiplier(asset_class)
         qty = pos.qty if pos else book.qty
         unrealized = Decimal(0)
-        if pos is not None and pos.qty != 0:
+        if pos is not None and pos.qty != 0 and pos.current_price is not None and pos.avg_cost is not None:
             unrealized = (_dec(pos.current_price) - _dec(pos.avg_cost)) * _dec(pos.qty) * Decimal(mult)
         realized = _dec(book.realized_pl)
         realized_q = realized.quantize(_CENT, rounding=ROUND_HALF_UP)
@@ -138,12 +200,24 @@ def _utc_date(dt: datetime) -> date:
     return _as_utc(dt).date()
 
 
+def _lots_match(lots: dict[tuple[str, str], _Book], positions: list[Position]) -> bool:
+    expected = {
+        _lot_key(p.symbol, p.asset_class): float(p.qty)
+        for p in positions
+        if abs(float(p.qty or 0)) > 1e-6
+    }
+    actual = {key: lot.qty for key, lot in lots.items() if abs(lot.qty) > 1e-6}
+    if set(expected) != set(actual):
+        return False
+    return all(abs(expected[key] - actual[key]) <= 0.01 for key in expected)
+
+
 def _replay_equity_events(
     user: User,
     orders: list[Order],
     positions: list[Position],
     baseline: float,
-) -> list[tuple[datetime, float]]:
+) -> tuple[list[tuple[datetime, float]], str | None]:
     """Cash plus marked positions after each fill, then the live mark.
 
     At a fill, the traded symbol is marked at the fill price and other open
@@ -151,43 +225,61 @@ def _replay_equity_events(
     """
     events: list[tuple[datetime, float]] = []
     cash = baseline
-    open_lots: dict[str, _Book] = {}
-    filled = [o for o in orders if o.status == "filled" and o.fill_price is not None]
+    open_lots: dict[tuple[str, str], _Book] = {}
+    filled = [o for o in orders if _priced_fill(o) is not None]
     filled.sort(key=_order_ts)
 
     for order in filled:
-        sym = order.symbol.upper()
+        key = _lot_key(order.symbol, order.asset_class)
         px = float(order.fill_price)
-        mult = position_multiplier(order.asset_class)
+        mult = position_multiplier(key[1])
         cost = round(order.qty * px * mult, 2)
-        lot = open_lots.setdefault(sym, _Book(asset_class=order.asset_class))
-        lot.asset_class = order.asset_class
+        lot = open_lots.setdefault(key, _Book(asset_class=key[1]))
+        lot.asset_class = key[1]
 
         if order.side == "buy":
             cash -= cost
-            if lot.qty > 0:
+            if lot.qty < 0:
+                cover = min(order.qty, abs(lot.qty))
+                lot.qty += cover
+                leftover = order.qty - cover
+                if abs(lot.qty) < 1e-9:
+                    lot.qty = 0.0
+                    lot.avg_cost = 0.0
+                if leftover > 0:
+                    lot.qty = leftover
+                    lot.avg_cost = px
+            elif lot.qty > 0:
                 lot.avg_cost = (lot.avg_cost * lot.qty + px * order.qty) / (lot.qty + order.qty)
                 lot.qty += order.qty
-            elif lot.qty < 0:
-                lot.qty += order.qty
-                if lot.qty > 0:
-                    lot.avg_cost = px
-                elif lot.qty == 0:
-                    lot.avg_cost = 0.0
             else:
                 lot.avg_cost = px
-                lot.qty += order.qty
+                lot.qty = order.qty
+        elif lot.qty > 0:
+            cash += cost
+            close = min(order.qty, lot.qty)
+            lot.qty -= close
+            leftover = order.qty - close
+            if abs(lot.qty) < 1e-9:
+                lot.qty = 0.0
+                lot.avg_cost = 0.0
+            if leftover > 0:
+                lot.qty = -leftover
+                lot.avg_cost = px
+        elif lot.qty < 0:
+            cash += cost
+            lot.avg_cost = (lot.avg_cost * abs(lot.qty) + px * order.qty) / (abs(lot.qty) + order.qty)
+            lot.qty -= order.qty
         else:
             cash += cost
-            lot.qty = max(0.0, lot.qty - order.qty)
-            if lot.qty == 0:
-                lot.avg_cost = 0.0
+            lot.qty = -order.qty
+            lot.avg_cost = px
 
         marked = 0.0
-        for s, l in open_lots.items():
-            if l.qty <= 0:
+        for lot_key, l in open_lots.items():
+            if abs(l.qty) < 1e-9:
                 continue
-            mark = px if s == sym else l.avg_cost
+            mark = px if lot_key == key else l.avg_cost
             marked += l.qty * mark * position_multiplier(l.asset_class)
 
         portfolio_value = round(cash + marked, 2)
@@ -198,40 +290,68 @@ def _replay_equity_events(
     live_holdings = 0.0
     for pos in positions:
         mult = position_multiplier(pos.asset_class)
-        live_holdings += pos.qty * pos.current_price * mult
+        price = pos.current_price
+        if price is None:
+            continue
+        live_holdings += pos.qty * price * mult
     live_value = round(live_cash + live_holdings, 2)
     now = datetime.now(timezone.utc)
     if not events or events[-1][1] != live_value or _utc_date(events[-1][0]) < _utc_date(now):
         events.append((now, live_value))
-    return events
+    if _lots_match(open_lots, positions):
+        return events, None
+    return events, (
+        "Each point is the portfolio value after a priced fill. The latest point is "
+        "cash plus the market value of open positions. Fills with no price are omitted. "
+        "Earlier points can differ from that current value when saved orders do not match "
+        "the open book. The P&L line is trade profit and loss. Its latest point is Overall P&L."
+    )
 
 
-def pnl_history_points(user: User, orders: list[Order], positions: list[Position]) -> list[dict]:
-    """Observed portfolio value only.
-
-    portfolio_value = cash + marked positions at that observation.
-    Observations are account open, each fill, and the live mark.
-    Days with no observation are omitted.
-    """
+def portfolio_history(
+    user: User, orders: list[Order], positions: list[Position]
+) -> tuple[list[dict], str | None]:
+    """Observed portfolio value, plus a note when fill history cannot be plotted."""
     baseline = account_baseline(user)
     account_start = _as_utc(user.created_at) if user.created_at else datetime.now(timezone.utc)
-    events = _replay_equity_events(user, orders, positions, baseline)
+    events, history_note = _replay_equity_events(user, orders, positions, baseline)
 
     raw: list[tuple[datetime, float]] = [(account_start, round(baseline, 2))]
     raw.extend((_as_utc(ts), value) for ts, value in events)
     raw.sort(key=lambda item: item[0])
 
     points: list[dict] = []
+    realized = realized_pnl_events(orders)
     for ts, value in raw:
         rounded = round(float(value), 2)
+        trade_pl = 0.0
+        for event_ts, event_pl in realized:
+            if event_ts <= ts:
+                trade_pl = event_pl
+            else:
+                break
         point = {
             "t": ts.isoformat(),
             "portfolio_value": rounded,
             "balance": rounded,
-            "cumulative_pl": round(rounded - baseline, 2),
+            "cumulative_pl": trade_pl,
         }
         if points and points[-1]["t"] == point["t"]:
             points[-1] = point
             continue
         points.append(point)
+    if points:
+        points[-1]["cumulative_pl"] = account_trade_pnl(orders, positions)
+    return points, history_note
+
+
+def pnl_history_points(user: User, orders: list[Order], positions: list[Position]) -> list[dict]:
+    """Portfolio value and trade P&L on the same observations.
+
+    portfolio_value is cash plus marked positions.
+    cumulative_pl is trade P&L: realized at each fill, and the latest point is
+    the Overall P&L total (realized + unrealized at the current mark).
+    It is not portfolio value minus the starting balance.
+    """
+    points, _note = portfolio_history(user, orders, positions)
     return points

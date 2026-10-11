@@ -20,6 +20,7 @@ import {
   sortExpiryItems,
   type ExpiryNoticeItem,
 } from "../lib/expiryNotice";
+import { formatDirectionLabel, formatRightLabel } from "../lib/expiryLoginNotice";
 import { formatOptionExpiration } from "../lib/optionSymbolParse";
 import type { BreakevenValue, OrderConfirmationDetails, PositionRow, StrategyLeg } from "../types";
 
@@ -65,6 +66,18 @@ type ExpiryProps = {
 };
 
 type Props = OrderProps | PositionProps | ExpiryProps;
+
+function noticeStrike(item: ExpiryNoticeItem): string {
+  const parsed = parseOccSymbol(item.symbol);
+  const value = item.strike ?? parsed?.strike;
+  if (value == null || !Number.isFinite(value)) return "—";
+  return Number.isInteger(value) ? String(value) : String(value);
+}
+
+function noticeRight(item: ExpiryNoticeItem): "call" | "put" | null {
+  if (item.right === "call" || item.right === "put") return item.right;
+  return parseOccSymbol(item.symbol)?.side ?? null;
+}
 
 function positionTicker(symbol: string): string {
   const parsed = parseOccSymbol(symbol);
@@ -127,12 +140,12 @@ export function OrderConfirmationCertificate(props: Props) {
       ? "position-certificate-modal"
       : "order-confirmation-modal";
   const titleId = isExpiry ? "expiry-notice-title" : isPosition ? "position-cert-title" : "order-cert-title";
-  const title = isExpiry ? "Expiration notice" : isPosition ? "Position Certificate" : "Order Confirmation";
+  const title = isExpiry ? "Expiry" : isPosition ? "Position Certificate" : "Order Confirmation";
 
   return (
     <div
       ref={trapRef}
-      className="order-cert-backdrop fixed inset-0 z-[60] flex items-center justify-center p-4"
+      className={`order-cert-backdrop fixed inset-0 z-[60] flex items-center justify-center p-4${isExpiry ? " expiry-login-backdrop" : ""}`}
       data-testid={testId}
       role="dialog"
       aria-labelledby={titleId}
@@ -142,7 +155,7 @@ export function OrderConfirmationCertificate(props: Props) {
         initial={{ opacity: 0, scale: 0.96, y: 12 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         transition={{ duration: 0.35, ease: [0.22, 0.82, 0.2, 1] }}
-        className="order-cert-card w-full max-w-lg"
+        className={isExpiry ? "order-cert-card expiry-notice-card" : "order-cert-card w-full max-w-lg"}
       >
         <div className="order-cert-frame">
           <div className="order-cert-inner order-cert-stack">
@@ -179,7 +192,7 @@ export function OrderConfirmationCertificate(props: Props) {
                 <p className="order-cert-copy sf-panel-note" data-testid="expiry-notice-copy">
                   {EXPIRY_AUTO_CLOSE_NOTICE}
                 </p>
-                <div className="order-cert-legs" data-testid="expiry-notice-list">
+                <div className="order-cert-legs expiry-notice-list" data-testid="expiry-notice-list">
                   <p className="order-cert-legs-label">Open trades</p>
                   <ul>
                     {expiryItems.map((item) => (
@@ -187,7 +200,10 @@ export function OrderConfirmationCertificate(props: Props) {
                         <dl className="order-cert-grid">
                           <div className="order-cert-row">
                             <dt>Symbol</dt>
-                            <dd data-testid={`expiry-symbol-${item.symbol}`}>{item.symbol}</dd>
+                            <dd data-testid={`expiry-symbol-${item.symbol}`}>
+                              {positionTicker(item.symbol)}
+                              <span className="expiry-notice-occ">{item.symbol}</span>
+                            </dd>
                           </div>
                           <div className="order-cert-row">
                             <dt>Strategy</dt>
@@ -200,6 +216,18 @@ export function OrderConfirmationCertificate(props: Props) {
                             </dd>
                           </div>
                           <div className="order-cert-row">
+                            <dt>Strike</dt>
+                            <dd>{noticeStrike(item)}</dd>
+                          </div>
+                          <div className="order-cert-row">
+                            <dt>Call/Put</dt>
+                            <dd>{formatRightLabel(noticeRight(item))}</dd>
+                          </div>
+                          <div className="order-cert-row">
+                            <dt>Long/Short</dt>
+                            <dd>{formatDirectionLabel(item.direction ?? null)}</dd>
+                          </div>
+                          <div className="order-cert-row">
                             <dt>Days left</dt>
                             <dd data-testid={`expiry-days-${item.symbol}`}>{formatDaysLeft(item.days_left)}</dd>
                           </div>
@@ -207,7 +235,7 @@ export function OrderConfirmationCertificate(props: Props) {
                         {item.can_close && item.position_id && props.variant === "expiry" && props.onClosePosition ? (
                           <button
                             type="button"
-                            className="order-cert-dismiss order-cert-dismiss-secondary"
+                            className="expiry-notice-close"
                             data-testid={`expiry-close-${item.position_id}`}
                             disabled={props.closingId === item.position_id}
                             onClick={() => props.onClosePosition?.(item.position_id as string)}

@@ -12,6 +12,8 @@ describe("Login", () => {
     );
     expect(html).toContain('data-testid="forgot-password-link"');
     expect(html).toContain("Forgot password?");
+    expect(html).toContain('for="login-username"');
+    expect(html).toContain('id="login-username"');
   });
 
   it("checks the refresh cookie before showing the form", () => {
@@ -25,12 +27,12 @@ describe("Login", () => {
   });
 
   it("sends a reload back to every signed-in screen", () => {
-    expect(pathAfterSessionRestore("/dashboard")).toBe("/dashboard");
-    expect(pathAfterSessionRestore("/app")).toBe("/app");
-    expect(pathAfterSessionRestore("/scan")).toBe("/scan");
+    expect(pathAfterSessionRestore("/dashboard")).toBe("/portfolio");
+    expect(pathAfterSessionRestore("/app")).toBe("/portfolio");
+    expect(pathAfterSessionRestore("/scan")).toBe("/portfolio");
     expect(pathAfterSessionRestore("/portfolio")).toBe("/portfolio");
-    expect(pathAfterSessionRestore("/settings")).toBe("/settings");
-    expect(pathAfterSessionRestore("/login")).toBe("/dashboard");
-    expect(pathAfterSessionRestore(undefined)).toBe("/dashboard");
+    expect(pathAfterSessionRestore("/settings")).toBe("/portfolio");
+    expect(pathAfterSessionRestore("/login")).toBe("/portfolio");
+    expect(pathAfterSessionRestore(undefined)).toBe("/portfolio");
   });
 });

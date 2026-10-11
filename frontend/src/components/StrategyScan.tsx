@@ -65,7 +65,10 @@ export function StrategyScan({
   const score = data.composite_score ?? null;
   const strategyLabel = normalizeStrategyName(data.structure_label || data.selected_strategy);
   const legCount = data.metrics?.legs?.length ?? 0;
-  const blocked = legCount === 0 && data.tradeable === false;
+  // The compact card is only for a scan that named no structure. A named strategy
+  // keeps the full layout, including a leg-count or expiry-window failure.
+  const blocked =
+    legCount === 0 && data.tradeable === false && /not tradeable/i.test(data.selected_strategy || "");
 
   if (blocked) {
     return (
@@ -97,6 +100,8 @@ export function StrategyScan({
   }
 
   const executable = data.tradeable !== false && data.execution_banner !== "NOT EXECUTABLE" && !data.auto_exec_blocked;
+  const hardBlocked = (data.hard_block_reasons ?? []).some((note) => note.trim().length > 0);
+  const statusLabel = hardBlocked ? "Blocked" : executable ? "Best match" : "Not recommended";
   const whyText = data.why_it_fits || data.why_recommended || "";
   const rawNotes = data.failed_checks?.length ? data.failed_checks : data.risk_notes;
   const bannerNotes = (rawNotes ?? []).filter((note) => {
@@ -161,7 +166,7 @@ export function StrategyScan({
       </header>
 
       <article className="st-hero" data-testid="strategy-name">
-        <p className="st-kicker">{executable ? "Best match" : "NOT EXECUTABLE"}</p>
+        <p className="st-kicker">{statusLabel}</p>
         <h2 className="st-name">{strategyLabel}</h2>
         {data.auto_exec_line ? (
           <p className="st-leg-hint" data-testid="auto-exec-eligibility">

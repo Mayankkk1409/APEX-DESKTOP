@@ -249,12 +249,14 @@ export const api = {
       account_mode?: string;
       otp_required?: boolean;
       ttl_seconds?: number;
+      code_reused?: boolean;
+      email_hint?: string;
       access_token?: string;
       expires_in?: number;
       refresh_in?: number;
     }>("/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),
   resendLoginCode: (username: string, password: string) =>
-    req<{ ok: boolean; ttl_seconds: number }>("/auth/login/code", {
+    req<{ ok: boolean; ttl_seconds: number; username?: string; code_reused?: boolean; email_hint?: string }>("/auth/login/code", {
       method: "POST",
       body: JSON.stringify({ username, password }),
     }),
@@ -307,7 +309,10 @@ export const api = {
     return req<NewsArticleContent>(`/market/news/article?${params.toString()}`);
   },
   search: (q: string) => req<{ hits: { symbol: string; name: string }[] }>(`/market/search?q=${encodeURIComponent(q)}`),
-  expirations: (symbol: string) => req<{ expirations: { date: string; dte: number; kind: string; near_expiry: boolean }[] }>(`/market/expirations/${symbol}`),
+  expirations: (symbol: string) =>
+    req<{ expirations: { date: string; dte: number; kind: string; near_expiry: boolean; listed?: number }[] }>(
+      `/market/expirations/${symbol}`,
+    ),
   options: (symbol: string, expiry: string) => req(`/market/options/${symbol}?expiry=${expiry}`),
   optionsAnalysis: (
     symbol: string,
@@ -378,6 +383,8 @@ export const api = {
       { method: "POST" },
     ),
   orderHistory: () => req<{ orders: import("./types").OrderHistoryRow[] }>("/api/orders"),
+  cancelQueuedOrder: (id: string) =>
+    req<{ id: string; status: string }>(`/api/orders/queued/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
   order: (body: Record<string, unknown>) => req("/api/orders", { method: "POST", body: JSON.stringify(body) }),
   scan: (snapshot: ChartSnapshot, expiry?: string) =>
     req("/scan", {
@@ -431,7 +438,7 @@ export const api = {
   brokerageEquityHistory: (accountId: string) =>
     req<import("./types").PnlHistory>(`/api/brokerage/accounts/${encodeURIComponent(accountId)}/equity-history`),
   brokerageOrders: (accountId: string) =>
-    req<{ orders: import("./types").OrderHistoryRow[] }>(
+    req<{ orders: import("./types").OrderHistoryRow[]; history_note?: string | null }>(
       `/api/brokerage/accounts/${encodeURIComponent(accountId)}/orders`,
     ),
   brokerageDisconnect: (accountId: string) =>

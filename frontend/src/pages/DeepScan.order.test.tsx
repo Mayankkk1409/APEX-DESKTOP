@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { OrderSubmitProgress } from "../components/OrderSubmitProgress";
 import { RiskReviewLegs } from "../components/RiskReviewLegs";
-import { RiskReviewOrderActions, THESIS_ACCEPTANCE_TEXT } from "../components/RiskReviewOrderActions";
+import { RiskReviewOrderActions, THESIS_ACCEPTANCE_TEXT, THESIS_AUTHORIZE_TEXT } from "../components/RiskReviewOrderActions";
 import { optionReviewRows, optionsLegBlockReason, type OptionReviewRow } from "../lib/orderTicket";
 import { orderPlacement, thesisCheckboxState, type OrderPlacement } from "../lib/riskReview";
 import { DEFAULT_USER_SETTINGS } from "../lib/userSettings";
@@ -111,7 +111,8 @@ describe("DeepScan risk review order panel", () => {
     expect(html).toContain("market · us_option");
     expect(html).toContain('class="flex cursor-pointer items-center gap-2 text-sm leading-snug"');
     expect(html).toContain('class="shrink-0"');
-    expect(html).toContain(THESIS_ACCEPTANCE_TEXT);
+    expect(html).toContain(THESIS_AUTHORIZE_TEXT);
+    expect(html).not.toContain(THESIS_ACCEPTANCE_TEXT);
   });
 
   it("submits on one checkbox above the saved minimum with no Acknowledge button", () => {
@@ -132,7 +133,7 @@ describe("DeepScan risk review order panel", () => {
     expect(html).toContain('data-testid="thesis"');
     expect(html).not.toContain("disabled");
     expect(html).toContain('data-testid="auto-exec-hint"');
-    expect(html).toContain("Accepting the thesis submits these legs.");
+    expect(html).toContain("Checking this box starts the paper order.");
     expect(html).not.toContain('data-testid="submit-order"');
     expect(html).not.toContain('data-testid="acknowledge-order"');
     expect(html).not.toContain("Acknowledge");
@@ -239,7 +240,7 @@ describe("DeepScan risk review order panel", () => {
     expect(page).toContain("order.mutate({ thesisAccepted: true })");
     expect(page).toContain("userOverride: true");
     expect(page).toContain("thesis_accepted: input.thesisAccepted");
-    expect(page).toContain("APEX could not verify this trade");
+    expect(page).toContain("This does not send the order until you confirm.");
     expect(page).toContain("Proceed at my own risk");
     expect(page).toContain("const userOverride = input.userOverride === true");
     expect(page).toContain("user_override: userOverride");
@@ -261,8 +262,9 @@ describe("DeepScan risk review order panel", () => {
     expect(actions).toContain("Acknowledge");
     const progress = readFileSync(resolve(here, "../components/OrderSubmitProgress.tsx"), "utf8");
     expect(progress).toContain('data-testid="order-progress"');
-    expect(progress).toContain("Submitting");
-    expect(progress).toContain("Filled");
+    expect(progress).toContain("Submitting this paper order");
+    expect(progress).toContain("Saved to the queue");
+    expect(progress).toContain("Order recorded");
     expect(progress).toContain("Not submitted");
     expect(progress).not.toContain("order-progress-pct");
     expect(progress).not.toContain("aria-valuenow");
@@ -276,12 +278,13 @@ describe("DeepScan risk review order panel", () => {
     expect(pending).toContain("AAPL");
     expect(pending).toContain("Bull Call Spread");
     expect(pending).not.toContain("%");
-    expect(pending).not.toContain("order-progress-ring");
+    expect(pending).toContain('data-testid="order-progress-ring"');
+    expect(pending).toContain('data-determinate="false"');
     const filled = renderToStaticMarkup(
-      <OrderSubmitProgress phase="filled" facts={{ ticker: "AAPL", strategy: "Bull Call Spread" }} />,
+      <OrderSubmitProgress phase="recorded" facts={{ ticker: "AAPL", strategy: "Bull Call Spread" }} />,
     );
-    expect(filled).toContain('data-phase="filled"');
-    expect(filled).toContain("Filled");
+    expect(filled).toContain('data-phase="recorded"');
+    expect(filled).toContain("Order recorded");
     expect(filled).toContain("AAPL");
     const refused = renderToStaticMarkup(
       <OrderSubmitProgress
@@ -478,7 +481,7 @@ describe("DeepScan risk review order panel", () => {
     expect(html).toContain("account impact credit $840.00");
     expect(html).toContain('data-testid="thesis"');
     expect(placement.autoSubmitOnAck).toBe(true);
-    expect(html).toContain("Accepting the thesis submits these legs.");
+    expect(html).toContain("Checking this box starts the paper order.");
     expect(html).not.toContain("Acknowledge");
   });
 
@@ -490,7 +493,7 @@ describe("DeepScan risk review order panel", () => {
     expect(html).toContain("MSFT261016P00500000");
     expect(html).toContain("limit at mid");
     expect(html).not.toContain("market · us_option");
-    expect(html).toContain("Accepting the thesis submits these legs.");
+    expect(html).toContain("Checking this box starts the paper order.");
     expect(html).not.toContain("Acknowledge");
   });
 

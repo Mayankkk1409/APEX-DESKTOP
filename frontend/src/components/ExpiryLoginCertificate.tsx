@@ -1,5 +1,5 @@
 import { motion, useReducedMotion } from "framer-motion";
-import { useEscapeKey } from "../hooks/useFocusTrap";
+import { useEscapeKey, useFocusTrap } from "../hooks/useFocusTrap";
 import {
   EXPIRY_LOGIN_NONE,
   expiryLoginNotes,
@@ -16,18 +16,21 @@ type Props = {
   onDismiss: () => void;
 };
 
+/** Compact sign-in certificate. The contract list scrolls inside the card. */
 export function ExpiryLoginCertificate({ items, isPaper, onDismiss }: Props) {
+  const trapRef = useFocusTrap(true);
   useEscapeKey(true, onDismiss);
   const reduceMotion = useReducedMotion();
   const notes = expiryLoginNotes(items, isPaper);
 
   return (
     <div
-      className="expiry-login-backdrop pointer-events-none fixed inset-0 z-[60] flex items-center justify-center p-4"
+      ref={trapRef}
+      className="expiry-login-backdrop order-cert-backdrop pointer-events-auto fixed inset-0 z-[60] flex items-center justify-center p-4"
       data-testid="expiry-login-certificate"
       role="dialog"
       aria-labelledby="expiry-login-title"
-      aria-modal="false"
+      aria-modal="true"
     >
       <motion.div
         initial={reduceMotion ? false : { opacity: 0, scale: 0.96, y: 12 }}
@@ -47,7 +50,7 @@ export function ExpiryLoginCertificate({ items, isPaper, onDismiss }: Props) {
               <ApexLogo size={52} className="order-cert-logo" />
               <p className="order-cert-eyebrow">APEX Terminal</p>
               <h2 id="expiry-login-title" className="order-cert-title">
-                Expiring positions
+                Expiry
               </h2>
               <p className="order-cert-status">Next 7 days</p>
             </div>

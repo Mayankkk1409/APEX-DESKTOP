@@ -16,6 +16,9 @@ export type BrokerageBalance = {
   buying_power: number;
   total_equity: number;
   day_pnl: number | null;
+  day_pnl_percent?: number | null;
+  day_pnl_note?: string | null;
+  overall_pnl?: number | null;
   currency: string;
   as_of_timestamp: string;
 };

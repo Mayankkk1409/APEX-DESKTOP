@@ -4,6 +4,9 @@ import { thesisCheckboxState } from "../lib/riskReview";
 export const THESIS_ACCEPTANCE_TEXT =
   "I accept the thesis and have reviewed each option leg, the stock leg when this strategy includes shares, contract quantity, and account impact.";
 
+export const THESIS_AUTHORIZE_TEXT =
+  "I have reviewed this trade and authorize APEX to submit or queue this paper order under the terms shown.";
+
 /** Thesis checkbox versus Place Trade for the Deep Scan risk-review slide. */
 export function RiskReviewOrderActions({
   placement,
@@ -28,6 +31,11 @@ export function RiskReviewOrderActions({
           {placement.note}
         </p>
       ) : null}
+      {!placement.overrideRequired && placement.acknowledgeEnabled && state.submitsOnAccept ? (
+        <p className="text-sm text-champagne/70" data-testid="auto-exec-hint">
+          Checking this box starts the paper order. APEX submits it now, or queues it when a live price is not available.
+        </p>
+      ) : null}
       <label className="flex cursor-pointer items-center gap-2 text-sm leading-snug">
         <input
           type="checkbox"
@@ -40,13 +48,8 @@ export function RiskReviewOrderActions({
             onThesisChange?.(e.target.checked);
           }}
         />
-        <span>{THESIS_ACCEPTANCE_TEXT}</span>
+        <span>{state.submitsOnAccept ? THESIS_AUTHORIZE_TEXT : THESIS_ACCEPTANCE_TEXT}</span>
       </label>
-      {!placement.overrideRequired && placement.acknowledgeEnabled && state.submitsOnAccept ? (
-        <p className="text-sm text-champagne/70" data-testid="auto-exec-hint">
-          Accepting the thesis submits these legs.
-        </p>
-      ) : null}
       {showOverrideActions ? (
         <div className="flex flex-wrap gap-2">
           <button

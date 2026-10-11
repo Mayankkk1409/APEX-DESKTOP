@@ -94,10 +94,16 @@ export function Signup() {
         <Field label="Username" testid="signup-username" value={username} onChange={setUsername} />
         <Field label="Email" testid="email" value={email} onChange={setEmail} />
         <PasswordField label="Password" testid="signup-password" value={password} onChange={onPassword} autoComplete="new-password" />
-        <div className="mb-3 h-1.5 overflow-hidden rounded bg-ink" data-testid="strength-meter">
-          <div className="h-full bg-gold transition-all" style={{ width: `${(strength.score / 5) * 100}%` }} />
-        </div>
-        <p className="mb-3 text-[11px] text-bronze">Strength: {strength.label}</p>
+        {password ? (
+          <>
+            <div className="mb-3 h-1.5 overflow-hidden rounded bg-ink" data-testid="strength-meter">
+              <div className="h-full bg-gold transition-all" style={{ width: `${(strength.score / 5) * 100}%` }} />
+            </div>
+            <p className="mb-3 text-[11px] text-bronze" data-testid="strength-label">
+              Strength: {strength.label.replace(/_/g, " ")}
+            </p>
+          </>
+        ) : null}
         <PasswordField label="Confirm password" testid="confirm-password" value={confirm} onChange={setConfirm} autoComplete="new-password" />
 
         <fieldset className="mb-4">

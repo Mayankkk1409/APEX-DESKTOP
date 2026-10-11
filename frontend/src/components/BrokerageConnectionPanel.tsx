@@ -22,6 +22,7 @@ export function BrokerageConnectionPanel() {
     positionsQuery,
   } = useBrokerage();
   const [disconnectOpen, setDisconnectOpen] = useState(false);
+  const [readOnlyOpen, setReadOnlyOpen] = useState(false);
   const [callbackMsg, setCallbackMsg] = useState<string | null>(null);
 
   const paperBalance = user?.portfolio_value ?? user?.cash_balance ?? 100_000;
@@ -32,6 +33,7 @@ export function BrokerageConnectionPanel() {
     if (connectedParam === "true") {
       setCallbackMsg("Brokerage connected successfully.");
       selectViewMode("brokerage");
+      setReadOnlyOpen(true);
       void api.brokerageSync().finally(() => {
         qc.invalidateQueries({ queryKey: ["brokerage"] });
       });
@@ -90,6 +92,7 @@ export function BrokerageConnectionPanel() {
   const syncPending = balanceQuery.isFetching || positionsQuery.isFetching;
 
   function onViewModeChange(mode: PortfolioViewMode) {
+    if (mode === "brokerage" && portfolioViewMode !== "brokerage") setReadOnlyOpen(true);
     selectViewMode(mode);
   }
 
@@ -218,6 +221,33 @@ export function BrokerageConnectionPanel() {
           live balances are not invented.
         </p>
       )}
+
+      {readOnlyOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--apex-backdrop)] p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="read-only-title"
+          data-testid="brokerage-read-only"
+        >
+          <div className="w-full max-w-md rounded-xl border border-line bg-panel p-5">
+            <h2 id="read-only-title" className="font-display text-xl">
+              You’re in read-only mode.
+            </h2>
+            <p className="mt-2 text-sm text-subtle">
+              You can view your brokerage portfolio and account information, but you can’t place trades from APEX in this mode.
+            </p>
+            <button
+              type="button"
+              className="mt-4 rounded-md bg-gold px-4 py-2 text-ink"
+              data-testid="brokerage-read-only-close"
+              onClick={() => setReadOnlyOpen(false)}
+            >
+              OK
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {disconnectOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--apex-backdrop)]" data-testid="brokerage-disconnect-modal">

@@ -64,6 +64,7 @@ export interface Expiration {
   kind: string;
   near_expiry: boolean;
   earnings_highlight: boolean;
+  listed?: number;
 }
 
 /** Where a Greek or IV number came from. `model` = locally computed Black-Scholes. */
@@ -367,6 +368,8 @@ export interface StrategyLayer {
   auto_execute_eligible?: boolean;
   structure_label?: string | null;
   placeable?: boolean;
+  hard_block_reasons?: string[];
+  spread_block_reasons?: string[];
   quote_not_current?: boolean;
   quote_as_of?: string | null;
   block_reason?: string | null;
@@ -407,10 +410,17 @@ export interface OrderHistoryRow {
   qty: number;
   order_type: string;
   fill_price: number | null;
+  limit_price?: number | null;
+  filled_qty?: number | null;
   status: string;
   asset_class: string;
   created_at: string | null;
   filled_at: string | null;
+  queue_reason?: string | null;
+  strategy_name?: string | null;
+  expires_at?: string | null;
+  group_id?: string | null;
+  source?: string | null;
 }
 
 /** POST /api/orders response — single leg or multi-leg strategy fill. */
@@ -425,6 +435,7 @@ export interface OrderPlacementResult {
   portfolio_value?: number;
   asset_class: string;
   legs_filled?: OrderLegFill[];
+  queue_message?: string;
 }
 
 export interface OrderLegFill {
@@ -472,6 +483,7 @@ export interface PnlHistory {
   starting_balance: number;
   account_mode: string;
   points: PnlPoint[];
+  history_note?: string | null;
 }
 
 export interface PortfolioSummary {

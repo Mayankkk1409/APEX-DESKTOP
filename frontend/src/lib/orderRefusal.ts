@@ -67,28 +67,40 @@ function refusalFact(raw: string): string {
 function refusalWhy(fact: string): string {
   const text = fact.toLowerCase();
   if (text.includes("bid/ask spread") || text.includes("% of mid") || text.includes("wider than the")) {
-    return "The price you would pay is not reliable.";
+    return "The price you would pay is not reliable. No order was sent. Review the quotes, then try again if you still want this trade.";
   }
   if (text.includes("buying power")) {
-    return "The account cannot cover the order.";
+    return "The account cannot cover the order. No order was sent. Reduce the size or free up buying power, then review the trade again.";
+  }
+  if (text.includes("no current price") || text.includes("usable price") || text.includes("couldn't get a price")) {
+    return "We couldn't place this trade because one option leg doesn't have a usable price. No order was sent. Refresh the option chain and review the prices before trying again.";
   }
   if (text.includes("leg count") || text.includes("leg_count")) {
-    return "This is not the strategy on the card.";
+    return "This is not the strategy on the card. No order was sent. Go back to the strategy and rebuild the legs.";
   }
   if (text.includes("breakeven")) {
-    return "The payoff is not the shape on the card.";
+    return "The payoff is not the shape on the card. No order was sent. Review the strategy before trying again.";
   }
-  if (text.includes("quote not current") || text.includes("quoted ")) {
-    return "The quote is too old to trust the price.";
+  if (text.includes("quote not current") || text.includes("quoted ") || text.includes("couldn't confirm when")) {
+    return "Refresh the quote and try again. No order was sent.";
+  }
+  if (text.includes("read-only")) {
+    return "You're in read-only mode. No order was sent. Switch back to the paper account to place a paper trade.";
   }
   if (text.includes("order status") || text.includes("not filled")) {
-    return "The broker did not take the order.";
+    return "The broker did not take the order. Check the order status before you send it again.";
   }
-  return "This check is enough to hold the order.";
+  if (text.includes("has not confirmed a fill") || text.includes("broker received this order")) {
+    return "Your order is queued. It was not filled. Check Portfolio before sending another one.";
+  }
+  return "This check is enough to hold the order. No order was sent.";
 }
 
 export function explainOrderRefusal(reason: string): string {
   const text = reason.trim();
+  if (/^the order was not submitted\.?$/i.test(text)) {
+    return "APEX stopped this order before sending it. The check that stopped it did not come back with a reason.";
+  }
   if (isSettledOrderSentence(text)) return text;
   const record = refusalRecord(text);
   if (record && (record.check || record.expected || record.actual)) {

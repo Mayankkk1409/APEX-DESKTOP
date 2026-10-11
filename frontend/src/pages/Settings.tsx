@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
-import { ApexLogo } from "../components/ApexLogo";
+import { ApexWordmark } from "../components/ApexWordmark";
 import { BrokerageConnectionPanel } from "../components/BrokerageConnectionPanel";
 import { LegalFooter } from "../components/LegalFooter";
 import { LogoutButton } from "../components/LogoutButton";
@@ -100,8 +100,7 @@ export function Settings() {
     <div className="min-h-screen" data-testid="settings-page">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3">
         <div className="flex flex-wrap items-center gap-3">
-          <ApexLogo size={36} className="shrink-0" />
-          <p className="font-display text-xl tracking-[0.2em]">APEX</p>
+          <ApexWordmark />
           <Link to="/app" className="rounded-md border border-line bg-panel px-3 py-1.5 text-sm text-gold hover:bg-gold/10">
             Dashboard
           </Link>

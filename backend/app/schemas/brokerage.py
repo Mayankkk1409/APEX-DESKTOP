@@ -29,6 +29,9 @@ class AccountBalanceOut(BaseModel):
     buying_power: float
     total_equity: float
     day_pnl: float | None = None
+    day_pnl_percent: float | None = None
+    day_pnl_note: str | None = None
+    overall_pnl: float | None = None
     currency: str
     as_of_timestamp: datetime
 
@@ -65,14 +68,19 @@ class OrderOut(BaseModel):
     qty: float
     order_type: str
     fill_price: float | None = None
+    limit_price: float | None = None
+    filled_qty: float | None = None
     status: str
     asset_class: str
     created_at: str | None = None
     filled_at: str | None = None
+    group_id: str | None = None
+    source: str | None = None
 
 
 class OrdersResponse(BaseModel):
     orders: list[OrderOut]
+    history_note: str | None = None
 
 
 class EquityHistoryPoint(BaseModel):
@@ -86,6 +94,7 @@ class EquityHistoryResponse(BaseModel):
     starting_balance: float
     account_mode: str = "real_brokerage"
     points: list[EquityHistoryPoint]
+    history_note: str | None = None
 
 
 class RegisterUserResponse(BaseModel):

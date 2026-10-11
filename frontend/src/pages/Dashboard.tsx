@@ -1,6 +1,7 @@
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { ApexWordmark } from "../components/ApexWordmark";
 import { api, getAccessToken } from "../api";
 import { BrokerageConnectionPanel } from "../components/BrokerageConnectionPanel";
 import { LogoutButton } from "../components/LogoutButton";
@@ -8,7 +9,6 @@ import { DailyPnlList, PositionDailyPnl } from "../components/DailyPnlList";
 import { PositionCertificateModal } from "../components/PositionCertificateModal";
 import { SettingsGearLink } from "../components/SettingsGearLink";
 import { TradingViewChart } from "../components/TradingViewChart";
-import { ApexLogo } from "../components/ApexLogo";
 import { LegalFooter } from "../components/LegalFooter";
 import { WatchlistToggle } from "../components/WatchlistToggle";
 import { captureChartState, getChartState, subscribeChartState } from "../chartCapture";
@@ -17,6 +17,7 @@ import { useBrokerage } from "../hooks/useBrokerage";
 import { useMarketSocket } from "../hooks/useMarketSocket";
 import { defaultAccountLabel, usePositionCertificate } from "../hooks/usePositionCertificate";
 import { DESK_STALE_MS, refreshDeskQueries } from "../lib/deskRefresh";
+import { writeExpiryHold } from "../lib/fullChainExpiry";
 import { clearNewsRetry, isNewsRateLimitMessage, newsRetryDelay, noteNewsRateLimit, visibleNewsError } from "../lib/newsFeed";
 import { dayPlOrUnrealized, daysForPosition, displaySessionDay, formatSessionDate, markedPnl } from "../lib/dailyPnl";
 import { resolvePositionDayPl } from "../lib/positionDayPl";
@@ -31,9 +32,11 @@ export function Dashboard() {
     useSession();
   const chartState = useSyncExternalStore(subscribeChartState, getChartState, getChartState);
   const chartMatchesIntent = chartState.symbol === symbol && chartState.allBars.length > 0;
-  const activeSymbol = chartMatchesIntent ? chartState.symbol : symbol;
+  // The graph ticker is the desk ticker. Search, quotes, and the info card follow it.
+  const activeSymbol = symbol;
   const chartReady = chartMatchesIntent;
-  const [query, setQuery] = useState(symbol);
+  const [draft, setDraft] = useState<string | null>(null);
+  const query = draft ?? symbol;
   const [hits, setHits] = useState<{ symbol: string; name: string }[]>([]);
   const [highlightIdx, setHighlightIdx] = useState(-1);
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
@@ -46,14 +49,6 @@ export function Dashboard() {
   if (!symbolSearchRef.current) {
     symbolSearchRef.current = createDebouncedSymbolSearch((value) => api.search(value), SEARCH_DEBOUNCE_MS);
   }
-
-  useEffect(() => {
-    if (chartReady) setQuery(activeSymbol);
-  }, [activeSymbol, chartReady]);
-
-  useEffect(() => {
-    if (!chartReady) setQuery(symbol);
-  }, [symbol, chartReady]);
 
   useEffect(() => {
     setHighlightIdx(-1);
@@ -72,8 +67,8 @@ export function Dashboard() {
     const s = next.trim().toUpperCase();
     if (!s) return;
     closeSuggestions();
+    setDraft(null);
     setSymbol(s);
-    setQuery(s);
     setExpiry("");
     searchInputRef.current?.blur();
   }
@@ -96,6 +91,9 @@ export function Dashboard() {
     return typed;
   }
   const [chartFull, setChartFull] = useState(false);
+  const [infoOpen, setInfoOpen] = useState(false);
+  const [cardPos, setCardPos] = useState<{ x: number; y: number } | null>(null);
+  const dragRef = useRef<{ dx: number; dy: number } | null>(null);
   const [chartAnimating, setChartAnimating] = useState(false);
   const deskRef = useRef<HTMLDivElement>(null);
   const motionRef = useRef<HTMLDivElement>(null);
@@ -212,14 +210,11 @@ export function Dashboard() {
     enabled: paperBook,
     staleTime: DESK_STALE_MS,
   });
-  // Keep the picker on a live expiry for the current underlying. On symbol change
-  // applyTicker clears expiry; once the refetch lands, default to the nearest date.
+  // Only fill a blank expiry. A date the user picked stays, and that date's full chain is what loads.
   useEffect(() => {
     const list = expiries.data?.expirations ?? [];
-    if (!list.length) return;
-    if (!expiry || !list.some((ex) => ex.date === expiry)) {
-      setExpiry(list[0].date);
-    }
+    if (!list.length || expiry) return;
+    setExpiry(list[0].date);
   }, [expiries.data, expiry, setExpiry]);
 
   function finishChartMotion() {
@@ -242,6 +237,10 @@ export function Dashboard() {
     } else {
       restoreScroll.current = true;
     }
+    if (!next) {
+      setInfoOpen(false);
+      setCardPos(null);
+    }
     setChartAnimating(true);
     setChartFull(next);
   }
@@ -257,7 +256,7 @@ export function Dashboard() {
   useEffect(() => {
     if (!chartAnimating) return;
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const ms = (reduce ? 140 : 520) + 80;
+    const ms = (reduce ? 140 : 980) + 80;
     const id = window.setTimeout(() => finishChartMotion(), ms);
     return () => window.clearTimeout(id);
   }, [chartAnimating, chartFull]);
@@ -266,11 +265,15 @@ export function Dashboard() {
     function onKey(e: KeyboardEvent) {
       if (e.key !== "Escape" || !chartFull || chartAnimating || suggestionsOpen) return;
       if (cert.selected || showConnectModal) return;
+      if (infoOpen) {
+        setInfoOpen(false);
+        return;
+      }
       requestChartFullscreen(false);
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [chartFull, chartAnimating, suggestionsOpen, cert.selected, showConnectModal]);
+  }, [chartFull, chartAnimating, suggestionsOpen, cert.selected, showConnectModal, infoOpen]);
 
   const stats = brokerage.usingBrokerage && brokerage.stats
     ? {
@@ -316,12 +319,16 @@ export function Dashboard() {
     : seriesReady
       ? markedPnl(latestBook)
       : (portfolio.data?.day_pl as number | null | undefined);
-  const dayPlLabel = seriesReady && markedPnl(latestBook) == null ? "unavailable" : fmt(dayPl);
+  const dayPlLabel = brokerage.usingBrokerage
+    ? dayPl == null
+      ? "Unavailable"
+      : fmtSigned(dayPl)
+    : seriesReady && markedPnl(latestBook) == null
+      ? "unavailable"
+      : fmt(dayPl);
   const sessionLabel = latestBook ? formatSessionDate(latestBook.date) : "";
   const dayPct = brokerage.usingBrokerage
-    ? brokerage.stats?.day_pnl != null && brokerage.stats.portfolio_value
-      ? (brokerage.stats.day_pnl / brokerage.stats.portfolio_value) * 100
-      : null
+    ? (brokerage.balance?.day_pnl_percent ?? null)
     : seriesReady
       ? dayPl != null && stats.portfolio_value
         ? (dayPl / stats.portfolio_value) * 100
@@ -382,7 +389,7 @@ export function Dashboard() {
   const q =
     qRaw?.symbol?.toUpperCase() === activeSymbol.toUpperCase() ? qRaw : undefined;
   const fRaw = fundamentals.data as Fundamentals | undefined;
-  const f = fRaw && chartReady ? fRaw : undefined;
+  const f = fRaw;
   const change = q?.change ?? null;
   const changeCls = change == null ? "text-faint" : change >= 0 ? "num-up" : "num-down";
   const quoteStatus = q?.status ?? (quote.isError ? "unavailable" : undefined);
@@ -426,10 +433,7 @@ export function Dashboard() {
       )}
       <header className="desk-header flex items-center border-b border-line px-4 py-3">
         <div className="desk-fold-x" data-desk-hide="brand">
-          <Link to="/dashboard" className="desk-brand" aria-label="Apex" data-testid="apex-brand">
-            <ApexLogo size={36} className="shrink-0" />
-            <span className="font-display text-xl tracking-[0.2em]">APEX</span>
-          </Link>
+          <ApexWordmark />
         </div>
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-3">
         <div className="relative">
@@ -445,7 +449,7 @@ export function Dashboard() {
             aria-controls="ticker-suggestions"
             aria-activedescendant={highlightIdx >= 0 ? `ticker-hit-${highlightIdx}` : undefined}
             onChange={(e) => {
-              setQuery(e.target.value);
+              setDraft(e.target.value.toUpperCase());
               void runSearch(e.target.value);
             }}
             onKeyDown={(e) => {
@@ -476,7 +480,10 @@ export function Dashboard() {
             onFocus={() => {
               if (!query.trim()) void runSearch("");
             }}
-            onBlur={() => closeSuggestions()}
+            onBlur={() => {
+              setDraft(null);
+              closeSuggestions();
+            }}
           />
           {suggestionsOpen && hits.length > 0 && (
             <ul id="ticker-suggestions" className="ticker-suggestions absolute z-20 mt-1 max-h-72 w-80 overflow-y-auto rounded-md border border-line text-sm" role="listbox">
@@ -502,7 +509,10 @@ export function Dashboard() {
           data-testid="expiry"
           className="rounded-md border border-line bg-panel px-2 py-1.5 text-sm"
           value={expiry}
-          onChange={(e) => setExpiry(e.target.value)}
+          onChange={(e) => {
+            writeExpiryHold(activeSymbol, e.target.value);
+            setExpiry(e.target.value);
+          }}
           data-expiry-count={(expiries.data?.expirations ?? []).length}
           title={
             (expiries.data?.expirations ?? []).length
@@ -513,10 +523,29 @@ export function Dashboard() {
           {(expiries.data?.expirations ?? []).map((ex) => (
             <option key={ex.date} value={ex.date}>
               {ex.date} ({ex.dte}d · {ex.kind}
+              {ex.listed ? ` · ${ex.listed} ${ex.listed === 1 ? "call" : "calls"}` : ""}
               {ex.near_expiry ? " · near" : ""})
             </option>
           ))}
         </select>
+        <button
+          type="button"
+          data-testid="info-score-card"
+          className="desk-scan-fullscreen rounded-md border border-line bg-panel px-3 py-1.5 text-sm text-gold"
+          aria-expanded={infoOpen}
+          onClick={() => setInfoOpen((open) => !open)}
+        >
+          Info Score Card
+        </button>
+        <button
+          type="button"
+          data-testid="scan-btn-fullscreen"
+          disabled={scanning || !chartReady}
+          onClick={() => void scan()}
+          className="desk-scan-fullscreen rounded-md bg-gold px-5 py-1.5 text-sm font-medium text-ink disabled:opacity-40"
+        >
+          Scan {activeSymbol}
+        </button>
         </div>
         <div className="desk-fold-x" data-desk-hide="header-tools">
           <div className="flex shrink-0 items-center gap-2">
@@ -545,12 +574,65 @@ export function Dashboard() {
 
       <div className="desk-stage grid grid-cols-12 items-stretch gap-3 px-4 pb-3">
         <aside
-          className="desk-ticker col-span-12 h-[calc(100dvh-10.75rem)] min-h-[36rem] overflow-auto rounded-xl border border-line bg-panel p-4 lg:col-span-2"
+          className={
+            chartFull
+              ? `desk-ticker desk-ticker-overlay${infoOpen ? " is-open" : ""}`
+              : "desk-ticker col-span-12 h-[calc(100dvh-10.75rem)] min-h-[36rem] overflow-auto rounded-xl border border-line bg-panel p-4 lg:col-span-2"
+          }
           data-testid="ticker-panel"
+          role={chartFull && infoOpen ? "dialog" : undefined}
+          aria-modal={chartFull && infoOpen ? true : undefined}
+          aria-label={chartFull && infoOpen ? "Info score card" : undefined}
+          aria-hidden={chartFull && !infoOpen ? true : undefined}
+          style={chartFull && infoOpen && cardPos ? { left: cardPos.x, top: cardPos.y } : undefined}
         >
+          {chartFull && infoOpen ? (
+            <div
+              className="mb-3 flex cursor-grab items-center justify-between gap-3 active:cursor-grabbing"
+              data-testid="info-score-drag"
+              onPointerDown={(event) => {
+                if ((event.target as HTMLElement).closest("button")) return;
+                event.preventDefault();
+                const card = event.currentTarget.parentElement;
+                if (!card) return;
+                const rect = card.getBoundingClientRect();
+                dragRef.current = { dx: event.clientX - rect.left, dy: event.clientY - rect.top };
+                card.classList.add("is-dragging");
+                event.currentTarget.setPointerCapture(event.pointerId);
+              }}
+              onPointerMove={(event) => {
+                if (!dragRef.current || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
+                event.preventDefault();
+                const x = Math.min(window.innerWidth - 96, Math.max(8, event.clientX - dragRef.current.dx));
+                const y = Math.min(window.innerHeight - 64, Math.max(8, event.clientY - dragRef.current.dy));
+                setCardPos({ x, y });
+              }}
+              onPointerUp={(event) => {
+                dragRef.current = null;
+                event.currentTarget.parentElement?.classList.remove("is-dragging");
+                if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                  event.currentTarget.releasePointerCapture(event.pointerId);
+                }
+              }}
+              onPointerCancel={(event) => {
+                dragRef.current = null;
+                event.currentTarget.parentElement?.classList.remove("is-dragging");
+              }}
+            >
+              <p className="text-xs uppercase tracking-wider text-bronze">Info score card</p>
+              <div className="flex items-center gap-3">
+                <button type="button" className="text-sm text-gold" onClick={() => setCardPos(null)}>
+                  Reset
+                </button>
+                <button type="button" className="text-sm text-gold" onClick={() => setInfoOpen(false)}>
+                  Close
+                </button>
+              </div>
+            </div>
+          ) : null}
           <p className="font-display text-2xl">{activeSymbol}</p>
           <p className="text-xs text-bronze">{liveName}</p>
-          {!chartReady || (quote.isLoading && !q) ? (
+          {quote.isLoading && !q ? (
             <p className="mt-2 text-sm text-faint" data-testid="quote-loading">
               Loading live quote…
             </p>
@@ -594,7 +676,7 @@ export function Dashboard() {
         </aside>
 
         <section className="desk-stage-chart col-span-12 flex flex-col gap-3 lg:col-span-10">
-          <div className="desk-chart-slot h-[calc(100dvh-9.5rem)] min-h-[42rem]">
+          <div className={`desk-chart-slot ${chartFull ? "h-full min-h-0" : "h-[calc(100dvh-9.5rem)] min-h-[42rem]"}`}>
             <TradingViewChart
               symbol={symbol}
               timeframe={timeframe}
@@ -609,7 +691,10 @@ export function Dashboard() {
           <div className="flex items-center justify-between rounded-xl border border-line bg-panel px-4 py-2.5">
             <div>
               <p className="text-xs uppercase tracking-wider text-bronze">Daily portfolio summary</p>
-              <p className="font-mono" data-testid="day-pl-summary">
+              <p
+                className={`font-mono ${dayPl == null ? "text-faint" : dayPl > 0 ? "num-up" : dayPl < 0 ? "num-down" : ""}`}
+                data-testid="day-pl-summary"
+              >
                 {`Day P&L ${dayPlLabel}${sessionLabel ? ` · ${sessionLabel}` : ""} · ${dayPl == null || dayPct == null ? "—" : `${dayPct.toFixed(2)}%`}`}
               </p>
               {dailyBook && dailyBook.length > 0 && (
@@ -627,7 +712,7 @@ export function Dashboard() {
                 Top movers: {((portfolio.data?.top_movers as { symbol: string }[]) ?? []).map((m) => m.symbol).join(", ") || "—"}
               </p>
             </div>
-            <button data-testid="scan-btn" disabled={scanning || !chartReady} onClick={() => void scan()} className="rounded-md bg-gold px-5 py-2 font-medium text-ink disabled:opacity-40">
+            <button data-testid="scan-btn" disabled={scanning || !chartReady} onClick={() => void scan()} className="desk-scan-dock rounded-md bg-gold px-5 py-2 font-medium text-ink disabled:opacity-40">
               Scan {activeSymbol}
             </button>
           </div>
@@ -682,7 +767,7 @@ export function Dashboard() {
                     const seriesDays = brokerage.usingBrokerage ? undefined : daysForPosition(dailyPnl.data, p.id);
                     const fromSeries = dayPlOrUnrealized(seriesDays, p.unrealized_pl);
                     const positionDayPl =
-                      fromSeries != null ? fromSeries : resolvePositionDayPl(p, quoteBySymbol.get(p.symbol));
+                      seriesDays !== undefined ? fromSeries : resolvePositionDayPl(p, quoteBySymbol.get(p.symbol));
                     const dayCell = fmt(positionDayPl);
                     return (
                     <Fragment key={p.id}>

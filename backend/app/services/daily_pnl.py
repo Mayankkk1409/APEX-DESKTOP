@@ -436,9 +436,9 @@ async def quotes_for_positions(positions: list[Any], adapter: Any) -> list[Any]:
         else:
             needed.append((index, pos))
     if needed:
-        live = await asyncio.gather(*(adapter.quote(pos.symbol) for _, pos in needed))
+        live = await asyncio.gather(*(adapter.quote(pos.symbol) for _, pos in needed), return_exceptions=True)
         for (index, _), quote in zip(needed, live):
-            out[index] = quote
+            out[index] = None if isinstance(quote, Exception) else quote
     return out
 
 

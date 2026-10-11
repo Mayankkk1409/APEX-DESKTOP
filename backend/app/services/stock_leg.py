@@ -188,7 +188,7 @@ def plan_stock(
             source = "live ask"
         elif ref_dec is not None:
             entry = ref_dec
-            source = "scan reference price; live ask was not on the quote"
+            source = "latest available price; the live ask was not on the quote"
         else:
             entry = None
             source = "live ask unavailable"
@@ -201,10 +201,10 @@ def plan_stock(
             source = "live ask for the shares being bought; held-share cost basis is unknown"
         elif basis is not None and ref_dec is not None:
             entry = money((Decimal(used) * basis + Decimal(order_qty) * ref_dec) / Decimal(required))
-            source = "average of position cost and scan reference price; live ask was not on the quote"
+            source = "average of position cost and the latest available price"
         else:
             entry = basis or ref_dec
-            source = "partial holdings; live ask was not on the quote"
+            source = "latest available price for the shares being bought"
 
     if order_qty == 0:
         basis_txt = (
@@ -224,8 +224,10 @@ def plan_stock(
         )
     else:
         ask_txt = f" at the live ask {_fmt(ask_dec)}" if ask_dec is not None else ""
-        if ask_dec is None:
-            ask_txt = ". Live ask was not on the quote"
+        if ask_dec is None and ref_dec is not None:
+            ask_txt = f" at the latest available price {_fmt(ref_dec)}"
+        elif ask_dec is None:
+            ask_txt = ". A current selling price is unavailable"
         note = f"Buying {order_qty} shares{ask_txt}."
     if holdings.shares_encumbered and free < holdings.shares_long:
         note += f" {holdings.shares_encumbered} shares already cover another short call and are not reused."

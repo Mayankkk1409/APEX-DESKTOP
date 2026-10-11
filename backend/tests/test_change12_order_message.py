@@ -105,8 +105,10 @@ def test_quote_cap_and_missing_timestamp_stay_strict() -> None:
     assert quote_problem(_quote("AAPL", as_of=fresh), now=_NOW) is None
     problem = quote_problem(_quote("AAPL", as_of=stale), now=_NOW)
     assert problem is not None
-    assert "Quote not current" in problem
-    assert quote_problem(_quote("AAPL", as_of=None), now=_NOW) == "Quote not current. Quoted unknown time."
+    assert "No order was sent" in problem
+    missing = quote_problem(_quote("AAPL", as_of=None), now=_NOW)
+    assert missing is not None
+    assert "couldn't confirm when this price was quoted" in missing
 
 
 @pytest.mark.asyncio
@@ -178,7 +180,7 @@ async def test_real_brokerage_is_not_paper_filled(db: AsyncSession) -> None:
         )
     text = str(raised.value)
     assert text.startswith(_UNCOVERED)
-    assert "The combo was not split into market orders" in text
+    assert "The strategy was not split into separate orders" in text
     assert "No short leg was submitted" in text
     assert "The short call was not submitted" not in text
     assert "The paper order filled" not in text
@@ -193,7 +195,7 @@ async def test_other_combo_rejections_do_not_paper_fill_or_stack_the_short(db: A
     user = _user()
     db.add(user)
     await db.commit()
-    with pytest.raises(ValueError, match="not split into market orders") as raised:
+    with pytest.raises(ValueError, match="not split into separate orders") as raised:
         await execute_strategy_legs(
             user=user,
             db=db,
@@ -211,12 +213,20 @@ async def test_other_combo_rejections_do_not_paper_fill_or_stack_the_short(db: A
 
 
 @pytest.mark.asyncio
-async def test_paper_fill_stops_when_the_recheck_has_no_timestamp(db: AsyncSession) -> None:
+async def test_paper_fill_stops_when_the_recheck_has_no_timestamp(db: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> None:
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz: timezone | None = None) -> datetime:
+            if tz is None:
+                return _NOW.replace(tzinfo=None)
+            return _NOW.astimezone(tz)
+
+    monkeypatch.setattr("app.services.executability.datetime", Frozen)
     adapter = _Broker(_UNCOVERED, fresh_reads=2)
     user = _user()
     db.add(user)
     await db.commit()
-    with pytest.raises(ValueError, match="Quoted unknown time") as raised:
+    with pytest.raises(ValueError, match="couldn't confirm when this price was quoted") as raised:
         await execute_strategy_legs(
             user=user,
             db=db,

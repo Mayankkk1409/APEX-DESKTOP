@@ -121,12 +121,13 @@ async def test_forgot_password_code_is_single_use(client: AsyncClient) -> None:
 @pytest.mark.asyncio
 async def test_forgot_password_verify_requires_pending_reset(client: AsyncClient) -> None:
     from app.config import get_settings
-    from app.services.otp import issue_otp
+    from app.services.password_reset import clear_pending_reset
 
     username = "forgotpending"
     await _signup(client, username)
-    settings = get_settings()
-    code = await issue_otp(settings, username)
+    req = await client.post("/auth/forgot-password", json={"username": username, **RESET_PAYLOAD})
+    code = req.json()["code"]
+    await clear_pending_reset(get_settings(), username)
 
     verify = await client.post("/auth/forgot-password/verify", json={"username": username, "code": code})
     assert verify.status_code == 401

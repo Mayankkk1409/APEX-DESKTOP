@@ -11,19 +11,11 @@ import { Signup } from "./pages/Signup";
 import { Splash } from "./pages/Splash";
 import { ExpiryLoginGate } from "./components/ExpiryLoginGate";
 import { ExpiryWatchNotice } from "./components/ExpiryWatchNotice";
+import { resolveAuthGuard } from "./lib/authGuard";
 import { useSession } from "./store";
 
 /** Splash plays once on the marketing entry route; deep links skip it so /portfolio is not blocked. */
 const SPLASH_ENTRY = "/";
-
-/** True when the desk may render. A missing memory token waits for the refresh cookie. */
-export async function resolveAuthGuard(opts: {
-  token: string | null;
-  restore: () => Promise<boolean>;
-}): Promise<boolean> {
-  if (opts.token) return true;
-  return opts.restore();
-}
 
 function Guard({ children }: { children: JSX.Element }) {
   const loc = useLocation();

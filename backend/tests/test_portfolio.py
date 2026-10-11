@@ -5,7 +5,7 @@ from httpx import AsyncClient
 
 from app.models.trading import Order, Position
 from app.models.user import User
-from app.services.portfolio_pnl import pnl_history_points, replay_filled_orders, symbol_pnl_rows
+from app.services.portfolio_pnl import pnl_history_points, portfolio_history, replay_filled_orders, symbol_pnl_rows
 
 
 def _order(
@@ -37,8 +37,18 @@ def test_replay_realized_on_round_trip() -> None:
         _order("AAPL", "sell", 10, 110.0),
     ]
     books = replay_filled_orders(orders)
-    assert books["AAPL"].realized_pl == pytest.approx(100.0)
-    assert books["AAPL"].qty == 0
+    assert books[("AAPL", "us_equity")].realized_pl == pytest.approx(100.0)
+    assert books[("AAPL", "us_equity")].qty == 0
+
+
+def test_short_option_round_trip_realizes_premium_difference() -> None:
+    orders = [
+        _order("AAPL240119C00150000", "sell", 1, 4.0, asset_class="us_option"),
+        _order("AAPL240119C00150000", "buy", 1, 3.0, asset_class="us_option"),
+    ]
+    books = replay_filled_orders(orders)
+    assert books[("AAPL240119C00150000", "us_option")].qty == 0
+    assert books[("AAPL240119C00150000", "us_option")].realized_pl == pytest.approx(100.0)
 
 
 def test_option_realized_uses_multiplier() -> None:
@@ -47,7 +57,7 @@ def test_option_realized_uses_multiplier() -> None:
         _order("AAPL240119C00150000", "sell", 2, 5.0, asset_class="us_option"),
     ]
     books = replay_filled_orders(orders)
-    assert books["AAPL240119C00150000"].realized_pl == pytest.approx(200.0)
+    assert books[("AAPL240119C00150000", "us_option")].realized_pl == pytest.approx(200.0)
 
 
 def test_symbol_pnl_open_and_closed() -> None:
@@ -122,6 +132,27 @@ def test_pnl_history_is_open_fill_and_live_mark() -> None:
     assert points[1]["portfolio_value"] == 100_000
     # Live: cash_balance 99,000 + 10 × 110 = 100,100.
     assert points[2]["portfolio_value"] == 100_100
+    rows = symbol_pnl_rows([order], [position])
+    assert points[-1]["cumulative_pl"] == pytest.approx(sum(row.total_pl for row in rows))
+    assert points[-1]["cumulative_pl"] == pytest.approx(100.0)
+    assert points[0]["cumulative_pl"] == 0
+
+
+def test_cash_above_starting_balance_is_not_profit() -> None:
+    created = datetime(2026, 8, 1, 15, 0, tzinfo=timezone.utc)
+    user = User(
+        id="u1",
+        username="deposit",
+        email="deposit@example.com",
+        password_hash="x",
+        cash_balance=150_000,
+        starting_balance=100_000,
+        account_mode="paper_funded",
+        created_at=created,
+    )
+    points = pnl_history_points(user, [], [])
+    assert points[-1]["portfolio_value"] == 150_000
+    assert points[-1]["cumulative_pl"] == 0
 
 
 def test_short_option_unrealized_gains_when_mark_falls() -> None:
@@ -169,6 +200,51 @@ def test_pnl_history_naive_db_timestamps() -> None:
     points = pnl_history_points(user, [order], [position])
     assert len(points) >= 1
     assert points[-1]["portfolio_value"] > 0
+
+
+def test_stock_and_option_on_the_same_ticker_do_not_share_a_multiplier() -> None:
+    orders = [
+        _order("V", "buy", 100, 372.03, asset_class="us_equity"),
+        _order("V", "buy", 1, 1.29, asset_class="us_option"),
+    ]
+    books = replay_filled_orders(orders)
+    assert books[("V", "us_equity")].qty == 100
+    assert books[("V", "us_option")].qty == 1
+    user = User(
+        id="u1",
+        username="mix",
+        email="mix@example.com",
+        password_hash="x",
+        cash_balance=100_000 - 37203 - 129,
+        starting_balance=100_000,
+        account_mode="paper_funded",
+        created_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+    position = Position(
+        user_id="u1",
+        symbol="V",
+        qty=100,
+        avg_cost=372.03,
+        current_price=372.03,
+        asset_class="us_equity",
+    )
+    points, note = portfolio_history(user, orders, [position])
+    assert note
+    assert len(points) >= 2
+    assert points[0]["portfolio_value"] == 100_000
+    # Live value is cash plus the stock mark. The stray option order must not
+    # reprice the 100 shares with the option multiplier.
+    assert points[-1]["portfolio_value"] == pytest.approx(99_871)
+
+
+def test_zero_price_fill_is_not_a_free_cover() -> None:
+    orders = [
+        _order("AAPL240119P00100000", "sell", 1, 4.0, asset_class="us_option"),
+        _order("AAPL240119P00100000", "buy", 1, 0.0, asset_class="us_option"),
+    ]
+    books = replay_filled_orders(orders)
+    assert books[("AAPL240119P00100000", "us_option")].qty == -1
+    assert books[("AAPL240119P00100000", "us_option")].realized_pl == 0
 
 
 @pytest.mark.asyncio

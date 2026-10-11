@@ -6,7 +6,6 @@ import { CHART_TIMEFRAMES, SNAPSHOT_STUDIES } from "../constants";
 import { computeSeries, renderPlotPng, SNAPSHOT_SIZE, sliceSeries, viewportBars } from "../lib/plotChart";
 import type { OhlcBar } from "../lib/ta";
 import { mountAdvancedChart, tvSymbol, type ChartChrome } from "../lib/tv";
-import { ChartOverlay } from "./ChartOverlay";
 
 function uniqueBars(raw: OhlcBar[]): OhlcBar[] {
   const seen = new Set<string>();
@@ -148,7 +147,7 @@ export function TradingViewChart({
     const ro = new ResizeObserver(measure);
     ro.observe(host);
     return () => ro.disconnect();
-  }, []);
+  }, [fullscreen]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -256,9 +255,6 @@ export function TradingViewChart({
           className="tradingview-widget-container absolute inset-0 z-[1] h-full w-full"
           data-testid="tv-embed"
         />
-        {view && box.w > 32 && box.h > 32 && (
-          <ChartOverlay bars={view.bars} series={view.series} width={box.w} height={box.h} chrome={chrome} />
-        )}
         <div className="tv-logo-cover" aria-hidden />
         {barsQ.isLoading && !bars.length && (
           <p className="pointer-events-none absolute inset-0 z-[4] flex items-center justify-center text-sm text-faint">Loading chart…</p>

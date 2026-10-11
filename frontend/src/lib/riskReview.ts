@@ -74,9 +74,20 @@ export function orderPlacement(input: {
   spreadConfirmationRequired?: boolean;
   spreadConfirmed?: boolean;
   blockReason?: string | null;
+  hardBlocked?: boolean;
+  readOnly?: boolean;
 }): OrderPlacement {
   const blockedNote = input.blockReason?.trim() || null;
-  if (!input.hasLegs) {
+  if (input.readOnly) {
+    return {
+      autoSubmitOnAck: false,
+      placeTradeEnabled: false,
+      acknowledgeEnabled: false,
+      note: "You're in read-only mode. You can view this account, but APEX can't place this trade.",
+      overrideRequired: false,
+    };
+  }
+  if (!input.hasLegs || input.hardBlocked) {
     return {
       autoSubmitOnAck: false,
       placeTradeEnabled: false,

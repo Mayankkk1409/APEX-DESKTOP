@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from datetime import datetime, timezone
 
 from app.analysis.gate_config import assess_vol_regime
 from app.contracts import canAutoExecute
@@ -196,9 +197,10 @@ def test_order_path_cannot_skip_the_quote_check() -> None:
 
 
 def test_priced_quote_without_a_timestamp_is_not_fresh() -> None:
-    problem = quote_problem({"price": 4.02, "bid": 3.9, "ask": 4.1, "as_of": ""})
+    session = datetime(2026, 10, 5, 16, 0, tzinfo=timezone.utc)
+    problem = quote_problem({"price": 4.02, "bid": 3.9, "ask": 4.1, "as_of": ""}, now=session)
     assert problem is not None
-    assert "unknown time" in problem
+    assert "couldn't confirm when this price was quoted" in problem
 
 
 def test_back_week_iv_is_read_from_the_back_chain() -> None:

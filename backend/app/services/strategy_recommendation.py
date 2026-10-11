@@ -359,6 +359,26 @@ def auto_exec_status_line(composite: float, threshold: float, *, defined_risk: b
     )
 
 
+def profile_fit_note(strategy_name: str, risk_profile: str | None) -> str:
+    """One sentence from the saved profile and the structures that profile already prefers.
+
+    This does not add a new score cutoff. Undefined-risk names stay out of auto-execution.
+    """
+    profile = normalize_risk_profile(risk_profile)
+    defined = _is_defined_risk(strategy_name)
+    if profile == "conservative":
+        if defined and strategy_name in CONSERVATIVE_STRUCTURES:
+            return "This matches your Conservative profile: a defined-risk structure."
+        return "Your Conservative profile prefers defined-risk income structures. This is the best eligible match."
+    if profile == "aggressive":
+        if defined and strategy_name in AGGRESSIVE_DIRECTIONAL:
+            return "This matches your Aggressive profile: a directional defined-risk structure."
+        return "Your Aggressive profile prefers directional defined-risk structures. This is the best eligible match."
+    if profile == "custom":
+        return "Your Custom profile keeps the structures you allow. This is the best eligible match."
+    return "This follows your Moderate profile. Strategy order stays the standard matrix."
+
+
 def normalize_risk_profile(risk_profile: str | None) -> str:
     if risk_profile in RISK_PROFILES:
         return str(risk_profile)
@@ -1398,6 +1418,9 @@ def recommend_strategy(
     for note in best.gate_notes:
         if str(note).startswith("Event-vega penalty:") and note not in risk_notes:
             risk_notes.append(note)
+    fit_note = profile_fit_note(best.name, risk_profile)
+    if fit_note and fit_note not in risk_notes:
+        risk_notes.append(fit_note)
 
     earnings_block = earnings_within_day and best.name not in {APEX_STRATEGY_NAME, GAMMA_TRAMPOLINE_NAME}
     auto_exec = allows_auto_execution(

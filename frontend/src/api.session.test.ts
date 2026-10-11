@@ -83,7 +83,7 @@ describe("silent session refresh", () => {
     await expect(restoreSession()).resolves.toBe(true);
     expect(getAccessToken()).toBe(next);
     for (const screen of SCREENS) {
-      expect(pathAfterSessionRestore(screen)).toBe(screen);
+      expect(pathAfterSessionRestore(screen)).toBe("/portfolio");
       expect(getAccessToken()).toBe(next);
     }
     expect(assign).not.toHaveBeenCalled();

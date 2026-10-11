@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api";
-import { ApexLogo } from "../components/ApexLogo";
+import { ApexWordmark } from "../components/ApexWordmark";
 import { LogoutButton } from "../components/LogoutButton";
 import { SettingsGearLink } from "../components/SettingsGearLink";
 import type { BrokerageBalance } from "../lib/brokerageApi";
@@ -53,10 +53,7 @@ export function HomeDashboard() {
   return (
     <div className="min-h-screen bg-ink text-champagne" data-testid="home-dashboard">
       <header className="flex items-center justify-between gap-3 border-b border-line px-4 py-3">
-        <Link to="/dashboard" className="desk-brand" aria-label="Apex" data-testid="home-brand">
-          <ApexLogo size={36} className="shrink-0" />
-          <span className="font-display text-xl tracking-[0.2em]">APEX</span>
-        </Link>
+        <ApexWordmark testId="home-brand" />
         <div className="flex items-center gap-2">
           <SettingsGearLink />
           <LogoutButton />
@@ -110,6 +107,18 @@ export function HomeDashboard() {
                 <div className="flex justify-between">
                   <dt>Equity</dt>
                   <dd className="apex-num">{money(brokerBalance.total_equity)}</dd>
+                </div>
+                <div className="flex justify-between">
+                  <dt>Daily P&amp;L</dt>
+                  <dd className="apex-num" data-testid="home-day-pnl">
+                    {brokerBalance.day_pnl == null ? "Unavailable" : money(brokerBalance.day_pnl)}
+                  </dd>
+                </div>
+                <div className="flex justify-between">
+                  <dt>Overall P&amp;L</dt>
+                  <dd className="apex-num" data-testid="home-overall-pnl">
+                    {brokerBalance.overall_pnl == null ? "Unavailable" : money(brokerBalance.overall_pnl)}
+                  </dd>
                 </div>
               </dl>
             ) : (

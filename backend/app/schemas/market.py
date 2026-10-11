@@ -99,6 +99,8 @@ class Expiration(BaseModel):
     kind: str
     near_expiry: bool
     earnings_highlight: bool = False
+    # Call contracts Alpaca lists on this date. A stub date can be 1 while a normal weekly is 100+.
+    listed: int = 0
 
 
 class OptionContract(BaseModel):

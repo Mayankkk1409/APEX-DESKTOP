@@ -367,6 +367,55 @@ async def test_each_login_emails_only_that_account(client: AsyncClient, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_email_identifier_accepts_the_spaced_code(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent = _capture(monkeypatch)
+    await _signup(client, "Ada.Mail", "Ada.Mail@Example.com", "Ada Lovelace")
+    login = await client.post(
+        "/auth/login",
+        json={"username": "ADA.MAIL@EXAMPLE.COM", "password": _PASSWORD},
+    )
+    assert login.status_code == 200, login.text
+    body = login.json()
+    assert body["username"] == "Ada.Mail"
+    assert body["code_reused"] is False
+    assert body["email_hint"].startswith("A***@")
+    assert "code" not in body
+    code = sent[0]["code"]
+    assert code not in login.text
+    spaced = f"{code[:2]} {code[2:4]} {code[4:]}"
+    opened = await client.post(
+        "/auth/otp/verify",
+        json={"username": "ada.mail@example.com", "code": spaced},
+    )
+    assert opened.status_code == 200, opened.text
+    again = await client.post(
+        "/auth/otp/verify",
+        json={"username": "Ada.Mail", "code": code},
+    )
+    assert again.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_second_login_reuses_the_pending_code(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent = _capture(monkeypatch)
+    await _signup(client, "reuse.mail", "reuse.mail@example.com")
+    first = await client.post("/auth/login", json={"username": "reuse.mail", "password": _PASSWORD})
+    second = await client.post("/auth/login", json={"username": "reuse.mail", "password": _PASSWORD})
+    assert first.status_code == 200 and second.status_code == 200
+    assert second.json()["code_reused"] is True
+    assert len(sent) == 1
+    opened = await client.post(
+        "/auth/otp/verify",
+        json={"username": "reuse.mail", "code": sent[0]["code"]},
+    )
+    assert opened.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_resend_emails_the_same_account_and_hides_the_code(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -505,7 +554,8 @@ def test_login_letter_is_addressed_to_the_given_recipient(monkeypatch: pytest.Mo
             raw = message.as_string()  # type: ignore[attr-defined]
             head = raw.split("\n\n", 1)[0]
             assert "MIME-Version: 1.0" in head
-            assert 'type="multipart/alternative"' in head
+            assert message.get_content_type() == "multipart/related"
+            assert "multipart/alternative" in walked
             assert head.lower().count("mime-version:") == 1
             lowered = raw.lower()
             assert "multipart/related" in lowered

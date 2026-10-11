@@ -261,19 +261,23 @@ async def verify_otp(
     *,
     db: AsyncSession | None = None,
 ) -> bool:
+    digits = _otp_digits(code)
+    if len(digits) != 6:
+        return False
     redis = await get_redis(settings)
     key = _key(username)
-    # SQLite is the store every API process shares. A hash left in this
-    # process's memory (or a different worker) must not hide the emailed code.
-    # A mismatch does not delete the row. Only a matching code is consumed.
-    shared = await _read_db_hash(db, username) if db is not None else None
-    # When a database session is present, it is the only store. Memory must
-    # not accept a code the shared row has expired, replaced, or never held.
-    stored = shared if db is not None else await redis.get(key)
-    if not stored:
-        return False
-    if not otp_matches(_otp_digits(code), stored):
-        return False
-    await redis.delete(key)
-    await _delete_db_hash(db, username, expected=stored)
-    return True
+    # One verifier at a time in this process. A second submit of the same code
+    # finds the row already gone. SQLite stores naive timestamps, so expiry is
+    # checked in Python by _read_db_hash rather than in a SQL comparison.
+    slot = await _mutex(f"verify:{username.lower()}")
+    async with slot:
+        shared = await _read_db_hash(db, username) if db is not None else None
+        # When a database session is present, it is the only store. Memory must
+        # not accept a code the shared row has expired, replaced, or never held.
+        stored = shared if db is not None else await redis.get(key)
+        if not stored or not otp_matches(digits, stored):
+            return False
+        await redis.delete(key)
+        await redis.delete(_login_claim_key(username))
+        await _delete_db_hash(db, username, expected=stored)
+        return True

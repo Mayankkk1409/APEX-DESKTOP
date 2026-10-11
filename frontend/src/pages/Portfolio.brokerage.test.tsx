@@ -52,6 +52,12 @@ describe("Portfolio brokerage integration", () => {
 
   it("shows connected brokerage equity, chart timeframes, and positions", () => {
     const qc = createTestQueryClient();
+    qc.setQueryData(["port"], { balance: 111111, buying_power: 111111, portfolio_value: 999999, starting_balance: 100000 });
+    qc.setQueryData(["pnl-history"], {
+      starting_balance: 100000,
+      account_mode: "paper_funded",
+      points: [{ t: "2026-01-01T00:00:00Z", portfolio_value: 100000, cumulative_pl: 0 }],
+    });
     qc.setQueryData(["brokerage", "accounts"], {
       connection_status: "connected",
       accounts: [
@@ -136,8 +142,12 @@ describe("Portfolio brokerage integration", () => {
     );
     expect(html).toContain('data-testid="overall-pnl-total"');
     expect(html).toContain("Overall total P&amp;L");
-    expect(html).toContain("+$60");
-    expect(html).not.toContain("+$3,000");
+    expect(html).toContain("+$3,000");
+    expect(html).toContain('data-testid="brokerage-daily-pnl-value"');
+    expect(html).toContain("+$50");
+    expect(html).not.toContain("999,999");
+    expect(html).not.toContain("111,111");
+    expect(html).toContain("MSFT");
     expect(html).toContain('data-chart-engine="apex-equity"');
     expect(html).toContain('data-testid="portfolio-brokerage-account"');
     expect(html).not.toContain('data-testid="portfolio-paper-context"');

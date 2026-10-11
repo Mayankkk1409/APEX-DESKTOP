@@ -858,8 +858,8 @@ async def _execute_combo(
         net = combo_net_mid(legs, marks)
     except ValueError as exc:
         raise ComboHeldBack(
-            f"{_sentence(str(exc), 'Live mid is unavailable')} "
-            "The combo was not split into market orders. No short leg was submitted."
+            f"{_sentence(str(exc), 'A current price for this strategy is unavailable')} "
+            "No order was sent, and the strategy was not split into separate orders."
         ) from exc
     side = "buy" if net >= 0 else "sell"
     limit = round(abs(net), 2)
@@ -898,9 +898,9 @@ async def _execute_combo(
     session_paper = user.account_mode != "real_brokerage"
 
     def _reject(reason: str) -> ComboHeldBack:
-        text = _sentence(reason, "Broker cannot accept a combo order")
+        text = _sentence(reason, "The broker did not accept this order")
         return ComboHeldBack(
-            f"{text} The combo was not split into market orders. No short leg was submitted."
+            f"{text} Nothing was filled. The strategy was not split into separate orders. No short leg was submitted."
         )
 
     paper_note: str | None = None
@@ -908,7 +908,7 @@ async def _execute_combo(
         broker = await adapter.submit_order(**payload)
     except TypeError as exc:
         raise ComboHeldBack(
-            "Broker cannot accept a combo order. The combo was not split into market orders. No short leg was submitted."
+            "The broker cannot accept this multi-leg order. Nothing was filled. The strategy was not split into separate orders. No short leg was submitted."
         ) from exc
     except Exception as exc:  # noqa: BLE001
         reason = str(exc).strip() or "Broker order failed"
@@ -940,8 +940,15 @@ async def _execute_combo(
         venue = "simulation"
     else:
         settlement = classify_execution(broker, requested_qty=qty)
-        if settlement.outcome in {"rejected", "ambiguous", "accepted"} or settlement.fill_price is None:
-            raise _reject(settlement.reason or "Broker acknowledged the combo without an execution price")
+        if settlement.outcome in {"ambiguous", "accepted"} or (
+            settlement.outcome not in {"rejected", "filled", "partial"} and settlement.fill_price is None
+        ):
+            raise ComboHeldBack(
+                "The broker received this order but has not confirmed a fill. "
+                "Check its status before sending another order."
+            )
+        if settlement.outcome == "rejected" or settlement.fill_price is None:
+            raise _reject(settlement.reason or "The broker did not accept this order")
         fill_px = settlement.fill_price
         venue = settlement.venue
 

@@ -7,7 +7,7 @@ import hmac
 import json
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from functools import lru_cache
 from typing import Any
 from urllib.parse import urlparse
@@ -366,21 +366,46 @@ async def fetch_balance(
     return _normalize_balance(response.body, total_equity=total_equity)
 
 
+ORDER_HISTORY_NOTE = (
+    "Broker order records cover the last 90 days, which is the longest range this connection provides. "
+    "Older buy and sell rows are account activity, not a second order ticket. Times are stored in UTC."
+)
+
+
+def order_history_note(rows: list[dict[str, Any]]) -> str:
+    sources = {str(row.get("source") or "") for row in rows}
+    dates = sorted(str(row.get("created_at") or "")[:10] for row in rows if row.get("created_at"))
+    span = f" from {dates[0]} through {dates[-1]}" if dates else ""
+    if rows and sources == {"activity"}:
+        return (
+            "The broker’s order endpoint returned no orders for the last 90 days. "
+            f"These buy and sell rows are account activity{span}. "
+            "A row is not marked filled; the price is the activity price when the broker sent one. "
+            "Times are stored in UTC and shown in your local timezone."
+        )
+    if "activity" in sources:
+        return ORDER_HISTORY_NOTE + span + "."
+    if not rows:
+        return (
+            "The broker’s order endpoint returned no orders for the last 90 days, "
+            "and account activity had no buy or sell rows."
+        )
+    return ORDER_HISTORY_NOTE
+
+
 async def fetch_orders(user_id: str, user_secret: str, account_id: str, *, days: int = 90) -> list[dict[str, Any]]:
+    """Read-only orders. SnapTrade's order endpoint accepts at most 90 days."""
+    lookback = min(max(int(days), 1), 90)
     response = await _call(
         "account_information.get_user_account_orders",
         account_id=account_id,
         user_id=user_id,
         user_secret=user_secret,
-        days=days,
+        days=lookback,
     )
-    body = response.body or {}
-    rows: Any = body
-    if isinstance(body, dict):
-        rows = body.get("orders") or body.get("data") or body.get("results") or []
-    if not isinstance(rows, list):
-        return []
-    return [_normalize_order(row) for row in rows if isinstance(row, dict)]
+    orders = [_normalize_order(row) for row in _order_rows(getattr(response, "body", None))]
+    activities, _complete = await _paged_activities(user_id, user_secret, account_id)
+    return _merge_order_rows(orders, activities)
 
 
 async def fetch_positions(user_id: str, user_secret: str, account_id: str) -> list[dict[str, Any]]:
@@ -397,7 +422,145 @@ async def fetch_positions(user_id: str, user_secret: str, account_id: str) -> li
     return [_normalize_position(row) for row in rows]
 
 
-async def fetch_day_pnl(user_id: str, user_secret: str, account_id: str, total_equity: float) -> float | None:
+class BrokerHistoryDisabled(Exception):
+    """SnapTrade refused account-value history because the add-on is not enabled."""
+
+
+async def fetch_account_value_history(
+    user_id: str, user_secret: str, account_id: str
+) -> tuple[float, list[dict[str, Any]], str] | None:
+    """Read-only SnapTrade account-value history. None when the broker does not provide it."""
+    from app.services.equity_history import broker_value_points
+
+    try:
+        response = await _call(
+            "account_information.get_account_balance_history",
+            account_id=account_id,
+            user_id=user_id,
+            user_secret=user_secret,
+        )
+    except ApiException as exc:
+        if getattr(exc, "status", None) == 403:
+            raise BrokerHistoryDisabled() from exc
+        return None
+    except Exception:
+        return None
+    history = _history_rows(getattr(response, "body", None))
+    if not history:
+        return None
+    flows, complete = await _cash_flows(user_id, user_secret, account_id)
+    return broker_value_points(history, flows, flows_complete=complete)
+
+
+def _plain(value: Any) -> Any:
+    """Turn SnapTrade model objects into JSON-like values. Unset fields become None."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    type_name = type(value).__name__
+    if "Unset" in type_name:
+        return None
+    if hasattr(value, "keys") and callable(value.keys):
+        out: dict[str, Any] = {}
+        for key in list(value.keys()):
+            try:
+                item = value[key]
+            except Exception:
+                continue
+            out[str(key)] = _plain(item)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    if hasattr(value, "__iter__") and not isinstance(value, (str, bytes)):
+        try:
+            return [_plain(item) for item in value]
+        except TypeError:
+            return str(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _history_rows(body: Any) -> list[dict[str, Any]]:
+    raw = _plain(body)
+    rows = raw.get("history") if isinstance(raw, dict) else raw
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+async def _paged_activities(
+    user_id: str, user_secret: str, account_id: str
+) -> tuple[list[dict[str, Any]], bool]:
+    """All activity pages the broker returns. The flag is false when a page could not be read."""
+    rows_out: list[dict[str, Any]] = []
+    offset = 0
+    for _page in range(20):
+        try:
+            response = await _call(
+                "account_information.get_account_activities",
+                account_id=account_id,
+                user_id=user_id,
+                user_secret=user_secret,
+                offset=offset,
+                limit=1000,
+            )
+        except Exception:
+            return rows_out, False
+        rows = _activity_rows(getattr(response, "body", None))
+        if not rows:
+            return rows_out, True
+        rows_out.extend(rows)
+        if len(rows) < 1000:
+            return rows_out, True
+        offset += len(rows)
+    return rows_out, False
+
+
+async def _cash_flows(user_id: str, user_secret: str, account_id: str) -> tuple[list[dict[str, Any]], bool]:
+    """Contributions and withdrawals. The second flag is false when a page could not be read."""
+    rows, complete = await _paged_activities(user_id, user_secret, account_id)
+    flows: list[dict[str, Any]] = []
+    for row in rows:
+        kind = str(row.get("type") or "").upper()
+        if kind not in {"CONTRIBUTION", "DEPOSIT", "WITHDRAWAL", "EXTERNAL_ASSET_TRANSFER_IN", "EXTERNAL_ASSET_TRANSFER_OUT"}:
+            continue
+        flows.append({"t": str(row.get("trade_date") or ""), "type": kind, "amount": row.get("amount")})
+    return flows, complete
+
+
+def _activity_rows(body: Any) -> list[dict[str, Any]]:
+    raw = _plain(body)
+    if isinstance(raw, dict):
+        rows = raw.get("data") or raw.get("activities") or raw.get("results") or []
+    else:
+        rows = raw
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _order_rows(body: Any) -> list[dict[str, Any]]:
+    raw = _plain(body)
+    rows: Any = raw
+    if isinstance(raw, dict):
+        rows = raw.get("orders") or raw.get("data") or raw.get("results") or []
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+DAY_PNL_DISABLED = (
+    "Daily P&L is unavailable. The broker’s 1-day return is not enabled on this connection, "
+    "and there is no earlier recorded equity to use as a prior close."
+)
+
+
+async def fetch_day_pnl(user_id: str, user_secret: str, account_id: str, total_equity: float) -> tuple[float | None, str | None]:
     try:
         response = await _call(
             "account_information.get_user_account_return_rates",
@@ -406,12 +569,16 @@ async def fetch_day_pnl(user_id: str, user_secret: str, account_id: str, total_e
             user_secret=user_secret,
             timeframes="1D",
         )
-    except ApiException:
-        return None
-    body = response.body or {}
+    except ApiException as exc:
+        if getattr(exc, "status", None) == 403:
+            return None, DAY_PNL_DISABLED
+        return None, "Daily P&L is unavailable from the broker right now."
+    except Exception:
+        return None, "Daily P&L is unavailable from the broker right now."
+    body = _plain(getattr(response, "body", None)) or {}
     rates = body.get("data") if isinstance(body, dict) else body
     if not isinstance(rates, list):
-        return None
+        return None, "Daily P&L is unavailable. The broker did not return a 1-day figure."
     for row in rates:
         if not isinstance(row, dict):
             continue
@@ -425,9 +592,9 @@ async def fetch_day_pnl(user_id: str, user_secret: str, account_id: str, total_e
             or row.get("rateOfReturn")
         )
         if pct is None:
-            return None
-        return float(total_equity) * (float(pct) / 100.0)
-    return None
+            return None, "Daily P&L is unavailable. The broker did not return a 1-day percent."
+        return float(total_equity) * (float(pct) / 100.0), None
+    return None, "Daily P&L is unavailable. The broker did not return a 1-day figure."
 
 
 async def delete_authorization(user_id: str, user_secret: str, authorization_id: str) -> None:
@@ -575,6 +742,15 @@ def _normalize_position(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _optional_num(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _normalize_order(row: dict[str, Any]) -> dict[str, Any]:
     symbol = str(row.get("symbol") or "")
     universal = row.get("universal_symbol")
@@ -587,9 +763,12 @@ def _normalize_order(row: dict[str, Any]) -> dict[str, Any]:
     action = str(row.get("action") or "").lower()
     side = "sell" if "sell" in action else "buy"
 
-    qty = _num(row.get("filled_quantity") or row.get("total_quantity"))
-    fill_price_raw = row.get("execution_price") or row.get("limit_price")
-    fill_price = _num(fill_price_raw) if fill_price_raw is not None else None
+    total_qty = _optional_num(row.get("total_quantity"))
+    filled_qty = _optional_num(row.get("filled_quantity"))
+    qty = total_qty if total_qty is not None else (filled_qty if filled_qty is not None else 0.0)
+    # A limit is not an execution. Leave the fill blank until the broker reports one.
+    fill_price = _optional_num(row.get("execution_price"))
+    limit_price = _optional_num(row.get("limit_price"))
 
     status_raw = row.get("status")
     if isinstance(status_raw, dict):
@@ -598,6 +777,8 @@ def _normalize_order(row: dict[str, Any]) -> dict[str, Any]:
         status = str(status_raw or "unknown")
 
     order_id = str(row.get("brokerage_order_id") or row.get("id") or "")
+    group = row.get("brokerage_group_order_id")
+    group_id = str(group) if group else None
 
     def _fmt_dt(value: Any) -> str | None:
         if value is None:
@@ -607,20 +788,94 @@ def _normalize_order(row: dict[str, Any]) -> dict[str, Any]:
         return str(value)
 
     time_placed = row.get("time_placed")
-    time_executed = row.get("time_executed") or time_placed
+    time_executed = row.get("time_executed")
 
     return {
         "id": order_id or f"order-{symbol}-{time_placed}",
         "symbol": symbol or "—",
         "side": side,
         "qty": qty,
+        "filled_qty": filled_qty,
         "order_type": str(row.get("order_type") or "market").lower(),
         "fill_price": fill_price,
+        "limit_price": limit_price,
         "status": status,
         "asset_class": "us_option" if option else "us_equity",
         "created_at": _fmt_dt(time_placed),
         "filled_at": _fmt_dt(time_executed),
+        "group_id": group_id,
+        "source": "order",
     }
+
+
+def _activity_as_order(row: dict[str, Any]) -> dict[str, Any] | None:
+    row = _plain(row)
+    if not isinstance(row, dict):
+        return None
+    kind = str(row.get("type") or "").upper()
+    if "BUY" not in kind and "SELL" not in kind:
+        return None
+    symbol = ""
+    universal = row.get("symbol")
+    if isinstance(universal, dict):
+        symbol = str(universal.get("symbol") or universal.get("raw_symbol") or "")
+    elif isinstance(universal, str):
+        symbol = universal
+    option = row.get("option_symbol")
+    if isinstance(option, dict):
+        symbol = str(option.get("ticker") or option.get("symbol") or symbol)
+    price = _optional_num(row.get("price"))
+    units = _optional_num(row.get("units"))
+    qty = abs(units) if units is not None else 0.0
+    activity_id = str(row.get("id") or row.get("external_reference_id") or "")
+    when = row.get("trade_date")
+    when_s = when.isoformat() if isinstance(when, datetime) else (str(when) if when else None)
+    return {
+        "id": activity_id or f"activity-{symbol}-{when_s}",
+        "symbol": symbol or "—",
+        "side": "sell" if "SELL" in kind else "buy",
+        "qty": qty,
+        "filled_qty": qty if price is not None else None,
+        "order_type": "activity",
+        "fill_price": price,
+        "limit_price": None,
+        "status": kind,
+        "asset_class": "us_option" if isinstance(option, dict) else "us_equity",
+        "created_at": when_s,
+        "filled_at": when_s if price is not None else None,
+        "group_id": None,
+        "source": "activity",
+        "external_reference_id": str(row.get("external_reference_id") or ""),
+    }
+
+
+def _merge_order_rows(orders: list[dict[str, Any]], activities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep broker orders, then older activity trades that are not the same ticket."""
+    seen = {str(row.get("id") or "") for row in orders}
+    merged = list(orders)
+    for raw in activities:
+        mapped = _activity_as_order(raw)
+        if mapped is None:
+            continue
+        ref = str(mapped.pop("external_reference_id", "") or "")
+        if mapped["id"] in seen or (ref and ref in seen):
+            continue
+        if any(_same_trade(mapped, existing) for existing in orders):
+            continue
+        seen.add(mapped["id"])
+        merged.append(mapped)
+    merged.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+    return merged
+
+
+def _same_trade(activity: dict[str, Any], order: dict[str, Any]) -> bool:
+    if activity.get("symbol") != order.get("symbol") or activity.get("side") != order.get("side"):
+        return False
+    if activity.get("qty") != order.get("qty"):
+        return False
+    left = str(activity.get("created_at") or "")[:10]
+    right = str(order.get("created_at") or order.get("filled_at") or "")[:10]
+    return bool(left) and left == right
 
 
 def _num(value: Any) -> float:

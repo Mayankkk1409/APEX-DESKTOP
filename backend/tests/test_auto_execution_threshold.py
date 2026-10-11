@@ -118,6 +118,22 @@ def test_restored_layer_keeps_the_real_score_sentence() -> None:
     assert "51.0" not in layer["why_recommended"]
 
 
+def test_restored_layer_does_not_keep_the_lifted_eligibility_line() -> None:
+    layer = {
+        "composite_score": 51.0,
+        "auto_execute_eligible": True,
+        "auto_exec_line": "Composite 51.0. Your minimum 50.0. Auto-execute eligible.",
+        "clears_threshold": True,
+        "why_recommended": "Technical bias bullish.",
+    }
+    _restore_scored_strategy_layer(layer, 49, 50)
+    assert layer["auto_execute_eligible"] is False
+    assert layer["clears_threshold"] is False
+    assert layer["auto_exec_line"] == (
+        "Composite 49.0. Your minimum 50.0. Not auto-executable: composite is below your minimum."
+    )
+
+
 def test_score_66_clears_saved_minimum_40() -> None:
     decision = strategy_decision(**_RANKED, composite=66, auto_exec_threshold=40)
     assert decision.auto_exec_eligible is True

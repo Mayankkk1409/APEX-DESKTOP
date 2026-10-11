@@ -333,7 +333,7 @@ async def test_rejected_long_does_not_send_shorts(db: AsyncSession) -> None:
     user = _user()
     db.add(user)
     await db.commit()
-    with pytest.raises(ValueError, match="not split into market orders") as raised:
+    with pytest.raises(ValueError, match="not split into separate orders") as raised:
         await execute_strategy_legs(
             user=user,
             db=db,
@@ -358,7 +358,7 @@ async def test_rejected_short_does_not_send_the_other_short(db: AsyncSession) ->
     user = _user()
     db.add(user)
     await db.commit()
-    with pytest.raises(ValueError, match="not split into market orders") as raised:
+    with pytest.raises(ValueError, match="not split into separate orders") as raised:
         await execute_strategy_legs(
             user=user,
             db=db,
@@ -540,7 +540,7 @@ async def test_real_brokerage_keeps_the_market_hours_reason(db: AsyncSession) ->
             contracts_per_leg=1,
         )
     assert str(raised.value).startswith("options market orders are only allowed during market hours")
-    assert "not split into market orders" in str(raised.value)
+    assert "not split into separate orders" in str(raised.value)
     assert "No short leg was submitted" in str(raised.value)
     assert "The short call was not submitted" not in str(raised.value)
     assert "The paper order filled" not in str(raised.value)

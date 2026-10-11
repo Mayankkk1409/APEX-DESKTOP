@@ -15,7 +15,7 @@ from app.services.fills import execute_market_fill, execute_strategy_legs
 from app.strategies.validator import validate_strategy_output
 from app.services.orders import account_impact, estimate_order_cost
 from app.services.daily_pnl import assemble_daily_pnl, quotes_for_positions
-from app.services.portfolio_pnl import account_baseline, pnl_history_points, symbol_pnl_rows
+from app.services.portfolio_pnl import account_baseline, portfolio_history, symbol_pnl_rows
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
 
@@ -97,23 +97,25 @@ async def portfolio(user: User = Depends(current_user), db: AsyncSession = Depen
     movers = []
     quotes = await _mark_positions(list(positions), adapter)
     for pos, q in zip(positions, quotes):
-        live_value += pos.market_value
+        marked = pos.current_price is not None
+        if marked:
+            live_value += pos.market_value
         movers.append(
             {
                 "symbol": pos.symbol,
                 "qty": pos.qty,
                 "avg_cost": pos.avg_cost,
                 "current": pos.current_price,
-                "unrealized_pl": pos.unrealized_pl,
-                "market_value": pos.market_value,
-                "day_pct": q.change_pct,
+                "unrealized_pl": pos.unrealized_pl if marked else None,
+                "market_value": pos.market_value if marked else None,
+                "day_pct": getattr(q, "change_pct", None) if q is not None else None,
                 "asset_class": pos.asset_class,
             }
         )
     user.portfolio_value = live_value
     user.buying_power = user.cash_balance
     await db.commit()
-    day_pl = sum(m["unrealized_pl"] for m in movers)
+    day_pl = sum(m["unrealized_pl"] or 0 for m in movers)
     basis = user.starting_balance or user.portfolio_value or 1
     return {
         "balance": user.cash_balance,
@@ -121,7 +123,7 @@ async def portfolio(user: User = Depends(current_user), db: AsyncSession = Depen
         "portfolio_value": user.portfolio_value,
         "day_pl": day_pl,
         "day_pct": (day_pl / basis) * 100,
-        "top_movers": sorted(movers, key=lambda m: abs(m["unrealized_pl"]), reverse=True)[:5],
+        "top_movers": sorted(movers, key=lambda m: abs(m["unrealized_pl"] or 0), reverse=True)[:5],
         "brokerage_connected": user.brokerage_connected,
         "account_mode": user.account_mode,
         "starting_balance": account_baseline(user),
@@ -138,12 +140,13 @@ async def portfolio_pnl_history(
     await _mark_positions(list(positions), adapter)
     orders = (await db.scalars(select(Order).where(Order.user_id == user.id))).all()
     baseline = account_baseline(user)
-    points = pnl_history_points(user, list(orders), list(positions))
+    points, history_note = portfolio_history(user, list(orders), list(positions))
     await db.commit()
     return {
         "starting_balance": baseline,
         "account_mode": user.account_mode,
         "points": points,
+        "history_note": history_note,
     }
 
 
@@ -272,11 +275,39 @@ async def close_position(
 
 @router.get("/orders")
 async def order_history(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> dict:
+    from app.models.trading import QueuedOrder
+
     rows = (
         await db.scalars(select(Order).where(Order.user_id == user.id).order_by(Order.created_at.desc()))
     ).all()
+    waiting = (
+        await db.scalars(
+            select(QueuedOrder)
+            .where(QueuedOrder.user_id == user.id, QueuedOrder.status.in_(("queued", "submitting", "unknown")))
+            .order_by(QueuedOrder.created_at.desc())
+        )
+    ).all()
+    queued_rows = [
+        {
+            "id": row.id,
+            "symbol": row.symbol,
+            "side": row.side,
+            "qty": row.qty,
+            "order_type": row.order_type,
+            "fill_price": None,
+            "status": row.status,
+            "asset_class": "us_option",
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "filled_at": None,
+            "queue_reason": row.reason,
+            "strategy_name": row.strategy_name,
+            "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+        }
+        for row in waiting
+    ]
     return {
-        "orders": [
+        "orders": queued_rows
+        + [
             {
                 "id": o.id,
                 "symbol": o.symbol,
@@ -294,6 +325,19 @@ async def order_history(user: User = Depends(current_user), db: AsyncSession = D
     }
 
 
+@router.post("/orders/queued/{queued_id}/cancel")
+async def cancel_queued_order(
+    queued_id: str,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    from app.services.order_queue import cancel_queued
+
+    if not await cancel_queued(db, user.id, queued_id):
+        raise HTTPException(404, "That queued order is not waiting")
+    return {"id": queued_id, "status": "canceled"}
+
+
 @router.post("/orders")
 async def place_order(
     body: OrderIn,
@@ -303,6 +347,11 @@ async def place_order(
 ) -> dict:
     if body.scan_id and not body.thesis_accepted:
         raise HTTPException(400, "Thesis checkbox required before submitting a scanned order")
+    if user.account_mode == "real_brokerage":
+        raise HTTPException(
+            400,
+            "You're in read-only mode. You can view this brokerage account, but APEX can't place this trade.",
+        )
 
     if body.legs:
         strategy_name: str | None = None
@@ -330,24 +379,28 @@ async def place_order(
                     "net_debit_credit": metrics.get("net_debit_credit"),
                     "net_type": metrics.get("net_type"),
                 }
-                from app.services.executability import submission_block_reason
-
                 user_override = bool(body.user_override)
                 if user_override and not body.override_reasons:
                     raise HTTPException(400, "Override reasons are required")
-                if strategy_name and not user_override:
-                    blocked = submission_block_reason(
-                        strategy_layer,
-                        spread_confirmed=body.spread_confirmed,
-                    )
-                    if blocked:
-                        raise HTTPException(400, blocked)
+                from app.services.executability import is_soft_warning
+
+                hard_notes = [
+                    note
+                    for note in (strategy_layer.get("hard_block_reasons") or [])
+                    if isinstance(note, str) and note.strip() and not is_soft_warning(note)
+                ]
+                soft_notes = [
+                    note
+                    for note in (strategy_layer.get("spread_block_reasons") or [])
+                    if isinstance(note, str) and note.strip()
+                ]
+                if hard_notes:
+                    raise HTTPException(400, hard_notes[0])
+                if soft_notes and not user_override:
+                    raise HTTPException(400, soft_notes[0])
                 from app.analysis.gate_config import refuse_if_checks_failed
 
-                spread_override = bool(strategy_layer.get("placeable")) and bool(
-                    strategy_layer.get("spread_block_reasons")
-                ) and body.spread_confirmed
-                if not spread_override and not user_override:
+                if not user_override:
                     try:
                         refuse_if_checks_failed(
                             checks_passed=strategy_layer.get("checks_passed"),
@@ -417,7 +470,59 @@ async def place_order(
                 override_reasons=list(body.override_reasons),
             )
         except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
+            from app.services.executability import DEFAULT_SPREAD_MAX
+            from app.services.order_queue import (
+                broker_unconfirmed,
+                enqueue_broker_hold,
+                enqueue_price_gap,
+                first_non_price_block,
+                price_gap,
+                queued_response,
+            )
+
+            reason = str(exc)
+            if broker_unconfirmed(reason):
+                await db.rollback()
+                await db.refresh(user)
+                queued = await enqueue_broker_hold(
+                    db,
+                    user=user,
+                    reason=reason,
+                    legs=[leg.model_dump() for leg in body.legs],
+                    qty=body.contracts_per_leg,
+                    strategy_name=strategy_name,
+                    scan_id=body.scan_id,
+                    equity_legs=equity_legs,
+                )
+                if queued is not None:
+                    return queued_response(queued)
+                raise HTTPException(400, reason) from exc
+            if not price_gap(reason):
+                raise HTTPException(400, reason) from exc
+            other = await first_non_price_block(
+                adapter,
+                [leg.model_dump() for leg in body.legs],
+                equity_legs,
+                spread_confirmed=body.spread_confirmed,
+                contracts=body.contracts_per_leg,
+                spread_max=DEFAULT_SPREAD_MAX,
+            )
+            if other:
+                raise HTTPException(400, other) from exc
+            queued = await enqueue_price_gap(
+                db,
+                user=user,
+                reason=reason,
+                legs=[leg.model_dump() for leg in body.legs],
+                qty=body.contracts_per_leg,
+                strategy_name=strategy_name,
+                scan_id=body.scan_id,
+                equity_legs=equity_legs,
+                thesis_accepted=bool(body.thesis_accepted),
+            )
+            if queued is not None:
+                return queued_response(queued)
+            raise HTTPException(400, reason) from exc
         last = orders[-1]
         total_cost = sum(o.estimated_cost or 0 for o in orders)
         impact = sum(account_impact(o.side, o.estimated_cost or 0) for o in orders)

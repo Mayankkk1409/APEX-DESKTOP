@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { ApexScoreScan } from "../components/ApexScoreScan";
+import { ApexWordmark } from "../components/ApexWordmark";
 import { FundamentalsScan } from "../components/FundamentalsScan";
 import { OptionsChainGreeks } from "../components/OptionsChainGreeks";
 import { OrderConfirmationCertificate } from "../components/OrderConfirmationCertificate";
@@ -19,7 +20,7 @@ import { CAROUSEL_LAYERS, SCAN_SLIDE_LAYERS, SNAPSHOT_STUDIES } from "../constan
 import { scoreTier } from "../lib/chartHighlight";
 import { optionReviewRows, optionsLegBlockReason } from "../lib/orderTicket";
 import { explainOrderRefusal } from "../lib/orderRefusal";
-import { orderPlacement, overrideReasonText, thesisCheckboxState } from "../lib/riskReview";
+import { blockedEligibilityLine, orderPlacement, overrideReasonText, thesisCheckboxState } from "../lib/riskReview";
 import { normalizeStrategyName } from "../lib/strategyDisplay";
 import { readUserSettings } from "../lib/userSettings";
 import { applyReturnedFillBalances, applyReturnedOrderRows, refreshDeskQueries } from "../lib/deskRefresh";
@@ -106,6 +107,7 @@ export function DeepScan() {
   const [submitFacts, setSubmitFacts] = useState<OrderProgressFacts | null>(null);
   const filledOutcome = useRef<OrderConfirmationDetails | null>(null);
   const filledResult = useRef<OrderPlacementResult | null>(null);
+  const submitLock = useRef(false);
 
   const locked = useMemo(() => {
     if (snapshot) return snapshot;
@@ -140,6 +142,19 @@ export function DeepScan() {
     scanInvoked.current = true;
     void qc.fetchQuery({ queryKey: scanKey, queryFn: scanQueryFn }).catch(() => undefined);
   }
+
+  const expiries = useQuery({
+    queryKey: ["exp", symbol],
+    queryFn: () => api.expirations(symbol),
+    enabled: Boolean(symbol) && !reopenScanId,
+    staleTime: 60_000,
+  });
+  useEffect(() => {
+    if (reopenScanId) return;
+    const list = expiries.data?.expirations ?? [];
+    if (!list.length || expiry) return;
+    useSession.getState().setExpiry(list[0].date);
+  }, [expiries.data, expiry, reopenScanId]);
 
   /**
    * Fallback only: if the user deep-links to /scan without a captured chart there
@@ -231,6 +246,8 @@ export function DeepScan() {
   const equityNote = riskReview?.equity_note ?? null;
   const definedRisk = riskReview?.defined_risk ?? Boolean(riskReview?.auto_submit_on_ack);
   const strategyLayerData = scan.data?.layer_data?.strategy as StrategyLayer | undefined;
+  const displayedComposite =
+    typeof strategyLayerData?.composite_score === "number" ? strategyLayerData.composite_score : compositeScore;
   const strategyName = strategyLayerData?.structure_label || riskReview?.structure_label || strategyLayerData?.selected_strategy || "";
   const reviewRows = useMemo(
     () =>
@@ -255,12 +272,21 @@ export function DeepScan() {
     riskNotes: strategyLayerData?.risk_notes,
   });
   // The browser auto-exec toggle defaults off and is not stored on the server, so it is not a gate.
-  const eligibilityLine = riskReview?.auto_exec_line || strategyLayerData?.auto_exec_line || null;
+  const storedEligibility = riskReview?.auto_exec_line || strategyLayerData?.auto_exec_line || null;
+  const eligibilityLine =
+    storedEligibility &&
+    /Auto-execute eligible/.test(storedEligibility) &&
+    displayedComposite != null &&
+    Number.isFinite(scanAutoThreshold) &&
+    displayedComposite < scanAutoThreshold
+      ? blockedEligibilityLine(displayedComposite, scanAutoThreshold, "composite is below your minimum")
+      : storedEligibility;
   const structureExecutable = riskReview?.executable === true;
   const structurePlaceable = riskReview?.placeable !== false;
+  const hardBlocked = (strategyLayerData?.hard_block_reasons ?? []).some((note) => note.trim().length > 0);
   const placement = orderPlacement({
     serverAutoSubmit: riskReview?.auto_execute_eligible === true,
-    composite: compositeScore,
+    composite: displayedComposite,
     threshold: scanAutoThreshold,
     definedRisk,
     hasLegs: reviewRows.length > 0 || (riskReview?.stock_legs?.length ?? 0) > 0,
@@ -270,6 +296,8 @@ export function DeepScan() {
     spreadConfirmationRequired: riskReview?.spread_confirmation_required === true,
     spreadConfirmed,
     blockReason: eligibilityLine || riskReview?.block_reason || null,
+    hardBlocked,
+    readOnly: accountMode === "real_brokerage",
   });
   // One checkbox: it submits at or above the saved minimum when the server says
   // the structure is executable, and it stays off when the server will refuse.
@@ -407,6 +435,20 @@ export function DeepScan() {
     },
     onSuccess: (r) => {
       const result = r as OrderPlacementResult;
+      if ((result.status || "").toLowerCase() === "queued") {
+        const sentence =
+          result.queue_message ||
+          "A current price is unavailable. Your order is waiting and will be submitted automatically when the market permits trading and a valid price is available, provided it still meets your confirmed order terms. You can cancel it before submission.";
+        filledOutcome.current = null;
+        filledResult.current = null;
+        setOrderConfirmation(null);
+        setOrderRefusal(sentence);
+        setSubmitPhase("queued");
+        setSubmitFacts(orderProgressFacts("Saved to the queue. It has not been filled."));
+        setProgressComplete(true);
+        void qc.invalidateQueries({ queryKey: ["orders"] });
+        return;
+      }
       if ((result.status || "").toLowerCase() !== "filled") {
         const sentence = explainOrderRefusal(
           result.status ? `Order status: ${result.status}` : "The order was not filled.",
@@ -423,17 +465,18 @@ export function DeepScan() {
       filledResult.current = result;
       filledOutcome.current = confirmationFromResult(result);
       setOrderRefusal(null);
-      setSubmitPhase("filled");
+      setSubmitPhase("recorded");
       setSubmitFacts(orderProgressFacts());
       setProgressComplete(true);
     },
     onMutate: () => {
+      submitLock.current = true;
       setMsg("");
       setOrderRefusal(null);
       setOrderConfirmation(null);
       setProgressComplete(false);
       setSubmitPhase("submitting");
-      setSubmitFacts(orderProgressFacts());
+      setSubmitFacts(orderProgressFacts("Checking the order, then sending it."));
       filledOutcome.current = null;
       filledResult.current = null;
     },
@@ -449,23 +492,20 @@ export function DeepScan() {
     },
   });
 
-  useEffect(() => {
-    if (!progressComplete) return;
-    const frame = window.requestAnimationFrame(() => {
-      const details = filledOutcome.current;
-      const result = filledResult.current;
-      if (details && result) {
-        setOrderConfirmation(details);
-        applyReturnedFillBalances(qc, result);
-        applyReturnedOrderRows(qc, result);
-        refreshDeskQueries(qc);
-      }
-      filledOutcome.current = null;
-      filledResult.current = null;
-      setProgressComplete(false);
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [progressComplete, qc]);
+  function finishOrderProgress() {
+    const details = filledOutcome.current;
+    const result = filledResult.current;
+    if (details && result) {
+      setOrderConfirmation(details);
+      applyReturnedFillBalances(qc, result);
+      applyReturnedOrderRows(qc, result);
+      refreshDeskQueries(qc);
+    }
+    filledOutcome.current = null;
+    filledResult.current = null;
+    submitLock.current = false;
+    setProgressComplete(false);
+  }
 
   if (intro) {
     return <ScanIntro symbol={locked.symbol} />;
@@ -478,9 +518,12 @@ export function DeepScan() {
       data-layers={layers.join(",")}
     >
       <div className="mb-4 flex items-center justify-between gap-3">
-        <button className="text-sm text-bronze" onClick={() => nav("/app")}>
-          ← Dashboard
-        </button>
+        <div className="flex items-center gap-3">
+          <ApexWordmark />
+          <button className="text-sm text-bronze" onClick={() => nav("/app")}>
+            ← Dashboard
+          </button>
+        </div>
         <p className="font-mono text-xs text-bronze" data-testid="snapshot-header">
           Snapshot {locked.symbol} · {locked.timeframe}
           {expiry ? ` · expiry ${expiry}` : ""} · {plotBars.length} bars · {windowFrom.slice(0, 10)} → {windowTo.slice(0, 10)} ·{" "}
@@ -649,7 +692,10 @@ export function DeepScan() {
                           type="number"
                           min={1}
                           value={contractsPerLeg}
-                          onChange={(e) => setContractsPerLeg(Math.max(1, Number(e.target.value)))}
+                          onChange={(e) => {
+                            setContractsPerLeg(Math.max(1, Number(e.target.value)));
+                            setThesis(false);
+                          }}
                           data-testid="contracts-per-leg"
                         />
                       </p>
@@ -664,13 +710,20 @@ export function DeepScan() {
                       thesisAccepted={thesis}
                       onThesisChange={(checked) => {
                         setThesis(checked);
-                        if (checked && thesisState.submitsOnAccept && !placement.overrideRequired && !order.isPending) {
+                        if (
+                          checked &&
+                          thesisState.submitsOnAccept &&
+                          !placement.overrideRequired &&
+                          !order.isPending &&
+                          !submitLock.current
+                        ) {
                           setMsg("");
                           setOrderRefusal(null);
                           order.mutate({ thesisAccepted: true });
                         }
                       }}
                       onPlace={() => {
+                        if (submitLock.current || order.isPending) return;
                         if (!thesis) {
                           setMsg("Accept the thesis to place this trade.");
                           return;
@@ -703,10 +756,10 @@ export function DeepScan() {
             <div className="order-cert-frame">
               <div className="order-cert-inner order-cert-stack">
                 <h2 id="trade-override-title" className="order-cert-title">
-                  APEX could not verify this trade
+                  Proceed at my own risk
                 </h2>
                 <p className="order-cert-copy" data-testid="trade-override-body">
-                  APEX flagged this trade as not executable: {overrideReasons}. You may proceed at your own risk or cancel.
+                  Not recommended. {overrideReasons}. This does not send the order until you confirm.
                 </p>
                 <div className="order-cert-actions">
                   <button
@@ -737,11 +790,24 @@ export function DeepScan() {
       ) : null}
 
       {order.isPending || progressComplete ? (
-        <OrderSubmitProgress phase={order.isPending ? "submitting" : submitPhase} facts={submitFacts} />
+        <OrderSubmitProgress
+          phase={order.isPending ? "submitting" : submitPhase}
+          facts={submitFacts}
+          onSettled={order.isPending ? undefined : finishOrderProgress}
+        />
       ) : null}
 
       {orderRefusal !== null && !order.isPending && !progressComplete ? (
-        <OrderRefusalDialog reason={orderRefusal} onClose={() => setOrderRefusal(null)} />
+        <OrderRefusalDialog
+          reason={orderRefusal}
+          onClose={() => {
+            const queued = /your order is waiting|your order is queued|has not confirmed a fill|broker received this order/i.test(
+              orderRefusal,
+            );
+            setOrderRefusal(null);
+            if (queued) nav("/portfolio");
+          }}
+        />
       ) : null}
 
       {orderConfirmation && !order.isPending && !progressComplete ? (

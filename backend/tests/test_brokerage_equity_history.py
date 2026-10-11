@@ -33,6 +33,7 @@ async def test_equity_history_returns_cached_snapshots(client: AsyncClient) -> N
         patch.object(st, "list_accounts", AsyncMock(return_value=accounts)),
         patch.object(st, "fetch_balance", AsyncMock(side_effect=balance_side_effect)),
         patch.object(st, "fetch_day_pnl", AsyncMock(return_value=25.0)),
+        patch.object(st, "fetch_account_value_history", AsyncMock(return_value=None)),
     ):
         await client.post("/api/brokerage/sync", headers=headers)
         await client.get("/api/brokerage/accounts/acc-eq-1/balance", headers=headers)
@@ -46,7 +47,8 @@ async def test_equity_history_returns_cached_snapshots(client: AsyncClient) -> N
     assert len(body["points"]) >= 2
     assert body["points"][0]["portfolio_value"] == 10000.0
     assert body["points"][-1]["portfolio_value"] == 12000.0
-    assert body["points"][-1]["cumulative_pl"] == 2000.0
+    assert body["points"][-1]["cumulative_pl"] is None
+    assert "first balance APEX recorded" in body["history_note"]
 
 
 @pytest.mark.asyncio
@@ -88,6 +90,35 @@ async def test_orders_endpoint_returns_normalized_rows(client: AsyncClient) -> N
     assert row["side"] == "buy"
     assert row["qty"] == 5.0
     assert row["fill_price"] == 175.25
+
+
+def test_broker_value_history_does_not_count_a_deposit_as_profit() -> None:
+    from app.services.equity_history import broker_value_points
+
+    starting, points, note = broker_value_points(
+        [
+            {"date": "2024-01-02", "total_value": "10000"},
+            {"date": "2024-06-01", "total_value": "15000"},
+        ],
+        [{"t": "2024-03-01", "type": "CONTRIBUTION", "amount": 4000}],
+        flows_complete=True,
+    )
+    assert starting == 10000
+    assert points[-1]["portfolio_value"] == 15000
+    assert points[-1]["cumulative_pl"] == 1000
+    assert "2024-01-02" in note
+
+
+def test_broker_value_history_omits_pnl_without_cash_flows() -> None:
+    from app.services.equity_history import broker_value_points
+
+    _starting, points, note = broker_value_points(
+        [{"date": "2025-01-01", "total_value": 80000}],
+        None,
+        flows_complete=False,
+    )
+    assert points[0]["cumulative_pl"] is None
+    assert "P&L line is omitted" in note
 
 
 def test_normalize_order_maps_snaptrade_fields() -> None:

@@ -14,7 +14,8 @@ from typing import Any
 from loguru import logger
 
 from app.analysis.gate_config import QUOTE_FRESHNESS_SECONDS, quote_is_stale
-from app.analysis.options_rules import classify_quote_freshness
+from app.analysis.options_rules import NY as _NY
+from app.analysis.options_rules import classify_quote_freshness, in_regular_session, weekday_sessions
 
 # The spec says a non-executable candidate must not outrank an executable one
 # with a close score. It does not define "close". Five points stays inside the
@@ -137,14 +138,15 @@ def quote_age_phrase(quote_as_of: Any, *, now: datetime | None = None) -> str | 
 
 
 def quote_problem(quote: Any, *, now: datetime | None = None) -> str | None:
-    """Stale, missing, or suspect.
+    """Block only when a price cannot be used.
 
-    A price, bid, or ask with no timestamp is not fresh. Order paths re-check here.
-    ``quote_is_stale`` still treats a missing timestamp as not an age failure; this
-    function does not.
+    A missing timestamp does not by itself mean the price is old. Outside the
+    regular session the latest price is the last close. During the session a
+    price with no readable time is not treated as fresh. A timestamp older than
+    the freshness cap during the session still blocks.
     """
     if quote is None:
-        return "Quote not current."
+        return "We couldn't get a price. No order was sent. Try again in a moment."
     as_of = getattr(quote, "as_of", None)
     if as_of is None and isinstance(quote, dict):
         as_of = quote.get("as_of") or quote.get("quote_as_of")
@@ -152,18 +154,30 @@ def quote_problem(quote: Any, *, now: datetime | None = None) -> str | None:
     ask = _number(_attr(quote, "ask"))
     price = _number(_attr(quote, "price"))
     if bid is not None and ask is not None and bid > ask:
-        return "Quote not current. Bid is above the ask."
-    has_price = price is not None or bid is not None or ask is not None
-    if has_price and _parse_time(as_of) is None:
-        return "Quote not current. Quoted unknown time."
-    if _quote_failed_stale(quote, as_of, now=now):
-        age = quote_age_phrase(as_of, now=now)
-        stamp = _text(as_of) or "unknown time"
-        if age:
-            return f"Quote not current. {age}. Quoted {stamp}."
-        return f"Quote not current. Quoted {stamp}."
-    if price is None and bid is None and ask is None:
-        return "Quote not current. No bid, ask, or price."
+        return "The buy price is below the sell price, so this quote can't be used. No order was sent. Refresh and try again."
+    has_price = (price is not None and price > 0) or (bid is not None and bid > 0) or (ask is not None and ask > 0)
+    if not has_price:
+        return "No current price is available. No order was sent. Refresh the quote and try again."
+    clock = now or datetime.now(timezone.utc)
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=timezone.utc)
+    parsed = _parse_time(as_of)
+    sessions = weekday_sessions(clock.astimezone(_NY).date())
+    outside = not in_regular_session(clock, sessions)
+    if parsed is None:
+        if outside:
+            return None
+        return (
+            "We couldn't confirm when this price was quoted. No order was sent. "
+            "Refresh the quote and try again."
+        )
+    if _quote_failed_stale(quote, as_of, now=clock):
+        if outside:
+            return None
+        return (
+            "This price is more than 5 minutes old. No order was sent. "
+            "Refresh the quote and try again."
+        )
     _ = QUOTE_FRESHNESS_SECONDS
     return None
 
@@ -203,14 +217,20 @@ def spread_confirmation_text(
 
 
 def marketable_limit(side: str, quote: Any) -> tuple[float, str] | None:
-    """Buy at the ask, sell at the bid. None when that side is missing."""
+    """Buy at the ask, sell at the bid. Fall back to the latest trade when that side is missing.
+
+    The latest trade is not the ask or the bid. Callers must keep that source label.
+    """
     bid = _number(_attr(quote, "bid"))
     ask = _number(_attr(quote, "ask"))
+    last = _number(_attr(quote, "price"))
     action = side.lower()
     if action == "buy" and ask is not None and ask > 0:
         return round(ask, 2), "ask"
     if action == "sell" and bid is not None and bid > 0:
         return round(bid, 2), "bid"
+    if last is not None and last > 0:
+        return round(last, 2), "latest trade"
     return None
 
 
@@ -219,13 +239,36 @@ def is_spread_note(note: str) -> bool:
     return "bid/ask spread" in text or "spread is" in text and "% of mid" in text
 
 
+def is_soft_warning(note: str) -> bool:
+    """A trade the app advises against, which a second confirmation may still place.
+
+    A wide spread and a closed-market indicative quote are advice. A missing leg,
+    an impossible price, or a quote that is too old during the session is not.
+    """
+    text = note.lower()
+    if is_spread_note(note):
+        return True
+    if "more than 5 minutes" in text or "too old to trust" in text:
+        return False
+    return any(
+        phrase in text
+        for phrase in (
+            "quote not current",
+            "indicative",
+            "market is closed",
+            "below your minimum",
+            "already queued",
+        )
+    )
+
+
 def split_block_notes(notes: list[str]) -> tuple[list[str], list[str]]:
     hard: list[str] = []
     spread: list[str] = []
     for note in notes:
         if not isinstance(note, str) or not note.strip():
             continue
-        if is_spread_note(note):
+        if is_soft_warning(note):
             spread.append(note.strip())
         else:
             hard.append(note.strip())
@@ -298,7 +341,7 @@ async def enforce_submission_quotes(
         if not symbol:
             continue
         _quote, problem = await load_submission_quote(adapter, symbol)
-        if problem and not user_override:
+        if problem and not (user_override and is_soft_warning(problem)):
             logger.warning("order blocked path={} symbol={} reason={}", path, symbol, problem)
             raise ValueError(problem)
         if problem and user_override:
@@ -450,15 +493,41 @@ def _dedupe(items: list[str]) -> list[str]:
 
 
 def _parse_time(value: Any) -> datetime | None:
-    if not value:
+    if value is None or value is False:
         return None
-    text = str(value).strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        if isinstance(value, (int, float)):
+            return _from_unix(float(value))
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.replace(".", "", 1).isdigit():
+            return _from_unix(float(text))
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            parsed = None
+            for fmt in ("%b %d, %Y %I:%M:%S %p", "%b %d, %Y %I:%M %p", "%b %d, %Y"):
+                try:
+                    parsed = datetime.strptime(text, fmt)
+                    break
+                except ValueError:
+                    parsed = None
+            if parsed is None:
+                return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+def _from_unix(value: float) -> datetime | None:
+    if value > 1_000_000_000_000:
+        value = value / 1000.0
+    if value < 1_000_000_000:
+        return None
+    try:
+        return datetime.fromtimestamp(value, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None

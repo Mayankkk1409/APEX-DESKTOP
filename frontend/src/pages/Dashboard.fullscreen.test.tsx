@@ -59,13 +59,14 @@ describe("Options terminal chrome", () => {
   it("sends the logo and the Apex word to the portfolio route", () => {
     const html = renderDesk();
     expect(html).toContain('data-testid="apex-brand"');
-    expect(html).toContain('href="/dashboard"');
-    expect(html).toContain('aria-label="Apex"');
-    expect(html).toContain('src="/brand/apex-logo.png"');
-    expect(html).toContain(">APEX<");
+    expect(html).toContain('href="/portfolio"');
+    expect(html).toContain('aria-label="Open portfolio"');
+    expect(html).toContain('src="/brand/apex-wordmark.png"');
+    expect(html).toContain('data-testid="scan-btn-fullscreen"');
+    expect(html).toContain("Info Score Card");
     const brand = html.slice(html.indexOf('data-testid="apex-brand"'), html.indexOf('data-testid="ticker-search"'));
-    expect(brand).toContain('src="/brand/apex-logo.png"');
-    expect(brand).toContain(">APEX<");
+    expect(brand).toContain('src="/brand/apex-wordmark.png"');
+    expect(brand).not.toContain(">APEX<");
   });
 
   it("keeps search, expiry, watchlist, and the ticker card while marking chrome that leaves", () => {
@@ -94,9 +95,11 @@ describe("Options terminal chrome", () => {
     expect(css).toContain("var(--apex-text)");
     expect(css).toContain("var(--apex-panel)");
     expect(css).toContain("140ms");
-    expect(css).toContain("--desk-dur: 520ms");
+    expect(css).toContain("--desk-dur: 980ms");
     expect(css).toMatch(/prefers-reduced-motion:\s*reduce[\s\S]*--desk-dur:\s*140ms/);
     expect(css).toContain(".desk--chart-full .desk-ticker");
+    expect(css).toContain(".desk-scan-fullscreen");
+    expect(css).toContain(".desk-ticker-overlay");
     expect(css).toContain(".desk-motion-sentinel");
   });
 

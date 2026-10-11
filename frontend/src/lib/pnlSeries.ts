@@ -29,3 +29,24 @@ export function buildEquitySeries(points: PnlPoint[], headlineEquity?: number | 
   }
   return series;
 }
+
+export function buildProfitSeries(
+  points: PnlPoint[],
+  overallTotal?: number | null,
+): EquityBar[] {
+  const byTime = new Map<number, number>();
+  for (const point of points) {
+    const ms = Date.parse(point.t);
+    const value = point.cumulative_pl;
+    if (!Number.isFinite(ms) || value == null || !Number.isFinite(value)) continue;
+    byTime.set(Math.floor(ms / 1000), value);
+  }
+  const series = [...byTime.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([time, value]) => ({ time: time as Time, value }));
+  if (series.length > 0 && overallTotal != null && Number.isFinite(overallTotal)) {
+    const last = series[series.length - 1];
+    series[series.length - 1] = { time: last.time, value: overallTotal };
+  }
+  return series;
+}

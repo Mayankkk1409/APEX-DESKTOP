@@ -140,7 +140,7 @@ describe("expiry login trigger", () => {
   const marketDay = "2026-10-06";
   const userId = "user-1";
 
-  it("shows when the notice key was stored before the certificate painted", () => {
+  it("shows once on the code-entry step before the certificate has painted", () => {
     const store = memoryStore();
     store.setItem(expiryNoticeStorageKey(userId), marketDay);
     const days = readExpiryLoginDays(store, userId);
@@ -153,13 +153,14 @@ describe("expiry login trigger", () => {
         legacyNoticeDay: days.legacyNoticeDay,
         credentialLogin: true,
         alreadyPresented: false,
+        otpEntry: true,
       }),
     ).toBe(true);
     expect(expiryLoginShouldNavigate("show")).toBe(false);
     expect(expiryLoginShouldNavigate("cancelled")).toBe(false);
   });
 
-  it("shows on every credential login even when the painted-day key is today", () => {
+  it("does not show again after the certificate has painted", () => {
     const store = memoryStore();
     store.setItem(expiryNoticeStorageKey(userId), marketDay);
     markExpiryLoginCertificatePainted(store, userId, marketDay);
@@ -175,22 +176,24 @@ describe("expiry login trigger", () => {
         legacyNoticeDay: days.legacyNoticeDay,
         credentialLogin: true,
         alreadyPresented: false,
+        otpEntry: true,
       }),
-    ).toBe(true);
-    expect(expiryLoginShouldNavigate("show")).toBe(false);
+    ).toBe(false);
+    expect(expiryLoginShouldNavigate("skip")).toBe(true);
   });
 
-  it("shows on session restore even when the painted-day key is today and the book is empty", () => {
+  it("stays hidden on password login and session restore", () => {
     expect(
       shouldShowExpiryLoginCertificate({
         rowCount: 0,
         marketDay,
-        paintedMarketDay: marketDay,
-        legacyNoticeDay: marketDay,
-        credentialLogin: false,
+        paintedMarketDay: null,
+        legacyNoticeDay: null,
+        credentialLogin: true,
         alreadyPresented: false,
+        otpEntry: false,
       }),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       shouldShowExpiryLoginCertificate({
         rowCount: 1,
@@ -200,8 +203,8 @@ describe("expiry login trigger", () => {
         credentialLogin: false,
         alreadyPresented: false,
       }),
-    ).toBe(true);
-    expect(expiryLoginShouldNavigate("show")).toBe(false);
+    ).toBe(false);
+    expect(expiryLoginShouldNavigate("skip")).toBe(true);
   });
 
   it("does not stack a second certificate while this desk arrival is already on screen", () => {
@@ -228,6 +231,18 @@ describe("expiry login trigger", () => {
         legacyNoticeDay: marketDay,
         credentialLogin: true,
         alreadyPresented: expiryLoginArrivalAlreadyShown(),
+        otpEntry: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldShowExpiryLoginCertificate({
+        rowCount: 1,
+        marketDay,
+        paintedMarketDay: null,
+        legacyNoticeDay: null,
+        credentialLogin: true,
+        alreadyPresented: false,
+        otpEntry: true,
       }),
     ).toBe(true);
   });

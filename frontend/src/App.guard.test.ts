@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getAccessToken, restoreSession, setAccessToken } from "./api";
-import { resolveAuthGuard } from "./App";
+import { resolveAuthGuard } from "./lib/authGuard";
 import { useSession } from "./store";
 
 function jsonResponse(body: unknown, status = 200): Response {

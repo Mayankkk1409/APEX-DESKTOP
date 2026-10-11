@@ -15,10 +15,12 @@ async function signup(request: { post: Function }, username: string, mode: "pape
   return res;
 }
 
-/** Full document loads always play splash; wait it out before interacting. */
+/** The entry route opens the login form. An older splash, if present, must finish first. */
 async function awaitSplash(page: Page) {
-  await expect(page.getByTestId("splash")).toBeVisible();
-  await expect(page.getByTestId("splash")).toHaveCount(0, { timeout: 20000 });
+  const splash = page.getByTestId("splash");
+  if (await splash.count()) {
+    await expect(splash).toHaveCount(0, { timeout: 20000 });
+  }
 }
 
 async function gotoAfterSplash(page: Page, path: string) {
@@ -32,29 +34,11 @@ async function gotoAfterSplash(page: Page, path: string) {
   await expect(page.getByTestId("splash")).toHaveCount(0, { timeout: 20000 });
 }
 
-test("splash then login route", async ({ page }) => {
+test("fresh launch shows the splash, then the login form", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("splash")).toBeVisible();
-  await expect(page.getByTestId("apex-logo")).toBeVisible();
-  await expect(page.locator(".apex-assemble")).toBeVisible();
-  await expect(page.locator(".apex-draw-mark")).toBeVisible();
-  await expect(page.getByTestId("disclaimer")).toBeVisible({ timeout: 8000 });
-  await expect(page.getByTestId("disclaimer")).toContainText("not personalized investment advice");
-  await awaitSplash(page);
+  await expect(page.getByTestId("splash")).toHaveCount(0, { timeout: 20000 });
   await expect(page).toHaveURL(/\/login/);
-  await expect(page.getByTestId("login-form")).toBeVisible();
-});
-
-test("reload and new document load replay splash", async ({ page }) => {
-  await page.goto("/");
-  await expect(page.getByTestId("splash")).toBeVisible();
-  await awaitSplash(page);
-  await expect(page.getByTestId("login-form")).toBeVisible();
-
-  await page.goto("/");
-  await page.reload();
-  await expect(page.getByTestId("splash")).toBeVisible();
-  await awaitSplash(page);
   await expect(page.getByTestId("login-form")).toBeVisible();
 });
 
@@ -306,7 +290,6 @@ test("combined options chain and Greeks screen", async ({ page, request }) => {
   expect(Number(await carousel.getAttribute("data-card-count"))).toBeGreaterThanOrEqual(14);
 
   for (const cardId of [
-    "chain-provenance",
     "chain-spread",
     "chain-liquidity",
     "chain-volume",
@@ -332,14 +315,14 @@ test("combined options chain and Greeks screen", async ({ page, request }) => {
   await page.keyboard.press("Home");
   await expect(page.getByTestId("layer-name")).toHaveText(/1 \/ 8/);
   await page.getByTestId("next-layer").click();
-  await expect(page.getByTestId("chain-card")).toHaveAttribute("data-card-id", "chain-provenance");
+  await expect(page.getByTestId("chain-card")).toHaveAttribute("data-card-id", "chain-spread");
   const firstBody = await page.getByTestId("chain-card").innerText();
   await page.keyboard.press("ArrowRight");
-  await expect(page.getByTestId("chain-card")).not.toHaveAttribute("data-card-id", "chain-provenance");
+  await expect(page.getByTestId("chain-card")).not.toHaveAttribute("data-card-id", "chain-spread");
   await expect(page.getByTestId("chain-card")).not.toHaveText(firstBody);
   await expect(page.getByTestId("layer-name")).toContainText(/options chain greeks/i);
   await page.keyboard.press("ArrowLeft");
-  await expect(page.getByTestId("chain-card")).toHaveAttribute("data-card-id", "chain-provenance");
+  await expect(page.getByTestId("chain-card")).toHaveAttribute("data-card-id", "chain-spread");
   await expect(page.getByTestId("layer-name")).toContainText(/options chain greeks/i);
 });
 

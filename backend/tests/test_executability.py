@@ -105,15 +105,22 @@ def test_quote_seventeen_minutes_old_is_not_current() -> None:
     assert phrase == "quote 17 min old"
     problem = quote_problem({"price": 100, "bid": 99, "ask": 101, "as_of": stamped}, now=now)
     assert problem is not None
-    assert "Quote not current" in problem
-    assert stamped in problem
+    assert "more than 5 minutes old" in problem
+    assert "No order was sent" in problem
 
 
 def test_missing_timestamp_with_a_price_is_stale() -> None:
-    problem = quote_problem({"price": 11.96, "bid": None, "ask": None, "as_of": None})
+    session = datetime(2026, 10, 5, 16, 0, tzinfo=timezone.utc)
+    problem = quote_problem({"price": 11.96, "bid": None, "ask": None, "as_of": None}, now=session)
     assert problem is not None
-    assert "Quote not current" in problem
-    assert "unknown time" in problem
+    assert "couldn't confirm when this price was quoted" in problem
+    assert "No order was sent" in problem
+
+
+def test_closed_market_uses_the_latest_price_without_a_timestamp() -> None:
+    closed = datetime(2026, 10, 10, 7, 45, tzinfo=timezone.utc)
+    problem = quote_problem({"price": 11.96, "bid": None, "ask": None, "as_of": None}, now=closed)
+    assert problem is None
 
 
 @pytest.mark.asyncio
@@ -145,12 +152,12 @@ async def test_stale_quote_is_refetched_once_then_rejected(monkeypatch: pytest.M
             return {"filled_avg_price": 1.0}
 
     adapter = Adapter()
-    with pytest.raises(ValueError, match="Quote not current"):
+    with pytest.raises(ValueError, match="No order was sent"):
         await enforce_submission_quotes(adapter, ["AAPL270115C00150000"], path="place_order")
     assert adapter.quotes == 2
     assert adapter.submits == 0
 
-    with pytest.raises(ValueError, match="Quote not current"):
+    with pytest.raises(ValueError, match="No order was sent"):
         await execute_market_fill(
             user=SimpleNamespace(),  # type: ignore[arg-type]
             db=None,  # type: ignore[arg-type]
@@ -230,7 +237,7 @@ async def test_demo_fill_is_blocked_when_checks_failed() -> None:
 def test_options_limit_is_the_ask_for_a_buy() -> None:
     assert marketable_limit("buy", {"bid": 11.70, "ask": 12.22}) == (12.22, "ask")
     assert marketable_limit("sell", {"bid": 11.70, "ask": 12.22}) == (11.70, "bid")
-    assert marketable_limit("buy", {"price": 11.96}) is None
+    assert marketable_limit("buy", {"price": 11.96}) == (11.96, "latest trade")
 
 
 def test_close_score_executable_outranks_a_blocked_name() -> None:
@@ -301,7 +308,7 @@ def test_last_close_is_not_a_stale_failure_and_the_session_cap_stays() -> None:
     session = datetime(2026, 10, 5, 16, 0, tzinfo=timezone.utc)
     stale = (session - timedelta(seconds=301)).isoformat()
     fresh = (session - timedelta(seconds=299)).isoformat()
-    assert "Quote not current" in (quote_problem({"price": 100, "bid": 99, "ask": 101, "as_of": stale}, now=session) or "")
+    assert "No order was sent" in (quote_problem({"price": 100, "bid": 99, "ask": 101, "as_of": stale}, now=session) or "")
     assert quote_problem({"price": 100, "bid": 99, "ask": 101, "as_of": fresh}, now=session) is None
     from app.services.strategy_engine import suspect_quote_failures
 

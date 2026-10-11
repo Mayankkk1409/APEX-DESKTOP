@@ -17,7 +17,7 @@ import re
 import smtplib
 import tempfile
 from email.message import EmailMessage
-from email.utils import formatdate, make_msgid, parseaddr
+from email.utils import formatdate, parseaddr
 from pathlib import Path
 
 from loguru import logger
@@ -358,6 +358,17 @@ def _attach_inline_logo(message: EmailMessage) -> None:
         cid=f"<{_LOGO_CID}>",
         disposition="inline",
     )
+    # A filename makes Gmail list the inline logo as a download and leave the
+    # black header empty in the recipient view. The sent copy has no filename.
+    for part in message.walk():
+        if part.get_content_maintype() != "image":
+            continue
+        part.replace_header("Content-Disposition", "inline")
+        if part.get_param("name"):
+            part.del_param("name")
+        # Gmail uses this id to keep the logo in the header instead of a download.
+        if "X-Attachment-Id" not in part:
+            part.add_header("X-Attachment-Id", _LOGO_CID)
 
 
 def _drop_mime_version(part: EmailMessage) -> None:
@@ -367,12 +378,11 @@ def _drop_mime_version(part: EmailMessage) -> None:
 
 
 def _compose(subject: str, recipient: str, settings: Settings, plain: str, html_body: str) -> EmailMessage:
-    """Related root, alternative inside it, logo inline on that related part.
+    """Related root. The first part is the plain/HTML alternative; the logo is inline.
 
-    The root names the alternative as its body (``type=multipart/alternative``).
-    Without that, clients show the PNG as a download and skip the HTML, so the
-    sign-in code never appears. Nesting the image under the HTML alternative
-    does the same thing. MIME-Version stays on the root only.
+    The root stays multipart/related. Forcing its type to multipart/alternative
+    makes Gmail accept the SMTP transaction and then drop the letter before the
+    recipient inbox. MIME-Version stays on the root only.
     """
     alternative = EmailMessage()
     alternative.set_content(plain, cte=_transfer_encoding(plain))
@@ -382,10 +392,10 @@ def _compose(subject: str, recipient: str, settings: Settings, plain: str, html_
     message["From"] = settings.smtp_from.strip()
     message["To"] = recipient
     message["Date"] = formatdate(localtime=False)
-    message["Message-ID"] = make_msgid(domain="gmail.com")
+    # Let the receiving server assign the id. A forged @gmail.com id is accepted
+    # by SMTP and then dropped before the recipient inbox.
     message["MIME-Version"] = "1.0"
     message.make_related()
-    message.set_param("type", "multipart/alternative")
     message.attach(alternative)
     try:
         _attach_inline_logo(message)

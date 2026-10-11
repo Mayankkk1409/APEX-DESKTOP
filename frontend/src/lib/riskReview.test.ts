@@ -8,6 +8,7 @@ import {
   blockedEligibilityLine,
   manualConfirmationNote,
   orderPlacement,
+  thesisCheckboxState,
 } from "./riskReview";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -127,6 +128,22 @@ describe("orderPlacement", () => {
     expect(placement.autoSubmitOnAck).toBe(false);
     expect(placement.acknowledgeEnabled).toBe(true);
     expect(placement.overrideRequired).toBe(true);
+  });
+
+  it("does not let the thesis checkbox override a hard block", () => {
+    const placement = orderPlacement({
+      ...legs,
+      hardBlocked: true,
+      hasLegs: true,
+      executable: false,
+      placeable: false,
+      blockReason: "Leg count 0 does not match the strategy.",
+    });
+    expect(placement.placeTradeEnabled).toBe(false);
+    expect(placement.acknowledgeEnabled).toBe(false);
+    expect(placement.overrideRequired).toBe(false);
+    expect(placement.autoSubmitOnAck).toBe(false);
+    expect(thesisCheckboxState(placement).submitsOnAccept).toBe(false);
   });
 
   it("keeps Place Trade enabled below the saved minimum with a neutral note", () => {

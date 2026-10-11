@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildEquitySeries } from "./pnlSeries";
+import { buildEquitySeries, buildProfitSeries } from "./pnlSeries";
 
 describe("buildEquitySeries", () => {
   it("returns no bars when there is no history", () => {
@@ -54,5 +54,19 @@ describe("buildEquitySeries", () => {
     ]);
     expect(series).toHaveLength(1);
     expect(series[0].value).toBe(10100);
+  });
+});
+
+describe("buildProfitSeries", () => {
+  it("pins the latest P&L point to Overall P&L", () => {
+    const series = buildProfitSeries(
+      [
+        { t: "2026-08-01T00:00:00Z", portfolio_value: 100000, cumulative_pl: 0 },
+        { t: "2026-08-20T00:00:00Z", portfolio_value: 100100, cumulative_pl: 40 },
+      ],
+      100,
+    );
+    expect(series[0].value).toBe(0);
+    expect(series[1].value).toBe(100);
   });
 });

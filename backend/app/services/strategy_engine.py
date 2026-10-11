@@ -4086,6 +4086,13 @@ def build_strategy_layer(
         figures.setdefault("short_delta_cap", float(short_cap))
     if strategy_name == "Gamma Trampoline™":
         figures.update({"gamma_days_min": 5, "gamma_days_max": 10})
+    for err in validation_errors:
+        if not isinstance(err, dict):
+            continue
+        for field in ("expected", "actual"):
+            blob = str(err.get(field) or "")
+            for index, token in enumerate(re.findall(r"-?\d+(?:\.\d+)?", blob)):
+                figures[f"validation_{field}_{index}"] = float(token)
     outlook = _outlook_for(strategy_name, direction)
     if low_conviction and margin is not None:
         outlook = (

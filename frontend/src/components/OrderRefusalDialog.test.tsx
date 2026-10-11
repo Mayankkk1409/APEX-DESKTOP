@@ -11,7 +11,7 @@ describe("OrderRefusalDialog", () => {
     const html = renderToStaticMarkup(<OrderRefusalDialog reason={SPREAD} onClose={() => undefined} />);
     expect(html).toContain('role="dialog"');
     expect(html).toContain('aria-modal="true"');
-    expect(html).toContain("Order not submitted");
+    expect(html).toContain("Order was not placed");
     expect(html).toContain(SPREAD);
     expect(html).toContain("10.2%");
     expect(html).toContain("$2578.50");
@@ -19,6 +19,27 @@ describe("OrderRefusalDialog", () => {
     expect(html).toContain(">Close<");
     expect(html).not.toContain("Proceed");
     expect(html).not.toContain("Place Trade");
+  });
+
+  it("titles a persisted waiting order as queued", () => {
+    const reason =
+      "A current price is unavailable. Your order is waiting and will be submitted automatically when the market permits trading and a valid price is available, provided it still meets your confirmed order terms. You can cancel it before submission.";
+    const html = renderToStaticMarkup(<OrderRefusalDialog reason={reason} onClose={() => undefined} />);
+    expect(html).toContain("Order queued");
+    expect(html).toContain("Your order is waiting");
+    expect(html).not.toContain("Order was not placed");
+    expect(html).not.toContain("Order not confirmed");
+    expect(html).not.toContain("Trade executed");
+  });
+
+  it("calls an unconfirmed broker order queued", () => {
+    const reason =
+      "The broker received this order but has not confirmed a fill. Check its status before sending another order.";
+    const html = renderToStaticMarkup(<OrderRefusalDialog reason={reason} onClose={() => undefined} />);
+    expect(html).toContain("Order queued");
+    expect(html).toContain("has not confirmed a fill");
+    expect(html).not.toContain("Order not confirmed");
+    expect(html).not.toContain("This check is enough to hold the order.");
   });
 
   it("shows the broker buying-power sentence unchanged", () => {
@@ -31,7 +52,7 @@ describe("OrderRefusalDialog", () => {
 
   it("explains a spread refusal and a leg-count refusal with the fact and a why", () => {
     const spreadHtml = renderToStaticMarkup(<OrderRefusalDialog reason={SPREAD} onClose={() => undefined} />);
-    expect(spreadHtml).toContain("Order not submitted");
+    expect(spreadHtml).toContain("Order was not placed");
     expect(spreadHtml).toContain("order-cert-stack");
     expect(spreadHtml).toContain("10.2%");
     expect(spreadHtml).toContain("$2578.50");

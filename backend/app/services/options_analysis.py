@@ -959,46 +959,7 @@ def _cards(
     spot_txt = _f(ctx.spot)
     out: list[dict[str, str]] = []
 
-    # 1 ─ provenance
-    out.append(
-        _card(
-            "chain-provenance",
-            "Data provenance & chain integrity",
-            prov["label"],
-            "neutral",
-            f"This screen evaluates {s['contract_count']} contracts on the {sym} {chain.expiry} expiry "
-            f"({ctx.dte} days to expiration), the same expiry selected in the dashboard expiry picker and carried "
-            f"into this scan session. Underlying reference {spot_txt}"
-            + (f" sourced from {chain.spot_source}." if chain.spot_source else " (source not reported).")
-            + f" Chain state is {prov['label']} from {prov['source']} on the {chain.feed} feed"
-            + (f", as of {chain.as_of}." if chain.as_of else "."),
-            f"Greek provenance is split {prov['vendor_greeks']} vendor-published / {prov['model_greeks']} "
-            f"model-computed / {prov['missing_greeks']} unavailable. "
-            + (
-                "Every Greek below is vendor-published, so Delta, Gamma, Theta and Vega are the market's own numbers."
-                if prov["model_greeks"] == 0 and prov["missing_greeks"] == 0
-                else "Model-computed Greeks are Black-Scholes values derived from the mid, the strike, time to expiry "
-                "and solved implied volatility; they are not vendor marks. "
-                + (
-                    "Every contract on this chain is model-computed, which is what the header badge states."
-                    if prov["vendor_greeks"] == 0
-                    else "The model-computed contracts are badged MODEL in the chain table so they can be told apart "
-                    "from the vendor-published ones."
-                )
-            ),
-            f"Two-sided quotes exist on {s['quotes_two_sided']} of {s['contract_count']} contracts and "
-            f"{s['greeks_available']} carry a Delta. "
-            + (
-                "Coverage is complete, so no rule below is running on a partial chain."
-                if s["quotes_two_sided"] == s["contract_count"] and s["greeks_available"] == s["contract_count"]
-                else f"{s['contract_count'] - s['quotes_two_sided']} contracts have an incomplete quote and "
-                f"{s['contract_count'] - s['greeks_available']} have no Delta; those are graded "
-                "'insufficient data' rather than passed or failed."
-            ),
-            (" ".join(prov["caveats"]) if prov["caveats"] else "No integrity caveats on this chain."),
-            "" if prov["is_live"] else "TREAT EVERY NUMBER BELOW AS NON-EXECUTABLE until a live entitled chain is loaded.",
-        )
-    )
+    # Provenance is appended last so the carousel opens on the chain analysis.
 
     # 2 ─ spread quality
     rejects = s["hard_rejects"]
@@ -1542,6 +1503,46 @@ def _cards(
             ),
             "Every threshold above is documented in Full Document §5; the spread cap is the only one intended to be "
             "user-configurable.",
+        )
+    )
+
+    out.append(
+        _card(
+            "chain-provenance",
+            "Data provenance & chain integrity",
+            prov["label"],
+            "neutral",
+            f"This screen evaluates {s['contract_count']} contracts on the {sym} {chain.expiry} expiry "
+            f"({ctx.dte} days to expiration), the same expiry selected in the dashboard expiry picker and carried "
+            f"into this scan session. Underlying reference {spot_txt}"
+            + (f" sourced from {chain.spot_source}." if chain.spot_source else " (source not reported).")
+            + f" Chain state is {prov['label']} from {prov['source']} on the {chain.feed} feed"
+            + (f", as of {chain.as_of}." if chain.as_of else "."),
+            f"Greek provenance is split {prov['vendor_greeks']} vendor-published / {prov['model_greeks']} "
+            f"model-computed / {prov['missing_greeks']} unavailable. "
+            + (
+                "Every Greek below is vendor-published, so Delta, Gamma, Theta and Vega are the market's own numbers."
+                if prov["model_greeks"] == 0 and prov["missing_greeks"] == 0
+                else "Model-computed Greeks are Black-Scholes values derived from the mid, the strike, time to expiry "
+                "and solved implied volatility; they are not vendor marks. "
+                + (
+                    "Every contract on this chain is model-computed, which is what the header badge states."
+                    if prov["vendor_greeks"] == 0
+                    else "The model-computed contracts are badged MODEL in the chain table so they can be told apart "
+                    "from the vendor-published ones."
+                )
+            ),
+            f"Two-sided quotes exist on {s['quotes_two_sided']} of {s['contract_count']} contracts and "
+            f"{s['greeks_available']} carry a Delta. "
+            + (
+                "Coverage is complete, so no rule below is running on a partial chain."
+                if s["quotes_two_sided"] == s["contract_count"] and s["greeks_available"] == s["contract_count"]
+                else f"{s['contract_count'] - s['quotes_two_sided']} contracts have an incomplete quote and "
+                f"{s['contract_count'] - s['greeks_available']} have no Delta; those are graded "
+                "'insufficient data' rather than passed or failed."
+            ),
+            (" ".join(prov["caveats"]) if prov["caveats"] else "No integrity caveats on this chain."),
+            "" if prov["is_live"] else "TREAT EVERY NUMBER BELOW AS NON-EXECUTABLE until a live entitled chain is loaded.",
         )
     )
 

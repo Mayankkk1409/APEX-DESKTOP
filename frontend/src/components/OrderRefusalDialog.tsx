@@ -11,6 +11,9 @@ export function OrderRefusalDialog({ reason, onClose }: Props) {
   const trapRef = useFocusTrap(true);
   useEscapeKey(true, onClose);
 
+  const queued = /your order is waiting|your order is queued|has not confirmed a fill|broker received this order/i.test(
+    reason,
+  );
   return (
     <div
       ref={trapRef}
@@ -24,13 +27,13 @@ export function OrderRefusalDialog({ reason, onClose }: Props) {
         <div className="order-cert-frame">
           <div className="order-cert-inner order-cert-stack">
             <h2 id="order-refusal-title" className="order-cert-title">
-              Order not submitted
+              {queued ? "Order queued" : "Order was not placed"}
             </h2>
             <p className="order-cert-copy" data-testid="order-refusal-reason">
-              {explainOrderRefusal(reason)}
+              {queued ? reason : explainOrderRefusal(reason)}
             </p>
             <button type="button" className="order-cert-dismiss" data-testid="order-refusal-close" onClick={onClose}>
-              Close
+              {queued ? "View Portfolio" : "Close"}
             </button>
           </div>
         </div>

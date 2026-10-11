@@ -295,7 +295,7 @@ async def test_failed_option_does_not_submit_the_short_call(db: AsyncSession) ->
     user = _user()
     db.add(user)
     await db.commit()
-    with pytest.raises(ValueError, match="not split into market orders") as raised:
+    with pytest.raises(ValueError, match="not split into separate orders") as raised:
         await execute_strategy_legs(
             user=user,
             db=db,

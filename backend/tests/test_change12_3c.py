@@ -53,7 +53,9 @@ def test_priced_quote_without_a_timestamp_is_unknown_time() -> None:
     assert quote_is_stale("", now=_SESSION) is False
     for missing in (None, "", "not-a-time"):
         problem = quote_problem(_priced(as_of=missing), now=_SESSION)
-        assert problem == "Quote not current. Quoted unknown time."
+        assert problem is not None
+        assert "couldn't confirm when this price was quoted" in problem
+        assert "No order was sent" in problem
 
 
 def test_three_hundred_second_cap_is_unchanged() -> None:
@@ -62,8 +64,8 @@ def test_three_hundred_second_cap_is_unchanged() -> None:
     assert quote_problem(_priced(as_of=fresh), now=_SESSION) is None
     problem = quote_problem(_priced(as_of=stale), now=_SESSION)
     assert problem is not None
-    assert "Quote not current" in problem
-    assert "unknown time" not in problem
+    assert "more than 5 minutes old" in problem
+    assert "No order was sent" in problem
 
 
 @pytest.mark.asyncio
@@ -76,8 +78,20 @@ async def test_demo_quote_carries_a_timestamp() -> None:
         assert quote_problem(quote, now=datetime.now(timezone.utc)) is None
 
 
+def _pin_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz: timezone | None = None) -> datetime:
+            if tz is None:
+                return _SESSION.replace(tzinfo=None)
+            return _SESSION.astimezone(tz)
+
+    monkeypatch.setattr("app.services.executability.datetime", Frozen)
+
+
 @pytest.mark.asyncio
 async def test_demo_fill_blocks_a_price_with_no_timestamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    _pin_session(monkeypatch)
     calls = {"n": 0}
 
     async def _refuse(self: DemoAdapter, **kwargs: object) -> dict:
@@ -86,7 +100,7 @@ async def test_demo_fill_blocks_a_price_with_no_timestamp(monkeypatch: pytest.Mo
 
     monkeypatch.setattr(DemoAdapter, "submit_order", _refuse)
     adapter = _Untimed()
-    with pytest.raises(ValueError, match="Quoted unknown time"):
+    with pytest.raises(ValueError, match="couldn't confirm when this price was quoted"):
         await execute_market_fill(
             user=SimpleNamespace(account_mode="paper_funded"),  # type: ignore[arg-type]
             db=None,  # type: ignore[arg-type]
@@ -101,7 +115,7 @@ async def test_demo_fill_blocks_a_price_with_no_timestamp(monkeypatch: pytest.Mo
     assert calls["n"] == 0
     assert adapter.quotes == 2
 
-    with pytest.raises(ValueError, match="Quoted unknown time"):
+    with pytest.raises(ValueError, match="couldn't confirm when this price was quoted"):
         await execute_strategy_legs(
             user=SimpleNamespace(account_mode="paper_funded"),  # type: ignore[arg-type]
             db=None,  # type: ignore[arg-type]
@@ -115,6 +129,7 @@ async def test_demo_fill_blocks_a_price_with_no_timestamp(monkeypatch: pytest.Mo
 
 @pytest.mark.asyncio
 async def test_expiry_close_path_uses_the_same_quote_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    _pin_session(monkeypatch)
     calls = {"n": 0}
 
     async def _refuse(self: DemoAdapter, **kwargs: object) -> dict:
@@ -122,9 +137,9 @@ async def test_expiry_close_path_uses_the_same_quote_check(monkeypatch: pytest.M
         raise AssertionError("demo fill must not run")
 
     monkeypatch.setattr(DemoAdapter, "submit_order", _refuse)
-    with pytest.raises(ValueError, match="Quoted unknown time"):
+    with pytest.raises(ValueError, match="couldn't confirm when this price was quoted"):
         await enforce_submission_quotes(_Untimed(), ["AAPL261016C00100000"], path="expiry_close")
-    with pytest.raises(ValueError, match="Quoted unknown time"):
+    with pytest.raises(ValueError, match="couldn't confirm when this price was quoted"):
         await execute_market_fill(
             user=SimpleNamespace(account_mode="paper_funded"),  # type: ignore[arg-type]
             db=None,  # type: ignore[arg-type]

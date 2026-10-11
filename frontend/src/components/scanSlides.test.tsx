@@ -194,6 +194,30 @@ describe("StrategyScan", () => {
     expect(html).not.toContain('data-testid="strategy-metrics"');
   });
 
+  it("keeps the full strategy layout when a named structure has no legs", () => {
+    const html = renderToStaticMarkup(
+      <StrategyScan
+        symbol="INTC"
+        expiry="2026-10-19"
+        initial={{
+          title: "Strategy",
+          tradeable: false,
+          selected_strategy: "Bull Put Spread (credit)",
+          composite_score: 57.3,
+          why_recommended: "Leg count 0 does not match the Bull Put Spread (credit) template (2).",
+          how_to_execute: "Review the chain for this expiry.",
+          what_is_this: "A credit put spread.",
+          metrics: { max_loss: null, max_profit: null, net_debit_credit: null, net_type: null, breakevens: [], legs: [] },
+        }}
+      />,
+    );
+    expect(html).toContain("Bull Put Spread (credit)");
+    expect(html).toContain('data-testid="strategy-why"');
+    expect(html).toContain('data-testid="strategy-how"');
+    expect(html).not.toContain('data-testid="strategy-not-tradeable"');
+    expect(html).not.toContain("Execution status");
+  });
+
   it("shows the structure, payoff, and eligibility line for a scored recommendation", () => {
     const html = renderToStaticMarkup(
       <StrategyScan

@@ -8,7 +8,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
@@ -137,7 +137,7 @@ def _bind_device(request: Request, response: Response, settings: Settings) -> st
 
 
 def otp_skip_active(verified_at: datetime, now: datetime) -> bool:
-    """Fresh-login skip. Weekends and full-day holidays still require a code."""
+    """Same device, within 24 hours of the last successful code. Later logins do not extend it."""
     return login_skips_otp(verified_at, now)
 
 
@@ -177,10 +177,19 @@ async def _resolve_user(db: AsyncSession, identifier: str) -> User | None:
     ident = identifier.strip()
     if not ident:
         return None
-    user = await db.scalar(select(User).where(User.username == ident))
+    user = await db.scalar(select(User).where(func.lower(User.username) == ident.lower()))
     if user:
         return user
-    return await db.scalar(select(User).where(User.email == ident.lower()))
+    return await db.scalar(select(User).where(func.lower(User.email) == ident.lower()))
+
+
+def _email_hint(email: str) -> str:
+    """Mailbox hint safe to show in the UI. Never the full address."""
+    raw = email.strip()
+    local, sep, domain = raw.partition("@")
+    if not sep or not local or not domain or any(ch.isspace() for ch in raw):
+        return "the address on this account"
+    return f"{local[0]}***@{domain}"
 
 
 async def _email_login_code(
@@ -189,9 +198,10 @@ async def _email_login_code(
     db: AsyncSession,
     *,
     force_new: bool = False,
-) -> None:
+) -> bool:
     """Mail one sign-in code to this account. No session is created.
 
+    Returns True when a pending code was reused and no new letter was sent.
     A pending code issued in the last 45 seconds is reused and not mailed again.
     ``force_new`` is the explicit resend: it replaces that code and sends once.
     """
@@ -207,7 +217,7 @@ async def _email_login_code(
     )
     if claim.code is None:
         logger.info("Sign-in code already pending; email not sent again")
-        return
+        return True
     sent = await send_login_code(
         settings,
         full_name=user.full_name or "",
@@ -217,6 +227,7 @@ async def _email_login_code(
     if not sent:
         await invalidate_login_code(settings, user.username, code=claim.code, db=db)
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, SIGNIN_CODE_NOT_SENT)
+    return False
 
 
 async def _issue_session(
@@ -312,7 +323,7 @@ async def login(
     response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    user = await db.scalar(select(User).where(User.username == body.username))
+    user = await _resolve_user(db, body.username)
     ok = bool(user and verify_password(body.password, user.password_hash))
     db.add(
         LoginAudit(
@@ -342,13 +353,15 @@ async def login(
         payload = token.model_dump()
         payload["otp_required"] = False
         return payload
-    await _email_login_code(user, settings, db)
+    reused = await _email_login_code(user, settings, db)
     return {
         "ok": True,
         "username": user.username,
         "account_mode": user.account_mode,
         "otp_required": True,
         "ttl_seconds": LOGIN_CODE_TTL_SECONDS,
+        "code_reused": reused,
+        "email_hint": _email_hint(user.email or ""),
     }
 
 
@@ -358,11 +371,17 @@ async def resend_login_code(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> dict:
-    user = await db.scalar(select(User).where(User.username == body.username))
+    user = await _resolve_user(db, body.username)
     if not user or not verify_password(body.password, user.password_hash):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid username or password")
     await _email_login_code(user, settings, db, force_new=True)
-    return {"ok": True, "ttl_seconds": LOGIN_CODE_TTL_SECONDS}
+    return {
+        "ok": True,
+        "username": user.username,
+        "ttl_seconds": LOGIN_CODE_TTL_SECONDS,
+        "code_reused": False,
+        "email_hint": _email_hint(user.email or ""),
+    }
 
 
 @router.post("/otp/request")
@@ -371,7 +390,7 @@ async def otp_request(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> dict:
-    user = await db.scalar(select(User).where(User.username == body.username))
+    user = await _resolve_user(db, body.username)
     if not user:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown username")
     code = await issue_otp(settings, user.username, db=db)
@@ -386,7 +405,7 @@ async def otp_verify(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> TokenResponse:
-    user = await db.scalar(select(User).where(User.username == body.username))
+    user = await _resolve_user(db, body.username)
     if not user:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown username")
     if not await verify_otp(settings, user.username, body.code, db=db):
@@ -437,6 +456,7 @@ async def forgot_password_verify(
     user.password_hash = pending_hash
     now = datetime.now(timezone.utc)
     device_id = _bind_device(request, response, settings)
+    await db.execute(update(OtpDevice).where(OtpDevice.user_id == user.id).values(otp_verified_at=None))
     await _remember_otp_verification(db, user.id, device_id, now)
     await db.commit()
     await db.refresh(user)
