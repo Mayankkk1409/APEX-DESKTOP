@@ -1,3 +1,4 @@
+import { fmtBalance, fmtMoney as fmtSignedMoney } from "../lib/portfolioFormat";
 import { formatCompositeScore } from "../lib/scoreFormat";
 import { breakevenIvAssumptionNote, formatBreakevens, formatStrategyPremium } from "../lib/strategyFormat";
 import { normalizeStrategyName } from "../lib/strategyDisplay";
@@ -24,22 +25,20 @@ function PayoffGrid({ legCount, metrics }: { legCount: number; metrics: Strategy
   const grid = metrics.payoff_grid ?? [];
   const countLabel = legCount > 0 ? `${legCount}-leg ` : "";
   return (
-    <table className="st-legs" data-testid="strategy-payoff-grid">
-      <thead>
-        <tr>
-          <th>Underlying</th>
-          <th>{countLabel}P&amp;L at front expiry</th>
-        </tr>
-      </thead>
-      <tbody>
+    <div className="payoff-board" data-testid="strategy-payoff-grid">
+      <div className="payoff-board-legend">
+        <span>Underlying</span>
+        <span>{countLabel}P&amp;L at front expiry</span>
+      </div>
+      <div className="payoff-board-rows">
         {grid.map((point) => (
-          <tr key={point.underlying}>
-            <td>{fmtMoney(point.underlying)}</td>
-            <td>{fmtMoney(point.pnl)}</td>
-          </tr>
+          <div className="payoff-pair" key={point.underlying}>
+            <span>{fmtBalance(point.underlying)}</span>
+            <span className={point.pnl > 0 ? "num-up" : point.pnl < 0 ? "num-down" : ""}>{fmtSignedMoney(point.pnl)}</span>
+          </div>
         ))}
-      </tbody>
-    </table>
+      </div>
+    </div>
   );
 }
 

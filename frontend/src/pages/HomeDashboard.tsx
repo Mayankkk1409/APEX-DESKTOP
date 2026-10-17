@@ -5,6 +5,7 @@ import { ApexWordmark } from "../components/ApexWordmark";
 import { LogoutButton } from "../components/LogoutButton";
 import { SettingsGearLink } from "../components/SettingsGearLink";
 import type { BrokerageBalance } from "../lib/brokerageApi";
+import { timezoneDisplayLabel } from "../lib/timezoneLabel";
 import { useSession } from "../store";
 
 /** Names taken from the symbol catalog. This is a featured list, not a popularity ranking. */
@@ -25,7 +26,6 @@ function money(value: number | null | undefined): string {
 export function HomeDashboard() {
   const nav = useNavigate();
   const setSymbol = useSession((s) => s.setSymbol);
-  const user = useSession((s) => s.user);
   const watch = useQuery({ queryKey: ["watch"], queryFn: () => api.watchlist() });
   const accounts = useQuery({
     queryKey: ["brokerage", "accounts"],
@@ -46,7 +46,6 @@ export function HomeDashboard() {
     nav("/app");
   }
 
-  const paperMode = user?.account_mode !== "real_brokerage";
   const brokerConnected = (accounts.data?.accounts?.length ?? 0) > 0 || accounts.data?.connection_status === "connected";
   const brokerBalance = brokerBook.data;
 
@@ -67,14 +66,13 @@ export function HomeDashboard() {
           </p>
           <p className="text-sm text-faint">
             {session.data ? (session.data.trading_day ? "Trading day" : "Not a trading day") : "—"}
-            {session.data?.timezone ? ` · ${session.data.timezone}` : ""}
+            {session.data?.timezone ? ` · ${timezoneDisplayLabel(session.data.timezone)}` : ""}
           </p>
         </section>
 
         <section className="rounded-xl border border-line bg-panel p-4" data-testid="home-accounts">
           <h2 className="text-sm uppercase tracking-widest text-bronze">Accounts</h2>
-          {paperMode ? (
-            <div className="mt-3" data-testid="home-paper">
+          <div className="mt-3" data-testid="home-paper">
               <p className="text-xs uppercase tracking-wider text-faint">Paper</p>
               <dl className="mt-1 space-y-1 text-sm">
                 <div className="flex justify-between">
@@ -90,8 +88,7 @@ export function HomeDashboard() {
                   <dd className="apex-num">{money(paper.data?.portfolio_value)}</dd>
                 </div>
               </dl>
-            </div>
-          ) : null}
+          </div>
           <div className="mt-3" data-testid="home-brokerage">
             <p className="text-xs uppercase tracking-wider text-faint">Brokerage · read only</p>
             {brokerConnected && brokerBalance ? (

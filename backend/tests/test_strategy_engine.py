@@ -378,12 +378,10 @@ def test_risk_profile_changes_best_match_when_both_structures_eligible() -> None
     conservative = select_strategy(**_BOTH_ELIGIBLE, risk_profile="conservative")
     aggressive = select_strategy(**_BOTH_ELIGIBLE, risk_profile="aggressive")
     moderate = select_strategy(**_BOTH_ELIGIBLE, risk_profile="moderate")
-    custom = select_strategy(**_BOTH_ELIGIBLE, risk_profile="custom")
     assert conservative == "Married Put"
     assert aggressive == "Bull Call Spread"
     assert conservative != aggressive
     assert moderate == aggressive
-    assert custom == moderate
 
 
 def test_aggressive_promotes_debit_ahead_of_higher_scored_neutral_income() -> None:
@@ -398,20 +396,51 @@ def test_aggressive_promotes_debit_ahead_of_higher_scored_neutral_income() -> No
     assert order_candidates_for_risk_profile(ranked, "conservative")[0].name == "Short Iron Condor"
 
 
-def test_custom_honors_structure_limits_when_stored() -> None:
+def test_close_score_executability_does_not_cross_a_profile_band() -> None:
+    from app.services.scan_engine import _promote_close_executable
+    from app.services.strategy_recommendation import StrategyCandidate, StrategyRecommendation
+
+    decision = StrategyRecommendation(
+        best_match="Short Iron Condor",
+        tier="watchlist",
+        score=80,
+        auto_exec_eligible=False,
+        candidates=[
+            StrategyCandidate("Short Iron Condor", 80, "candidate", True),
+            StrategyCandidate("Bull Call Spread", 78, "candidate", True),
+        ],
+        risk_profile="conservative",
+    )
+    blocked = {"placeable": False, "tradeable": False, "auto_exec_blocked": True}
+    name, _layer = _promote_close_executable(
+        "Short Iron Condor",
+        blocked,
+        decision,
+        build=lambda strategy_name: {"placeable": True, "tradeable": True, "auto_exec_blocked": False, "selected_strategy": strategy_name},
+    )
+    assert name == "Short Iron Condor"
+
+
+def test_unresolved_custom_profile_does_not_recommend() -> None:
+    from app.services.strategy_engine import strategy_decision
+    from app.services.strategy_recommendation import PROFILE_SELECTION_LABEL, PROFILE_SELECTION_REASON
+
     rich = {**_BOTH_ELIGIBLE, "iv": 0.40, "hv": 0.22, "vol_signal": "sell_premium"}
-    limited = select_strategy(
+    decision = strategy_decision(
         **rich,
         risk_profile="custom",
         structure_limits=frozenset({"Short Iron Condor"}),
     )
-    assert limited == "Short Iron Condor"
-    assert select_strategy(**_BOTH_ELIGIBLE, risk_profile="custom") == select_strategy(
-        **_BOTH_ELIGIBLE, risk_profile="moderate"
-    )
+    assert decision.best_match == PROFILE_SELECTION_LABEL
+    assert decision.auto_exec_eligible is False
+    assert decision.gate_reason == PROFILE_SELECTION_REASON
+    assert decision.leg_structure is None
+    assert decision.candidates == []
+    moderate = select_strategy(**_BOTH_ELIGIBLE, risk_profile="moderate")
+    assert decision.best_match != moderate
 
 
-@pytest.mark.parametrize("profile", ["conservative", "moderate", "aggressive", "custom"])
+@pytest.mark.parametrize("profile", ["conservative", "moderate", "aggressive"])
 def test_failed_composite_gate_is_no_trade_for_every_profile(profile: str) -> None:
     label = select_strategy(
         composite=40.0,
@@ -428,7 +457,7 @@ def test_failed_composite_gate_is_no_trade_for_every_profile(profile: str) -> No
     assert label in {"Bull Call Spread", "Married Put", "APEX Benchmark Greeks Strategy"}
 
 
-@pytest.mark.parametrize("profile", ["conservative", "moderate", "aggressive", "custom"])
+@pytest.mark.parametrize("profile", ["conservative", "moderate", "aggressive"])
 def test_iv_above_135x_keeps_the_ranked_structure(profile: str) -> None:
     from app.services.strategy_engine import strategy_decision
 

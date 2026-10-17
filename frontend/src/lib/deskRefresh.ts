@@ -15,6 +15,12 @@ type OrderList = { orders?: OrderHistoryRow[] };
 export const DESK_STALE_MS = 20_000;
 
 /**
+ * Daily P&L refresh. Quotes are indicative or polled, not a tick stream.
+ * 15 seconds is inside a normal quote rate limit and pauses while the tab is hidden.
+ */
+export const DAY_PNL_REFRESH_MS = 15_000;
+
+/**
  * Pull portfolio, positions, orders, P&L, daily P&L, and the equity graph immediately.
  * The book, daily P&L, and graph start together — none waits on the others.
  * Inactive portfolio queries are fetched too, so a fill is not waiting on a poll.

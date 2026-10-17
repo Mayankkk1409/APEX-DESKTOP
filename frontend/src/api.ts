@@ -145,6 +145,7 @@ async function refreshAccessToken(): Promise<string | null> {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(8000),
       });
     } catch {
       // A transport blip is not an invalid session. Keep the current access token
@@ -217,7 +218,9 @@ async function req<T>(path: string, init: RequestInit = {}, retried = false): Pr
       /* ignore */
     }
     if (res.status >= 500 && (detail === "Internal Server Error" || detail === res.statusText)) {
-      detail = "Brokerage service error. Try Refresh — if it persists, restart the backend.";
+      detail = path.includes("/brokerage")
+        ? "Brokerage service error. Try Refresh — if it persists, restart the backend."
+        : "The request failed. Try again. Nothing was changed.";
     }
     if (res.status === 401 && !ANONYMOUS_AUTH.has(path)) {
       const expired = typeof detail === "string" && detail.includes("Sign-in verification expired");
@@ -274,7 +277,10 @@ export const api = {
       first_login: boolean;
       account_mode: string;
       show_connect_modal: boolean;
+      platform_tour?: boolean;
     }>("/auth/otp/verify", { method: "POST", body: JSON.stringify({ username, code }) }),
+  completePlatformTour: () =>
+    req<import("./types").User>("/auth/platform-tour/complete", { method: "POST", body: JSON.stringify({}) }),
   forgotPassword: (username: string, password: string, confirm_password: string) =>
     req<{ ok: boolean; ttl_seconds: number; autofill: boolean; code: string | null }>("/auth/forgot-password", {
       method: "POST",
@@ -383,13 +389,54 @@ export const api = {
       { method: "POST" },
     ),
   orderHistory: () => req<{ orders: import("./types").OrderHistoryRow[] }>("/api/orders"),
+  sessionNotices: () =>
+    req<{
+      market_day: string;
+      closed_today: {
+        id: string;
+        symbol: string;
+        side: string;
+        qty: number;
+        fill_price: number | null;
+        basis?: number | null;
+        kind?: string;
+      }[];
+      executed_today: {
+        id: string;
+        symbol: string;
+        strategy_name: string | null;
+        side: string;
+        qty: number;
+        fill_price: number | null;
+      }[];
+    }>("/api/session-notices"),
+  ackClosedSessionNotices: (ids: string[]) =>
+    req<{ acked: number }>("/api/session-notices/ack-closed", {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    }),
+  executionNotices: () =>
+    req<{
+      notices: { id: string; symbol: string; strategy_name: string | null; side: string; qty: number; fill_price: number | null }[];
+    }>("/api/orders/execution-notices"),
+  ackExecutionNotices: (ids: string[]) =>
+    req<{ acked: number }>("/api/orders/execution-notices/ack", {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    }),
   cancelQueuedOrder: (id: string) =>
     req<{ id: string; status: string }>(`/api/orders/queued/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
+  removeQueuedOrder: (id: string) =>
+    req<{ id: string; status: string }>(`/api/orders/queued/${encodeURIComponent(id)}/remove`, { method: "POST" }),
   order: (body: Record<string, unknown>) => req("/api/orders", { method: "POST", body: JSON.stringify(body) }),
-  scan: (snapshot: ChartSnapshot, expiry?: string) =>
+  scan: (snapshot: ChartSnapshot, expiry?: string, researchMode?: "options" | "equity") =>
     req("/scan", {
       method: "POST",
-      body: JSON.stringify({ snapshot, expiry }),
+      body: JSON.stringify({
+        snapshot,
+        expiry,
+        ...(researchMode === "equity" ? { research_mode: "equity" } : {}),
+      }),
     }),
   recentScans: () =>
     req<{ scans: { id: string; symbol: string; composite_score: number | null; created_at: string | null }[] }>("/scan/recent"),
@@ -449,9 +496,10 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({
         auto_execution_threshold: body.autoExecMinScore,
-        risk_profile: body.riskProfile,
+        ...(body.riskProfile === "conservative" || body.riskProfile === "moderate" || body.riskProfile === "aggressive"
+          ? { risk_profile: body.riskProfile }
+          : {}),
         max_risk_per_trade_pct: body.maxRiskPerTradePct,
-        max_positions: body.maxPositions,
         theme_preference: body.theme,
       }),
     }).catch(() => ({ ok: false })),
@@ -468,5 +516,12 @@ export const api = {
     req<{ ok: boolean; deleted: boolean }>("/api/settings/account/delete", {
       method: "POST",
       body: JSON.stringify({ password: password ?? "" }),
+    }),
+  assistantEntitlement: () => req<import("./lib/assistantTypes").AssistantEntitlement>("/assistant/entitlement"),
+  assistantPlans: () => req<import("./lib/assistantTypes").AssistantPlansResponse>("/assistant/plans"),
+  assistantAsk: (message: string) =>
+    req<import("./lib/assistantTypes").AssistantAskResult>("/assistant/ask", {
+      method: "POST",
+      body: JSON.stringify({ message }),
     }),
 };

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractBrokerageDayPl, resolvePositionDayPl } from "./positionDayPl";
+import { extractBrokerageDayPl, holdingsDayNote, holdingsDayTotal, resolvePositionDayPl } from "./positionDayPl";
 
 describe("positionDayPl", () => {
   it("extracts vendor day P&L from brokerage position fields", () => {
@@ -27,5 +27,24 @@ describe("positionDayPl", () => {
 
   it("returns null when neither vendor nor quote data is available", () => {
     expect(resolvePositionDayPl({ qty: 1, day_pl: null }, null)).toBeNull();
+  });
+
+  it("sums only holdings that have a day figure and does not treat a gap as zero", () => {
+    const quotes = new Map<string, { change: number } | null>([
+      ["AAA", { change: 2 }],
+      ["BBB", null],
+    ]);
+    const total = holdingsDayTotal(
+      [
+        { symbol: "AAA", qty: 3, day_pl: null },
+        { symbol: "BBB", qty: 1, day_pl: null },
+        { symbol: "CCC", qty: 4, day_pl: 5 },
+      ],
+      quotes,
+    );
+    expect(total).toEqual({ total: 11, covered: 2, missing: 1 });
+    expect(holdingsDayNote(total!)).toContain("not Overall P&L");
+    expect(holdingsDayNote(total!)).toContain("1 open holding");
+    expect(holdingsDayTotal([], quotes)).toBeNull();
   });
 });

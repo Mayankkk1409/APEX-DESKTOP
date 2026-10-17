@@ -202,6 +202,25 @@ def test_chain_best_ratio_is_not_the_bought_contract() -> None:
     assert ratio != 45.0
 
 
+def test_a_past_earnings_date_is_not_flagged() -> None:
+    blocked, note = earnings_position_note("Long Call", days=-1, confirmed=True)
+    assert blocked is False
+    assert note is None
+    decision = strategy_decision(
+        composite=90.0,
+        direction="bullish",
+        vol_signal="fair",
+        iv=0.25,
+        hv=0.25,
+        tech_score=80.0,
+        auto_exec_threshold=40.0,
+        catalyst_days=-1,
+        earnings_date_confirmed=True,
+    )
+    assert "within 1 day" not in " ".join(decision.risk_notes)
+    assert decision.auto_exec_eligible is True
+
+
 def test_confirmed_earnings_inside_one_day_blocks_auto_execute() -> None:
     blocked, note = earnings_position_note("APEX Benchmark Greeks Strategy", days=1, confirmed=True)
     assert blocked is True

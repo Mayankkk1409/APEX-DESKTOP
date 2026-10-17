@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, useQueries } from "@tanstack/react-query";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
@@ -14,13 +14,22 @@ import { useAccountOverallPnl } from "../hooks/useAccountOverallPnl";
 import { useBrokerage } from "../hooks/useBrokerage";
 import { defaultAccountLabel, usePositionCertificate } from "../hooks/usePositionCertificate";
 import { daysForPosition } from "../lib/dailyPnl";
-import { DESK_STALE_MS, refreshDeskQueries } from "../lib/deskRefresh";
+import { DAY_PNL_REFRESH_MS, DESK_STALE_MS, refreshDeskQueries } from "../lib/deskRefresh";
 import { filterPnlPoints, type PnlTimeframe } from "../lib/pnlTimeframe";
 import { assetLabel, fmtBalance, fmtMoney, fmtPlain, fmtTs } from "../lib/portfolioFormat";
-import { isRiskProfile, patchUserSettings, readUserSettings, type RiskProfile } from "../lib/userSettings";
+import {
+  isRiskProfile,
+  patchUserSettings,
+  readRiskSelection,
+  RISK_PROFILE_SELECTION_NOTE,
+  selectionFromServer,
+  type RiskProfile,
+} from "../lib/userSettings";
 import { useSession } from "../store";
 import { formatOptionExpiration, parseOccSymbol } from "../lib/optionSymbolParse";
-import type { OrderHistoryRow, PositionRow } from "../types";
+import { holdingsDayTotal } from "../lib/positionDayPl";
+import { isPendingOrder, orderHistoryStatus, pendingReason, pendingStatusLabel } from "../lib/orderRefusal";
+import type { OrderHistoryRow, PositionRow, Quote } from "../types";
 
 function Collapsible({
   title,
@@ -64,16 +73,17 @@ export function Portfolio() {
     accountLabel: defaultAccountLabel(user, !brokerage.usingBrokerage),
   });
   const [chartTimeframe, setChartTimeframe] = useState<PnlTimeframe>("MAX");
-  const [riskProfile, setRiskProfile] = useState<RiskProfile>(() => readUserSettings().riskProfile);
+  const initialRisk = readRiskSelection();
+  const [riskProfile, setRiskProfile] = useState<RiskProfile | "">(initialRisk.profile);
+  const [profileSelectionRequired, setProfileSelectionRequired] = useState(initialRisk.selectionRequired);
 
   useEffect(() => {
     let cancelled = false;
     void api.getSettings().then((raw) => {
       if (cancelled || !raw || typeof raw !== "object") return;
-      const profile = (raw as { risk_profile?: unknown }).risk_profile;
-      if (!isRiskProfile(profile)) return;
-      const next = patchUserSettings({ riskProfile: profile });
-      setRiskProfile(next.riskProfile);
+      const next = selectionFromServer((raw as { risk_profile?: unknown }).risk_profile);
+      setRiskProfile(next.profile);
+      setProfileSelectionRequired(next.selectionRequired);
     });
     return () => {
       cancelled = true;
@@ -83,7 +93,10 @@ export function Portfolio() {
   function onRiskProfileChange(nextProfile: RiskProfile) {
     const next = patchUserSettings({ riskProfile: nextProfile });
     setRiskProfile(next.riskProfile);
-    void api.syncSettings(next);
+    setProfileSelectionRequired(false);
+    void api.syncSettings(next).then(() => {
+      void qc.invalidateQueries({ queryKey: ["scans-recent"] });
+    });
   }
 
   const usingBrokerage = brokerage.usingBrokerage;
@@ -92,7 +105,9 @@ export function Portfolio() {
     queryKey: ["port"],
     queryFn: () => api.portfolio(),
     enabled: !usingBrokerage,
-    staleTime: DESK_STALE_MS,
+    staleTime: 5_000,
+    refetchInterval: DAY_PNL_REFRESH_MS,
+    refetchIntervalInBackground: false,
   });
   const paperPnlHistory = useQuery({
     queryKey: ["pnl-history"],
@@ -106,7 +121,9 @@ export function Portfolio() {
     queryFn: () => api.dailyPnl(),
     enabled: !usingBrokerage,
     retry: 2,
-    staleTime: DESK_STALE_MS,
+    staleTime: 5_000,
+    refetchInterval: DAY_PNL_REFRESH_MS,
+    refetchIntervalInBackground: false,
   });
   const brokerageEquityHistory = useQuery({
     queryKey: ["brokerage", "equity-history", brokerage.activeAccountId],
@@ -120,12 +137,16 @@ export function Portfolio() {
     queryKey: ["pos"],
     queryFn: () => api.positions(),
     enabled: !usingBrokerage,
-    staleTime: DESK_STALE_MS,
+    staleTime: 5_000,
+    refetchInterval: DAY_PNL_REFRESH_MS,
+    refetchIntervalInBackground: false,
   });
   const paperOrders = useQuery({
     queryKey: ["orders"],
     queryFn: () => api.orderHistory(),
     enabled: !usingBrokerage,
+    refetchInterval: DAY_PNL_REFRESH_MS,
+    refetchIntervalInBackground: false,
   });
   const brokerageOrders = useQuery({
     queryKey: ["brokerage", "orders", brokerage.activeAccountId],
@@ -135,6 +156,12 @@ export function Portfolio() {
 
   const cancelQueued = useMutation({
     mutationFn: (id: string) => api.cancelQueuedOrder(id),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["orders"] });
+    },
+  });
+  const removeQueued = useMutation({
+    mutationFn: (id: string) => api.removeQueuedOrder(id),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["orders"] });
     },
@@ -176,12 +203,8 @@ export function Portfolio() {
   const orderRows: OrderHistoryRow[] = usingBrokerage
     ? ((brokerageOrders.data?.orders as OrderHistoryRow[] | undefined) ?? [])
     : ((paperOrders.data?.orders as OrderHistoryRow[] | undefined) ?? []);
-  const queuedRows = usingBrokerage
-    ? []
-    : orderRows.filter((row) => row.status === "queued" || row.status === "submitting" || row.status === "unknown");
-  const historyRows = usingBrokerage
-    ? orderRows
-    : orderRows.filter((row) => row.status !== "queued" && row.status !== "submitting" && row.status !== "unknown");
+  const queuedRows = usingBrokerage ? [] : orderRows.filter((row) => isPendingOrder(row));
+  const historyRows = usingBrokerage ? orderRows : orderRows.filter((row) => !isPendingOrder(row));
   const historyOverall =
     usingBrokerage && rawPoints.length > 0 ? (rawPoints[rawPoints.length - 1]?.cumulative_pl ?? null) : null;
   const displayedOverall = usingBrokerage ? historyOverall : accountPnl.total;
@@ -189,6 +212,32 @@ export function Portfolio() {
   const overallRows = accountPnl.rows;
   const overallLoading = accountPnl.loading;
   const totalPnl = displayedOverall;
+  const positionSymbols = useMemo(
+    () => [...new Set(openPositions.map((p) => p.symbol))],
+    [openPositions],
+  );
+  const positionQuoteQueries = useQueries({
+    queries: positionSymbols.map((sym) => ({
+      queryKey: ["quote", sym],
+      queryFn: () => api.quote(sym),
+      staleTime: 5_000,
+      refetchInterval: DAY_PNL_REFRESH_MS,
+      refetchIntervalInBackground: false,
+      enabled: usingBrokerage && brokerage.stats?.day_pnl == null && positionSymbols.length > 0,
+    })),
+  });
+  const quoteBySymbol = useMemo(() => {
+    const map = new Map<string, Quote>();
+    positionSymbols.forEach((sym, i) => {
+      const row = positionQuoteQueries[i]?.data;
+      if (row) map.set(sym, row);
+    });
+    return map;
+  }, [positionSymbols, positionQuoteQueries]);
+  const holdingsDay =
+    usingBrokerage && brokerage.stats?.day_pnl == null ? holdingsDayTotal(openPositions, quoteBySymbol) : null;
+  const shownDayPnl = brokerage.stats?.day_pnl ?? holdingsDay?.total ?? null;
+  const dayPnlLabel = holdingsDay ? "Holdings Daily P&L" : "Daily P&L";
   const loadError =
     summary.error?.message ??
     historyQuery.error?.message ??
@@ -223,20 +272,22 @@ export function Portfolio() {
             <p className="mt-1 text-sm" data-testid="portfolio-header-pnl">
               <span
                 className={
-                  brokerage.stats?.day_pnl == null
+                  shownDayPnl == null
                     ? "text-faint"
-                    : brokerage.stats.day_pnl > 0
+                    : shownDayPnl > 0
                       ? "num-up"
-                      : brokerage.stats.day_pnl < 0
+                      : shownDayPnl < 0
                         ? "num-down"
                         : ""
                 }
               >
-                Daily P&amp;L{" "}
-                {brokerage.stats?.day_pnl == null
+                {dayPnlLabel}{" "}
+                {shownDayPnl == null
                   ? "Unavailable"
-                  : `${fmtMoney(brokerage.stats.day_pnl)}${
-                      brokerage.balance?.day_pnl_percent != null ? ` (${brokerage.balance.day_pnl_percent.toFixed(2)}%)` : ""
+                  : `${fmtMoney(shownDayPnl)}${
+                      brokerage.stats?.day_pnl != null && brokerage.balance?.day_pnl_percent != null
+                        ? ` (${brokerage.balance.day_pnl_percent.toFixed(2)}%)`
+                        : ""
                     }`}
               </span>
               <span className="text-faint"> · </span>
@@ -287,14 +338,14 @@ export function Portfolio() {
           )}
           {usingBrokerage && (
             <div className="mt-3 rounded-xl border border-line bg-panel px-4 py-3" data-testid="brokerage-daily-pnl">
-              <p className="text-[10px] uppercase tracking-wider text-bronze">Daily P&amp;L</p>
+              <p className="text-[10px] uppercase tracking-wider text-bronze">{dayPnlLabel}</p>
               <p
                 className={`mt-1 font-mono text-sm ${
-                  brokerage.stats?.day_pnl == null
+                  shownDayPnl == null
                     ? "text-faint"
-                    : brokerage.stats.day_pnl > 0
+                    : shownDayPnl > 0
                       ? "num-up"
-                      : brokerage.stats.day_pnl < 0
+                      : shownDayPnl < 0
                         ? "num-down"
                         : "text-champagne"
                 }`}
@@ -302,14 +353,9 @@ export function Portfolio() {
               >
                 {brokerage.balance == null
                   ? "Loading…"
-                  : brokerage.stats?.day_pnl == null
+                  : shownDayPnl == null
                     ? "Unavailable"
-                    : fmtMoney(brokerage.stats.day_pnl)}
-              </p>
-              <p className="mt-1 text-xs text-faint">
-                {brokerage.balance?.day_pnl_note ||
-                  "SnapTrade’s 1-day account return, in dollars of current equity. This is not Overall P&L."}
-                {brokerage.balance?.as_of_timestamp ? ` As of ${fmtTs(brokerage.balance.as_of_timestamp)} local time.` : ""}
+                    : fmtMoney(shownDayPnl)}
               </p>
             </div>
           )}
@@ -410,12 +456,12 @@ export function Portfolio() {
           )}
         </Collapsible>
 
-        <Collapsible title="Queued" testId="portfolio-queued-section" defaultOpen>
+        <Collapsible title="Pending orders" testId="portfolio-queued-section" defaultOpen>
           {ordersLoading ? (
-            <p className="mt-3 text-sm text-faint">Loading queued orders…</p>
+            <p className="mt-3 text-sm text-faint">Loading pending orders…</p>
           ) : queuedRows.length === 0 ? (
             <p className="mt-3 text-sm text-faint" data-testid="queued-empty">
-              No orders are waiting for a price.
+              No orders are waiting.
             </p>
           ) : (
             <div className="apex-table-wrap">
@@ -438,19 +484,38 @@ export function Portfolio() {
                       <td className="font-mono">{o.symbol}</td>
                       <td className="apex-num">{fmtPlain(o.qty)}</td>
                       <td>
-                        Queued
-                        {o.queue_reason ? <p className="text-xs text-faint">{o.queue_reason}</p> : null}
+                        {pendingStatusLabel(o)}
+                        {pendingReason(o) ? <p className="text-xs text-faint">{pendingReason(o)}</p> : null}
                       </td>
                       <td>
-                        {o.status === "queued" ? (
+                        {o.status === "queued" && !/broker already has|broker received|has not confirmed a fill/i.test(o.queue_reason || "") ? (
                           <button
                             type="button"
                             className="text-gold"
                             data-testid={`cancel-queued-${o.id}`}
                             disabled={cancelQueued.isPending}
-                            onClick={() => cancelQueued.mutate(o.id)}
+                            onClick={() => {
+                              if (
+                                window.confirm(
+                                  "Cancel this waiting order? It has not been sent, and it will not be sent later.",
+                                )
+                              ) {
+                                cancelQueued.mutate(o.id);
+                              }
+                            }}
                           >
                             Cancel
+                          </button>
+                        ) : null}
+                        {o.status === "rejected" || o.status === "expired" || o.status === "canceled" ? (
+                          <button
+                            type="button"
+                            className="text-gold"
+                            data-testid={`remove-queued-${o.id}`}
+                            disabled={removeQueued.isPending}
+                            onClick={() => removeQueued.mutate(o.id)}
+                          >
+                            Remove
                           </button>
                         ) : null}
                       </td>
@@ -470,6 +535,13 @@ export function Portfolio() {
         >
           {ordersLoading ? (
             <p className="mt-3 text-sm text-faint">Loading orders…</p>
+          ) : (usingBrokerage ? brokerageOrders.error : paperOrders.error) ? (
+            <p className="mt-3 text-sm text-faint" data-testid="orders-error">
+              {(usingBrokerage ? brokerageOrders.error : paperOrders.error) instanceof Error
+                ? (usingBrokerage ? brokerageOrders.error : paperOrders.error)?.message
+                : "Orders could not be loaded."}{" "}
+              This is not an empty account.
+            </p>
           ) : historyRows.length === 0 ? (
             <p className="mt-3 text-sm text-faint">
               {usingBrokerage ? "No brokerage orders in the available history." : "No orders yet."}
@@ -519,7 +591,7 @@ export function Portfolio() {
                       <td>{o.order_type || "market"}</td>
                       <td className="apex-num">{fmtPlain(o.limit_price)}</td>
                       <td className="apex-num">{fmtPlain(o.fill_price)}</td>
-                      <td>{o.status}</td>
+                      <td>{orderHistoryStatus(o.status)}</td>
                     </tr>
                   );
                 })}
@@ -535,15 +607,26 @@ export function Portfolio() {
             <select
               className="mt-1 w-full max-w-xs rounded-md border border-line bg-ink px-3 py-2 text-sm"
               data-testid="portfolio-risk-profile-select"
-              value={riskProfile}
-              onChange={(e) => onRiskProfileChange(e.target.value as RiskProfile)}
+              value={profileSelectionRequired ? "" : riskProfile}
+              onChange={(e) => {
+                if (isRiskProfile(e.target.value)) onRiskProfileChange(e.target.value);
+              }}
             >
+              {profileSelectionRequired ? (
+                <option value="" disabled>
+                  Select a risk profile
+                </option>
+              ) : null}
               <option value="conservative">Conservative</option>
               <option value="moderate">Moderate</option>
               <option value="aggressive">Aggressive</option>
-              <option value="custom">Custom</option>
             </select>
           </label>
+          {profileSelectionRequired ? (
+            <p className="mt-2 text-xs text-faint" data-testid="portfolio-risk-profile-required">
+              {RISK_PROFILE_SELECTION_NOTE}
+            </p>
+          ) : null}
           <p className="mt-2 text-xs text-faint">Same profile as Settings → Risk &amp; Auto-Execution. Scans use this Best Match preference.</p>
         </section>
 

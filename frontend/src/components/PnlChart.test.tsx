@@ -4,6 +4,7 @@ import { PnlChart } from "./PnlChart";
 
 vi.mock("lightweight-charts", () => ({
   ColorType: { Solid: "solid" },
+  LineType: { Simple: 0, WithSteps: 2 },
   AreaSeries: "AreaSeries",
   createChart: () => ({
     addSeries: () => ({ setData: vi.fn() }),
@@ -68,7 +69,7 @@ describe("PnlChart", () => {
     expect(html).toContain('data-chart-engine="apex-equity"');
     expect(html).toContain('data-testid="pnl-chart-canvas"');
     expect(html).toContain('data-testid="pnl-chart-overall-total"');
-    expect(html).toContain("Overall total P&amp;L");
+    expect(html).toContain("Overall P&amp;L");
     expect(html).toContain("+$3,000");
     expect(html).toContain("num-up");
     expect(html).not.toContain("<iframe");

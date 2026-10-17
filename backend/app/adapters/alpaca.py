@@ -249,18 +249,35 @@ class AlpacaAdapter:
         live = await get_live_quote(symbol, self.settings)
         if live.price is not None and str(live.source or "").lower() not in {"demo", "unavailable"}:
             return live
-        # A missing live quote is not a usable demo price.
+        # A missing live quote is not a usable demo price. A 404 asset is an
+        # unknown symbol. Any other miss is an outage, not a fabricated quote.
+        status_code, asset = await self._get_with_status(
+            self.settings.resolved_broker_base_url,
+            f"/v2/assets/{symbol.upper()}",
+        )
+        if status_code == 404:
+            origin = "not_found"
+        elif isinstance(asset, dict) and asset.get("symbol"):
+            origin = "unavailable"
+        else:
+            origin = "provider_unavailable"
         return Quote(
             symbol=symbol.upper(),
-            name=symbol.upper(),
+            name=str((asset or {}).get("name") or symbol.upper()) if isinstance(asset, dict) else symbol.upper(),
             price=None,
-            source="unavailable",
+            source=origin,
             status="unavailable",
             secondary_source=None,
         )
 
     async def bars(self, symbol: str, timeframe: str, limit: int = 400) -> list[dict]:
-        tf_map = {"1m": "1Min", "5m": "5Min", "15m": "15Min", "30m": "30Min", "1H": "1Hour", "4H": "4Hour", "1D": "1Day", "1W": "1Week"}
+        from app.analysis.timeframe import alpaca_timeframe, is_supported, resample_hours
+
+        if not is_supported(timeframe):
+            return []
+        native = alpaca_timeframe(timeframe)
+        if native is None:
+            return []
         # Alpaca returns only the most recent bar(s) unless ``start`` is set.
         lookback_days = {
             "1m": max(3, limit // (6 * 60) + 2),
@@ -274,9 +291,11 @@ class AlpacaAdapter:
         }
         symbol = symbol.upper()
         start = (datetime.now(timezone.utc) - timedelta(days=lookback_days.get(timeframe, 400))).strftime("%Y-%m-%d")
+        fetch_tf = native
+        fetch_limit = min(limit * 4, 10000) if timeframe == "4H" else min(limit, 10000)
         params = {
-            "timeframe": tf_map.get(timeframe, "1Day"),
-            "limit": min(limit, 10000),
+            "timeframe": fetch_tf,
+            "limit": fetch_limit,
             "adjustment": "raw",
             "start": start,
         }
@@ -300,16 +319,21 @@ class AlpacaAdapter:
             else:
                 raw = packed
         if raw and len(raw) >= 8:
-            return [
+            parsed = [
                 {"t": b.get("t"), "o": b.get("o"), "h": b.get("h"), "l": b.get("l"), "c": b.get("c"), "v": b.get("v")}
                 for b in raw
-            ][-limit:]
+            ]
+            if timeframe == "4H":
+                parsed = resample_hours(parsed, 4)
+            return parsed[-limit:]
         from app.services.live_quotes import yahoo_ohlc_bars
 
         ybars = await yahoo_ohlc_bars(symbol, timeframe, limit)
         if ybars:
             return ybars
-        return await self.demo.bars(symbol, timeframe, limit)
+        # An empty provider result is not replaced with a generated series.
+        # The demo generator stays available only on the demo adapter.
+        return []
 
     async def option_snapshot_bars(self, symbols: list[str]) -> dict[str, list[dict]]:
         """Previous and latest session closes for OCC symbols.
@@ -871,6 +895,34 @@ class AlpacaAdapter:
             logger.warning("Alpaca combo order error {}", exc)
             reason = str(exc).strip() or "Broker order failed"
             return {"status": "rejected", "rejected": True, "reason": reason, "venue": self._broker_venue()}
+
+    async def list_orders(self, *, status: str = "open", limit: int = 50) -> list[dict] | None:
+        """Broker orders, or None when the list cannot be read.
+
+        None is not an empty book. An empty list means the broker returned no rows.
+        """
+        if not self.settings.alpaca_keys_present:
+            return []
+        body = await self._get(
+            self.settings.resolved_broker_base_url,
+            "/v2/orders",
+            {"status": status, "limit": limit, "nested": "true", "direction": "desc"},
+        )
+        if body is None:
+            return None
+        if not isinstance(body, list):
+            return None
+        return [row for row in body if isinstance(row, dict)]
+
+    async def get_order(self, broker_order_id: str) -> dict | None:
+        """Current broker order, or None when the status cannot be read.
+
+        A missing response is not a cancel or a rejection.
+        """
+        if not broker_order_id or not self.settings.alpaca_keys_present:
+            return None
+        body = await self._get(self.settings.resolved_broker_base_url, f"/v2/orders/{broker_order_id}")
+        return body if isinstance(body, dict) else None
 
     async def submit_order(self, **kwargs) -> dict:
         strict = bool(kwargs.pop("strict", False))

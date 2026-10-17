@@ -51,6 +51,18 @@ def test_score_above_equal_and_below_the_minimum() -> None:
     assert below.eligible is False
     line = eligibility_sentence(84.9, 85, below)
     assert line == "Composite 84.9. Your minimum 85.0. Not auto-executable: composite is below your minimum."
+    from app.services.executability import displayed_below_minimum
+
+    assert displayed_below_minimum(49.94, 50) is True
+    assert displayed_below_minimum(49.96, 50) is False
+    assert can_auto_execute(
+        {"composite_score": 49.94, "executable": True, "validation_passed": True},
+        {"auto_execution_threshold": 50, "auto_execution_enabled": True},
+    ).eligible is False
+    assert can_auto_execute(
+        {"composite_score": 49.96, "executable": True, "validation_passed": True},
+        {"auto_execution_threshold": 50, "auto_execution_enabled": True},
+    ).eligible is True
     assert "Auto-execute eligible" not in line
     assert "NO TRADE" not in line
 

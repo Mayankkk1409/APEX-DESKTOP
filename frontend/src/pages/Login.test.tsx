@@ -16,14 +16,14 @@ describe("Login", () => {
     expect(html).toContain('id="login-username"');
   });
 
-  it("checks the refresh cookie before showing the form", () => {
+  it("shows the sign-in form without a session-restore gate", () => {
     const html = renderToStaticMarkup(
       <MemoryRouter>
         <Login />
       </MemoryRouter>,
     );
-    expect(html).toContain('data-testid="session-restore"');
-    expect(html).not.toContain('data-testid="login-form"');
+    expect(html).toContain('data-testid="login-form"');
+    expect(html).not.toContain("Restoring session");
   });
 
   it("sends a reload back to every signed-in screen", () => {

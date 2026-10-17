@@ -207,6 +207,28 @@ async def _none(*_a, **_k):
     return None
 
 
+def test_option_snapshot_keeps_bid_ask_and_does_not_invent_a_price() -> None:
+    parsed = lq.option_snapshot_fields(
+        {
+            "snapshots": {
+                "VZ261113C00042000": {
+                    "latestQuote": {"bp": 1.7, "ap": 1.78, "bs": 3, "as": 4, "t": "2026-10-12T15:50:00Z"},
+                    "latestTrade": {"p": 1.74, "t": "2026-10-12T15:50:01Z"},
+                }
+            }
+        },
+        "VZ261113C00042000",
+        "indicative",
+    )
+    assert parsed is not None
+    assert parsed["bid"] == 1.7
+    assert parsed["ask"] == 1.78
+    assert parsed["price"] == 1.74
+    assert parsed["quoted_at"] == "2026-10-12T15:50:00Z"
+    assert parsed["quote_feed"] == "indicative"
+    assert lq.option_snapshot_fields({"snapshots": {}}, "VZ261113C00042000", "indicative") is None
+
+
 def test_quote_bundle_carries_quote_meta() -> None:
     from datetime import datetime, timezone
 

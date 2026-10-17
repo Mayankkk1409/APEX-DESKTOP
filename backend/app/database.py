@@ -7,6 +7,7 @@ from pathlib import Path
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import NullPool
 
 from app.config import get_settings
 
@@ -16,9 +17,14 @@ class Base(DeclarativeBase):
 
 
 def _engine_kwargs(url: str) -> dict:
+    """SQLite file DBs use NullPool + WAL so a quote round-trip cannot pin the writer."""
     kwargs: dict = {"future": True}
     if url.startswith("sqlite"):
         kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
+        # One connection per checkout. A long-lived pooled connection that held a
+        # write lock across httpx would block sign-in until that call finished.
+        if ":memory:" not in url:
+            kwargs["poolclass"] = NullPool
     else:
         kwargs["pool_pre_ping"] = True
     return kwargs
@@ -29,21 +35,35 @@ engine = create_async_engine(settings.database_url, **_engine_kwargs(settings.da
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
-def _sqlite_busy_timeout(dbapi_connection, _record) -> None:
+def _sqlite_pragmas(dbapi_connection, _record) -> None:
+    """WAL lets readers proceed while a writer finishes. Busy wait covers short races."""
     cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
     cursor.execute("PRAGMA busy_timeout=30000")
+    cursor.execute("PRAGMA foreign_keys=ON")
     cursor.close()
 
 
 if settings.database_url.startswith("sqlite"):
     from sqlalchemy import event
 
-    event.listen(engine.sync_engine, "connect", _sqlite_busy_timeout)
+    event.listen(engine.sync_engine, "connect", _sqlite_pragmas)
 
 
 async def get_db() -> AsyncIterator[AsyncSession]:
     async with SessionLocal() as session:
         yield session
+
+
+async def release_db_lock(db: AsyncSession) -> None:
+    """End the open transaction before any network call.
+
+    SQLite holds the database file for the length of a write transaction. Quoting
+    Alpaca or Yahoo inside that window blocks sign-in, OTP, and every other write
+    until the HTTP call returns. Commit first, then call out.
+    """
+    await db.commit()
 
 
 def _run_alembic_migrations() -> None:
@@ -88,10 +108,21 @@ def _repair_sqlite_order_columns() -> None:
         if "broker_order_id" not in cols:
             conn.execute("ALTER TABLE orders ADD COLUMN broker_order_id VARCHAR(64)")
             conn.execute("CREATE INDEX IF NOT EXISTS ix_orders_broker_order_id ON orders (broker_order_id)")
+        if "settlement" not in cols:
+            conn.execute("ALTER TABLE orders ADD COLUMN settlement JSON")
+        if "users" in tables:
+            user_cols = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
+            if "platform_tour_seen" not in user_cols:
+                conn.execute(
+                    "ALTER TABLE users ADD COLUMN platform_tour_seen BOOLEAN NOT NULL DEFAULT 0"
+                )
+        # Persist WAL on the file itself so a cold process is not stuck in DELETE mode.
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.commit()
 
 
 async def init_db() -> None:
+    from app.models import assistant as _assistant  # noqa: F401
     from app.models import brokerage as _brokerage  # noqa: F401
     from app.models import otp_device as _otp_device  # noqa: F401
     from app.models import trading as _trading  # noqa: F401
@@ -109,3 +140,9 @@ async def init_db() -> None:
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    if settings.database_url.startswith("sqlite"):
+        from sqlalchemy import text
+
+        async with engine.connect() as conn:
+            mode = (await conn.execute(text("PRAGMA journal_mode"))).scalar()
+            logger.info("SQLite journal_mode={}", mode)

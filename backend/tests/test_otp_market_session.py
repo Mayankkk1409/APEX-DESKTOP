@@ -23,6 +23,7 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base, get_db
 from app.main import create_app
 from app.models.otp_device import OtpDevice
+from app.models.user import User
 from app.redis_client import reset_redis_for_tests
 from app.routers.auth import DEVICE_COOKIE, cookie_secure_for_request, otp_skip_active
 from app.services.login_verification import verification_current
@@ -265,6 +266,45 @@ async def test_verified_device_skips_until_the_next_regular_open(
     assert stale.status_code == 401
     assert stale.json()["detail"] == "Sign-in verification expired"
     assert len(sent) == 2
+
+
+@pytest.mark.asyncio
+async def test_login_after_the_open_asks_for_a_code_inside_24_hours(
+    api: tuple[AsyncClient, async_sessionmaker[AsyncSession]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sunday night's code is still inside 24 hours on Monday morning, but the open ended that session."""
+    client, session_factory = api
+    clock = {"now": _at(2026, 10, 12, 10, 25)}  # Monday after the 09:30 open
+    _install_clock(monkeypatch, clock)
+
+    async def _no_mail(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr("app.routers.auth.send_signup_confirmation", _no_mail)
+    sent = _capture(monkeypatch)
+    await _signup(client, "monday", "monday@example.com")
+    first = await client.post("/auth/login", json={"username": "monday", "password": _PASSWORD})
+    assert first.status_code == 200, first.text
+    device_id = _pin_device(client, first)
+    async with session_factory() as session:
+        user = await session.scalar(select(User).where(User.username == "monday"))
+        assert user is not None
+        session.add(
+            OtpDevice(user_id=user.id, device_id=device_id, otp_verified_at=_at(2026, 10, 11, 21, 0))
+        )
+        await session.commit()
+    assert otp_skip_active(_at(2026, 10, 11, 21, 0), clock["now"]) is True
+    assert verification_current(_at(2026, 10, 11, 21, 0), clock["now"]) is False
+    again = await client.post("/auth/login", json={"username": "monday", "password": _PASSWORD})
+    assert again.status_code == 200, again.text
+    body = again.json()
+    assert body["otp_required"] is True
+    assert "access_token" not in body
+    # The clock does not move, so the code from the first login is still inside
+    # the 45-second reuse window. Overnight that window has expired and a new
+    # letter is sent. Either way the screen asks for the code.
+    assert body["code_reused"] is True
+    assert len(sent) == 1
 
 
 @pytest.mark.asyncio

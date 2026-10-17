@@ -21,6 +21,16 @@ export const SCAN_SLIDE_LAYERS = [
   "risk_review",
 ] as const;
 
+/** Equity research slides. Options mode keeps SCAN_SLIDE_LAYERS. */
+export const EQUITY_SLIDE_LAYERS = [
+  "equity_technical",
+  "equity_sentiment",
+  "equity_fundamentals",
+  "equity_risk",
+  "equity_scores",
+  "equity_plan",
+] as const;
+
 /** Slides that own the left/right arrow keys for their own internal card carousel. */
 export const CAROUSEL_LAYERS: readonly string[] = ["technical", "options_chain_greeks", "volatility"];
 

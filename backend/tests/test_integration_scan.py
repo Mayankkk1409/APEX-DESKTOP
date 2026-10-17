@@ -172,6 +172,9 @@ async def test_scan_layers_risk_order_fill_balance(client: AsyncClient) -> None:
     selected = strategy["selected_strategy"]
     if "NO TRADE" in selected or not strategy.get("tradeable") or not strategy_legs:
         return
+    # The saved minimum is 85. A warmed 600-bar window can score under that and must not fill.
+    if float(data["composite_score"] or 0) < 85:
+        return
     assert strategy_legs
     order = await client.post(
         "/api/orders",

@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     smtp_from: str = ""
     smtp_starttls: bool = True
 
+    # Local Ollama only. The backend calls 127.0.0.1 on this computer.
+    # A cloud key is not used.
+    apex_ai_base_url: str = "http://127.0.0.1:11434"
+    apex_ai_model: str = "qwen2.5:7b"
+
     default_symbol: str = "SPX"
     splash_duration_ms: int = Field(default=3000, ge=2500, le=3500)
 
@@ -209,6 +214,10 @@ class Settings(BaseSettings):
     @property
     def snaptrade_configured(self) -> bool:
         return bool(self.snaptrade_client_id.strip() and self.snaptrade_consumer_key.strip() and self.encryption_key.strip())
+
+    @property
+    def apex_ai_configured(self) -> bool:
+        return bool(self.apex_ai_base_url.strip() and self.apex_ai_model.strip())
 
 
 @lru_cache

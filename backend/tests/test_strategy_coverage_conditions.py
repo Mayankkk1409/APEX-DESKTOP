@@ -36,7 +36,7 @@ _FIXED = dict(
 )
 
 _OUTLOOKS = ("bullish", "bearish", "neutral")
-_PROFILES = ("conservative", "moderate", "aggressive", "custom")
+_PROFILES = ("conservative", "moderate", "aggressive")
 # (label, iv, hv) — gaps are absolute fractions after alignment inside the selector.
 _IV_HV = (
     ("cheap", 0.18, 0.40),

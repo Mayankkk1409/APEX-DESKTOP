@@ -22,6 +22,7 @@ export function ExpiryLoginGate() {
   const setPending = useSession((s) => s.setExpiryLoginPending);
   const setUser = useSession((s) => s.setUser);
   const setExpiryNoticeOnLogin = useSession((s) => s.setExpiryNoticeOnLogin);
+  const setExpiryLoginCertificateOpen = useSession((s) => s.setExpiryLoginCertificateOpen);
   const [rows, setRows] = useState<ExpiryLoginRow[] | null>(null);
   const [isPaper, setIsPaper] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
@@ -87,6 +88,11 @@ export function ExpiryLoginGate() {
       cancelled = true;
     };
   }, [pending, setExpiryNoticeOnLogin, setPending, setUser]);
+
+  useEffect(() => {
+    setExpiryLoginCertificateOpen(rows !== null);
+    return () => setExpiryLoginCertificateOpen(false);
+  }, [rows, setExpiryLoginCertificateOpen]);
 
   useEffect(() => {
     if (rows === null || !userId || !marketDay) return;

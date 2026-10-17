@@ -83,7 +83,7 @@ export function markExpiryLoginCertificatePainted(store: ExpiryLoginDayStore, us
 }
 
 export const EXPIRY_LOGIN_AUTO_CLOSE =
-  "These positions will be closed automatically at 16:00 America/New_York on the expiry day if still open.";
+  "These positions will be closed automatically at 16:00 New York time on the expiry day if still open.";
 
 /** Shown when the book has no open option inside the 7-day window. */
 export const EXPIRY_LOGIN_NONE =

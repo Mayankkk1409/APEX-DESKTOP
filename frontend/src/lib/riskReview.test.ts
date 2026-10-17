@@ -6,7 +6,6 @@ import {
   autoExecEligibilityLine,
   autoSubmitArms,
   blockedEligibilityLine,
-  manualConfirmationNote,
   orderPlacement,
   thesisCheckboxState,
 } from "./riskReview";
@@ -146,15 +145,18 @@ describe("orderPlacement", () => {
     expect(thesisCheckboxState(placement).submitsOnAccept).toBe(false);
   });
 
-  it("keeps Place Trade enabled below the saved minimum with a neutral note", () => {
-    const placement = orderPlacement({ ...legs, composite: 62, threshold: 70 });
+  it("requires an explicit override when the displayed score is below the saved minimum", () => {
+    const placement = orderPlacement({ ...legs, composite: 49.94, threshold: 50 });
     expect(placement.autoSubmitOnAck).toBe(false);
+    expect(placement.overrideRequired).toBe(true);
     expect(placement.placeTradeEnabled).toBe(true);
-    expect(placement.note).toBe(
-      "Manual confirmation required (score 62.0 vs. your auto-execute minimum 70.0).",
-    );
-    expect(placement.note).not.toContain("BELOW EXECUTION THRESHOLD");
-    expect(manualConfirmationNote(62, 70)).toBe(placement.note);
+    expect(placement.note).toContain("Not recommended");
+    expect(placement.note).toContain("49.9");
+    expect(placement.note).toContain("50.0");
+    expect(placement.note).toContain("Proceed at my own risk");
+    expect(thesisCheckboxState(placement).submitsOnAccept).toBe(false);
+    expect(orderPlacement({ ...legs, composite: 49.96, threshold: 50 }).overrideRequired).toBe(false);
+    expect(orderPlacement({ ...legs, composite: 49.96, threshold: 50 }).autoSubmitOnAck).toBe(true);
   });
 
   it("arms acknowledgement at 66 when the saved minimum is 40", () => {

@@ -56,4 +56,4 @@ def _why_sentence(check: str) -> str:
         return "The price you would pay is not reliable."
     if "buying_power" in key or "buying power" in key:
         return "The account cannot cover the order."
-    return "This check is enough to hold the order."
+    return "This order was not sent. Review the reason, then try again if you still want the trade."

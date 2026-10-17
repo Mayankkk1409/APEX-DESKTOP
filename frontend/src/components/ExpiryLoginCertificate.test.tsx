@@ -75,7 +75,7 @@ describe("ExpiryLoginCertificate", () => {
     expect(html).toContain('aria-labelledby="expiry-login-title"');
     expect(html).toContain(">Expiry<");
     expect(html).toContain("PAPER TRADE");
-    expect(html).toContain("These positions will be closed automatically at 16:00 America/New_York on the expiry day if still open.");
+    expect(html).toContain("These positions will be closed automatically at 16:00 New York time on the expiry day if still open.");
     expect(html).toContain("AAPL");
     expect(html).toContain("Bull Call Spread");
     expect(html).toContain("Oct 9, 2026");

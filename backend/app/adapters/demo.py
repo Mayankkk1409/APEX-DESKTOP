@@ -198,16 +198,11 @@ class DemoAdapter:
 
     async def bars(self, symbol: str, timeframe: str, limit: int = 180) -> list[dict]:
         symbol = symbol.upper()
-        step = {
-            "1m": timedelta(minutes=1),
-            "5m": timedelta(minutes=5),
-            "15m": timedelta(minutes=15),
-            "30m": timedelta(minutes=30),
-            "1H": timedelta(hours=1),
-            "4H": timedelta(hours=4),
-            "1D": timedelta(days=1),
-            "1W": timedelta(weeks=1),
-        }.get(timeframe, timedelta(days=1))
+        from app.analysis.timeframe import step as interval_step
+
+        step = interval_step(timeframe)
+        if step is None:
+            return []
         now = _now()
         out = []
         for i in range(limit, 0, -1):

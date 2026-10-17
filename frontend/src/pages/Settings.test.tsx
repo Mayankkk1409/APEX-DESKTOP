@@ -90,6 +90,7 @@ describe("Settings page", () => {
     expect(html).toContain('data-testid="settings-page"');
     expect(html).toContain('data-testid="settings-account"');
     expect(html).toContain('data-testid="settings-risk"');
+    expect(html).not.toContain(">Custom<");
     expect(html).toContain('data-testid="settings-appearance"');
     expect(html).toContain('data-testid="settings-security"');
     expect(html).toContain('data-testid="settings-auto-exec-toggle"');

@@ -1212,6 +1212,9 @@ def _build_factor_cards(
         earn_parts.append("Earnings date is unknown. This is a data gap.")
         if calendar.get("unverified"):
             earn_parts.append("Earnings date unverified.")
+    elif isinstance(dte, (int, float)) and dte < 0:
+        shown = display or nd
+        earn_parts.append(f"Earnings passed ({shown})." if shown else "Earnings passed.")
     elif nd:
         shown = display or nd
         earn_parts.append(
@@ -1245,7 +1248,7 @@ def _build_factor_cards(
                 f"The prior print carried a {_fmt_pct(latest.get('surprise_pct'), signed=True)} EPS surprise "
                 f"({latest.get('eps')} vs {latest.get('consensus')} consensus)."
             )
-    if dte is not None:
+    if isinstance(dte, (int, float)) and dte >= 0:
         earn_parts.append(
             "With the event inside two weeks, implied volatility and estimate drift typically dominate price action."
             if dte <= 14

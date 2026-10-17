@@ -78,7 +78,13 @@ NEUTRAL_INCOME_STRUCTURES: frozenset[str] = frozenset(
     }
 )
 
-RISK_PROFILES: frozenset[str] = frozenset({"conservative", "moderate", "aggressive", "custom"})
+SUPPORTED_RISK_PROFILES: frozenset[str] = frozenset({"conservative", "moderate", "aggressive"})
+#: Stored value left in place until the account picks a supported profile. Not a recommendation mode.
+LEGACY_UNRESOLVED_PROFILE = "custom"
+PROFILE_SELECTION_LABEL = "Select a risk profile"
+PROFILE_SELECTION_REASON = (
+    "Select Conservative, Moderate, or Aggressive before a strategy can be recommended."
+)
 
 DEFINED_RISK_PLAYBOOK: dict[str, dict[str, str]] = {
     "Short Iron Condor": {"bias": "neutral", "iv": "rich"},
@@ -148,6 +154,7 @@ class StrategyRecommendation:
     leg_structure: str | None = None
     strategies_evaluated: int = 0
     risk_notes: list[str] = field(default_factory=list)
+    risk_profile: str = "moderate"
 
     def to_api_dict(self) -> dict[str, Any]:
         return {
@@ -173,6 +180,7 @@ class StrategyRecommendation:
             "leg_structure": self.leg_structure,
             "strategies_evaluated": self.strategies_evaluated,
             "risk_notes": list(self.risk_notes),
+            "risk_profile": self.risk_profile,
         }
 
 
@@ -302,6 +310,8 @@ def earnings_position_note(
     """
     if not confirmed:
         return False, "Earnings date is unconfirmed."
+    if days is not None and int(days) < 0:
+        return False, None
     if days is not None and int(days) <= 1:
         return strategy_name != APEX_STRATEGY_NAME, "Earnings are within 1 day."
     return False, None
@@ -365,6 +375,8 @@ def profile_fit_note(strategy_name: str, risk_profile: str | None) -> str:
     This does not add a new score cutoff. Undefined-risk names stay out of auto-execution.
     """
     profile = normalize_risk_profile(risk_profile)
+    if profile is None:
+        return PROFILE_SELECTION_REASON
     defined = _is_defined_risk(strategy_name)
     if profile == "conservative":
         if defined and strategy_name in CONSERVATIVE_STRUCTURES:
@@ -374,15 +386,33 @@ def profile_fit_note(strategy_name: str, risk_profile: str | None) -> str:
         if defined and strategy_name in AGGRESSIVE_DIRECTIONAL:
             return "This matches your Aggressive profile: a directional defined-risk structure."
         return "Your Aggressive profile prefers directional defined-risk structures. This is the best eligible match."
-    if profile == "custom":
-        return "Your Custom profile keeps the structures you allow. This is the best eligible match."
     return "This follows your Moderate profile. Strategy order stays the standard matrix."
 
 
-def normalize_risk_profile(risk_profile: str | None) -> str:
-    if risk_profile in RISK_PROFILES:
+def profile_is_supported(risk_profile: str | None) -> bool:
+    return risk_profile in SUPPORTED_RISK_PROFILES
+
+
+def normalize_risk_profile(risk_profile: str | None) -> str | None:
+    """Return a supported profile. An unknown or legacy Custom value is not rewritten."""
+    if risk_profile in SUPPORTED_RISK_PROFILES:
         return str(risk_profile)
-    return "moderate"
+    return None
+
+
+def same_profile_band(left: str, right: str, risk_profile: str | None) -> bool:
+    """Executability may reorder inside one profile band. It does not cross bands.
+
+    Conservative's band is the documented defined-risk income and hedged set.
+    Aggressive's band is the documented directional defined-risk set.
+    Moderate keeps one band, so the existing close-score check is unchanged.
+    """
+    profile = normalize_risk_profile(risk_profile)
+    if profile == "conservative":
+        return (left in CONSERVATIVE_STRUCTURES) == (right in CONSERVATIVE_STRUCTURES)
+    if profile == "aggressive":
+        return (left in AGGRESSIVE_DIRECTIONAL) == (right in AGGRESSIVE_DIRECTIONAL)
+    return True
 
 
 def order_candidates_for_risk_profile(
@@ -393,15 +423,13 @@ def order_candidates_for_risk_profile(
 ) -> list[StrategyCandidate]:
     """Reorder eligible defined-risk candidates to complement the saved risk profile.
 
-    Hard gates stay upstream. Undefined-risk names are not promoted. Custom keeps
-    the moderate (matrix) order unless ``structure_limits`` names an allowlist.
+    Hard gates stay upstream. Undefined-risk names are not promoted. A higher
+    composite does not jump ahead of a structure this profile already prefers.
+    ``structure_limits`` is ignored: Custom allowlists are not a profile.
     """
+    del structure_limits
     profile = normalize_risk_profile(risk_profile)
     ordered = list(candidates)
-    if profile == "custom" and structure_limits:
-        allowed = [c for c in ordered if c.defined_risk and c.name in structure_limits]
-        if allowed:
-            return allowed
     if profile == "conservative":
         preferred_ids = {id(c) for c in ordered if c.defined_risk and c.name in CONSERVATIVE_STRUCTURES}
         if not preferred_ids:
@@ -1261,6 +1289,21 @@ def recommend_strategy(
     Score, IV versus HV, earnings proximity, and spread width are warnings.
     They do not replace the ranked structure.
     """
+    if not profile_is_supported(risk_profile):
+        return StrategyRecommendation(
+            best_match=PROFILE_SELECTION_LABEL,
+            tier="watchlist",
+            score=round(composite, 1),
+            auto_exec_eligible=False,
+            rejection_reasons=[PROFILE_SELECTION_REASON],
+            gates={"risk_profile": False},
+            gate_reason=PROFILE_SELECTION_REASON,
+            leg_structure=None,
+            strategies_evaluated=0,
+            risk_notes=[PROFILE_SELECTION_REASON],
+            risk_profile=str(risk_profile or ""),
+        )
+
     rejection_reasons: list[str] = []
     gates: dict[str, bool] = {}
     tier = _score_tier(composite)
@@ -1363,10 +1406,6 @@ def recommend_strategy(
     viable = [c for c in candidates if c.defined_risk and c.eligible]
     if ivr is not None and float(ivr) > 70:
         viable = [c for c in viable if c.name not in PLAIN_LONG_PREMIUM]
-    if normalize_risk_profile(risk_profile) == "custom" and structure_limits:
-        limited = [c for c in viable if c.name in structure_limits]
-        if limited:
-            viable = limited
     risk_notes: list[str] = []
 
     # The saved auto-execution minimum decides acknowledgement. It is not a selection gate.
@@ -1375,7 +1414,7 @@ def recommend_strategy(
     earnings_within_day = (
         earnings_date_confirmed is not False
         and catalyst_days is not None
-        and int(catalyst_days) <= 1
+        and 0 <= int(catalyst_days) <= 1
     )
     gates["earnings_blackout"] = not earnings_within_day
     if earnings_date_confirmed is False:
@@ -1450,4 +1489,5 @@ def recommend_strategy(
         leg_structure=best.name,
         strategies_evaluated=strategies_evaluated,
         risk_notes=risk_notes,
+        risk_profile=str(normalize_risk_profile(risk_profile) or risk_profile),
     )

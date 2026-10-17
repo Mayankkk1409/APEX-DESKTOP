@@ -25,7 +25,9 @@ export function fmtPlain(n?: number | null) {
 
 export function fmtTs(iso?: string | null) {
   if (!iso) return "—";
-  const d = new Date(iso);
+  const trimmed = iso.trim();
+  const hasZone = /([zZ]|[+-]\d{2}:?\d{2})$/.test(trimmed);
+  const d = new Date(hasZone ? trimmed : `${trimmed.replace(" ", "T")}Z`);
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }

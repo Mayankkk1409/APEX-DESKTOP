@@ -3,7 +3,9 @@ import {
   AUTO_EXEC_DISCLAIMER,
   DEFAULT_USER_SETTINGS,
   patchUserSettings,
+  readRiskSelection,
   readUserSettings,
+  selectionFromServer,
   writeUserSettings,
 } from "./userSettings";
 import { readThemeMode, writeThemeMode } from "./theme";
@@ -46,6 +48,17 @@ describe("userSettings", () => {
     expect(s.autoExecMinScore).toBe(85);
     expect(s.autoExecEnabled).toBe(false);
     expect(s.maxRiskPerTradePct).toBe(3);
+  });
+
+  it("keeps a stored Custom profile unresolved until a supported profile is chosen", () => {
+    localStorage.setItem("apex_user_settings", JSON.stringify({ ...DEFAULT_USER_SETTINGS, riskProfile: "custom" }));
+    expect(readRiskSelection()).toEqual({ profile: "", selectionRequired: true });
+    expect(readUserSettings().riskProfile).toBe("moderate");
+    patchUserSettings({ autoExecMinScore: 80 });
+    expect(JSON.parse(localStorage.getItem("apex_user_settings") ?? "{}").riskProfile).toBe("custom");
+    const chosen = selectionFromServer("conservative");
+    expect(chosen).toEqual({ profile: "conservative", selectionRequired: false });
+    expect(readRiskSelection().profile).toBe("conservative");
   });
 
   it("persists patched settings to localStorage", () => {

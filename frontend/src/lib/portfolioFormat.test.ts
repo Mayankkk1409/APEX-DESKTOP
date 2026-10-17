@@ -16,5 +16,6 @@ describe("portfolioFormat", () => {
   it("formats timestamps", () => {
     expect(fmtTs(null)).toBe("—");
     expect(fmtTs("2026-01-15T18:30:00.000Z")).toMatch(/Jan/);
+    expect(fmtTs("2026-10-12T17:10:46")).toBe(fmtTs("2026-10-12T17:10:46Z"));
   });
 });

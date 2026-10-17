@@ -138,6 +138,42 @@ def _apply_fill(book: _Book, order: Order, asset_class: str) -> None:
         book.avg_cost = px
 
 
+def _settlement_basis(order: Order) -> tuple[float, float] | None:
+    """(average cost, signed qty closed) stored on a fill that reduced a lot."""
+    raw = getattr(order, "settlement", None)
+    if not isinstance(raw, dict):
+        return None
+    if str(order.status or "") != "filled" or order.fill_price is None:
+        return None
+    try:
+        basis = float(raw.get("basis"))
+        closed = float(raw.get("closed_qty"))
+        fill = float(order.fill_price)
+    except (TypeError, ValueError):
+        return None
+    if closed == 0 or basis < 0 or fill < 0:
+        return None
+    return basis, closed
+
+
+def _settlement_realized(orders: list[Order], symbol: str, asset_class: str, mult: int) -> Decimal | None:
+    """P&L of closes that recorded the lot's average cost. None when none did."""
+    total = Decimal(0)
+    found = False
+    for order in orders:
+        if _lot_key(order.symbol, order.asset_class) != (symbol, asset_class):
+            continue
+        parsed = _settlement_basis(order)
+        if parsed is None:
+            continue
+        basis, closed = parsed
+        total += (_dec(float(order.fill_price)) - _dec(basis)) * _dec(closed) * Decimal(mult)
+        found = True
+    if not found:
+        return None
+    return total
+
+
 def account_trade_pnl(orders: list[Order], positions: list[Position]) -> float:
     """The Overall P&L total: realized plus unrealized, in cents, summed.
 
@@ -169,17 +205,31 @@ def symbol_pnl_rows(orders: list[Order], positions: list[Position]) -> list[Symb
     books = replay_filled_orders(orders)
     pos_by_key = {_lot_key(p.symbol, p.asset_class): p for p in positions}
     keys = set(books) | set(pos_by_key)
+    for order in orders:
+        if _settlement_basis(order) is not None:
+            keys.add(_lot_key(order.symbol, order.asset_class))
     rows: list[SymbolPnlRow] = []
     for sym, asset_class in sorted(keys):
         book = books.get((sym, asset_class), _Book())
         pos = pos_by_key.get((sym, asset_class))
         asset_class = pos.asset_class if pos else asset_class
         mult = position_multiplier(asset_class)
-        qty = pos.qty if pos else book.qty
+        pos_qty = float(pos.qty) if pos is not None else 0.0
+        settled = _settlement_realized(orders, sym, asset_class, mult)
+        # Replay can turn a close into a new short when the opening fill is not stored
+        # on this contract. The close records the basis it actually used.
+        if settled is not None and (
+            abs(float(book.qty) - pos_qty) > 1e-6
+            or (abs(pos_qty) < 1e-9 and abs(float(book.realized_pl)) < 1e-9 and settled != 0)
+        ):
+            realized = settled
+            qty = pos_qty
+        else:
+            realized = _dec(book.realized_pl)
+            qty = pos.qty if pos else book.qty
         unrealized = Decimal(0)
         if pos is not None and pos.qty != 0 and pos.current_price is not None and pos.avg_cost is not None:
             unrealized = (_dec(pos.current_price) - _dec(pos.avg_cost)) * _dec(pos.qty) * Decimal(mult)
-        realized = _dec(book.realized_pl)
         realized_q = realized.quantize(_CENT, rounding=ROUND_HALF_UP)
         unrealized_q = unrealized.quantize(_CENT, rounding=ROUND_HALF_UP)
         rows.append(
@@ -295,16 +345,18 @@ def _replay_equity_events(
             continue
         live_holdings += pos.qty * price * mult
     live_value = round(live_cash + live_holdings, 2)
+    lots_match = _lots_match(open_lots, positions)
     now = datetime.now(timezone.utc)
-    if not events or events[-1][1] != live_value or _utc_date(events[-1][0]) < _utc_date(now):
+    # The latest point is the current account value at this timestamp.
+    # Earlier fill points are left as they were. Nothing is inserted between them.
+    last_ts = _as_utc(events[-1][0]) if events else None
+    if not events or events[-1][1] != live_value or last_ts is None or last_ts < now:
         events.append((now, live_value))
-    if _lots_match(open_lots, positions):
+    if lots_match:
         return events, None
     return events, (
-        "Each point is the portfolio value after a priced fill. The latest point is "
-        "cash plus the market value of open positions. Fills with no price are omitted. "
-        "Earlier points can differ from that current value when saved orders do not match "
-        "the open book. The P&L line is trade profit and loss. Its latest point is Overall P&L."
+        "The latest point is the current account value. Earlier points are the value after each priced fill. "
+        "Saved orders do not match the open book, so those earlier points can differ."
     )
 
 

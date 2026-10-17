@@ -1,4 +1,4 @@
-import { formatCompositeDecimal } from "./scoreFormat";
+import { compositeBelowMinimum, formatCompositeDecimal } from "./scoreFormat";
 
 /**
  * Thesis checkbox vs Place Trade.
@@ -26,7 +26,7 @@ export function autoSubmitArms(input: {
   if (!input.definedRisk) return false;
   const composite = input.composite;
   if (composite == null || !Number.isFinite(composite) || !Number.isFinite(input.threshold)) return false;
-  return composite >= input.threshold;
+  return !compositeBelowMinimum(composite, input.threshold);
 }
 
 /** Neutral placement note. The saved minimum never hides the recommendation. */
@@ -96,11 +96,19 @@ export function orderPlacement(input: {
       overrideRequired: false,
     };
   }
+  if (input.spreadConfirmationRequired === true && input.spreadConfirmed !== true) {
+    return {
+      autoSubmitOnAck: false,
+      placeTradeEnabled: false,
+      acknowledgeEnabled: false,
+      note: blockedNote || "Confirm the spread warning before this order can be sent.",
+      overrideRequired: false,
+    };
+  }
   const flagged =
     input.placeable === false ||
     input.validationPassed === false ||
-    input.executable === false ||
-    (input.spreadConfirmationRequired === true && input.spreadConfirmed !== true);
+    input.executable === false;
   if (flagged) {
     return {
       autoSubmitOnAck: false,
@@ -120,16 +128,23 @@ export function orderPlacement(input: {
       overrideRequired: false,
     };
   }
-  const below =
-    input.composite != null &&
-    Number.isFinite(input.composite) &&
-    Number.isFinite(input.threshold) &&
-    input.composite < input.threshold;
+  const below = compositeBelowMinimum(input.composite, input.threshold);
+  if (below && input.composite != null) {
+    const line =
+      blockedNote && /below your minimum/i.test(blockedNote)
+        ? blockedNote
+        : blockedEligibilityLine(input.composite, input.threshold, "composite is below your minimum");
+    return {
+      autoSubmitOnAck: false,
+      placeTradeEnabled: true,
+      acknowledgeEnabled: true,
+      note: `Not recommended. ${line} Confirm “Proceed at my own risk” if you still want to continue.`,
+      overrideRequired: true,
+    };
+  }
   let note: string | null = blockedNote;
   if (input.serverAutoExecEnabled === false) {
     note = AUTO_EXECUTION_OFF_NOTE;
-  } else if (!note && below && input.composite != null) {
-    note = manualConfirmationNote(input.composite, input.threshold);
   }
   return {
     autoSubmitOnAck: false,

@@ -17,8 +17,22 @@ from app.schemas.settings import (
     TradingSettingsPatch,
 )
 from app.security import verify_password
+from app.services.strategy_recommendation import profile_is_supported
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+
+def _settings_out(row: UserTradingSettings) -> TradingSettingsOut:
+    stored = row.risk_profile or ""
+    return TradingSettingsOut(
+        auto_execution_threshold=row.auto_execution_threshold,
+        risk_profile=stored,
+        profile_selection_required=not profile_is_supported(stored),
+        max_risk_per_trade_pct=row.max_risk_per_trade_pct,
+        max_positions=row.max_positions,
+        theme_preference=row.theme_preference,  # type: ignore[arg-type]
+        updated_at=row.updated_at,
+    )
 
 
 async def _get_or_create_settings(user: User, db: AsyncSession) -> UserTradingSettings:
@@ -32,8 +46,8 @@ async def _get_or_create_settings(user: User, db: AsyncSession) -> UserTradingSe
 
 
 @router.get("/trading", response_model=TradingSettingsOut)
-async def get_trading_settings(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> UserTradingSettings:
-    return await _get_or_create_settings(user, db)
+async def get_trading_settings(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> TradingSettingsOut:
+    return _settings_out(await _get_or_create_settings(user, db))
 
 
 @router.patch("/trading", response_model=TradingSettingsOut)
@@ -41,13 +55,13 @@ async def patch_trading_settings(
     body: TradingSettingsPatch,
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
-) -> UserTradingSettings:
+) -> TradingSettingsOut:
     settings = await _get_or_create_settings(user, db)
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(settings, field, value)
     await db.commit()
     await db.refresh(settings)
-    return settings
+    return _settings_out(settings)
 
 
 @router.patch("/paper-balance")

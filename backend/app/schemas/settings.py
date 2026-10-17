@@ -2,22 +2,23 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-RiskProfile = Literal["conservative", "moderate", "aggressive", "custom"]
+RiskProfile = Literal["conservative", "moderate", "aggressive"]
 ThemePreference = Literal["dark", "light", "system"]
 
 
 class TradingSettingsOut(BaseModel):
     auto_execution_threshold: float = 85.0
-    risk_profile: RiskProfile = "moderate"
+    risk_profile: str = "moderate"
+    profile_selection_required: bool = False
     max_risk_per_trade_pct: float = 3.0
     max_positions: int = 10
     theme_preference: ThemePreference = "dark"
-
-    model_config = {"from_attributes": True}
+    updated_at: datetime | None = None
 
 
 class TradingSettingsPatch(BaseModel):

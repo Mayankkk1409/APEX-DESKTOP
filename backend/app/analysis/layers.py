@@ -40,6 +40,16 @@ SCAN_SLIDE_LAYERS: tuple[str, ...] = (
     "risk_review",
 )
 
+# Equity research only. The options carousel above is unchanged.
+EQUITY_SLIDE_LAYERS: tuple[str, ...] = (
+    "equity_technical",
+    "equity_sentiment",
+    "equity_fundamentals",
+    "equity_risk",
+    "equity_scores",
+    "equity_plan",
+)
+
 # Documented parameters — Full Document §4 and Project APEX §4
 EMA_PERIODS = (9, 21, 50, 100, 200)
 MACD_FAST = 12

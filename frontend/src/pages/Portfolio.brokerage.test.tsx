@@ -137,6 +137,7 @@ describe("Portfolio brokerage integration", () => {
     expect(html).toContain('data-testid="pnl-chart-timeframe"');
     expect(html).toContain('data-testid="pnl-tf-1M"');
     expect(html).toContain('data-testid="portfolio-risk-profile-select"');
+    expect(html).not.toContain(">Custom<");
     expect(html.indexOf('data-testid="portfolio-risk-profile"')).toBeLessThan(
       html.indexOf('data-testid="portfolio-overall-section"'),
     );

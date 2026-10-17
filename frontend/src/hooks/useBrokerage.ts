@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { api } from "../api";
-import { DESK_STALE_MS } from "../lib/deskRefresh";
+import { DAY_PNL_REFRESH_MS, DESK_STALE_MS } from "../lib/deskRefresh";
 import type { BrokerageAccount, BrokerageBalance, BrokeragePosition } from "../lib/brokerageApi";
 import { mapBrokeragePositions } from "../lib/brokerageMapper";
 import { readPortfolioViewMode } from "../lib/portfolioViewMode";
@@ -66,14 +66,18 @@ export function useBrokerage() {
     queryKey: ["brokerage", "balance", activeId],
     queryFn: () => api.brokerageBalance(activeId!) as Promise<BrokerageBalance>,
     enabled: brokerageBook,
-    staleTime: DESK_STALE_MS,
+    staleTime: 5_000,
+    refetchInterval: DAY_PNL_REFRESH_MS,
+    refetchIntervalInBackground: false,
   });
 
   const positionsQuery = useQuery({
     queryKey: ["brokerage", "positions", activeId],
     queryFn: () => api.brokeragePositions(activeId!),
     enabled: brokerageBook,
-    staleTime: DESK_STALE_MS,
+    staleTime: 5_000,
+    refetchInterval: DAY_PNL_REFRESH_MS,
+    refetchIntervalInBackground: false,
   });
 
   // Equity graph starts with balance and positions, not after the portfolio page mounts.
@@ -120,5 +124,7 @@ export function useBrokerage() {
     accountsQuery,
     balanceQuery,
     positionsQuery,
+    balanceUpdatedAt: balanceQuery.dataUpdatedAt,
+    positionsUpdatedAt: positionsQuery.dataUpdatedAt,
   };
 }

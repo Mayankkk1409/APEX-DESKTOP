@@ -27,7 +27,7 @@ from app.services.strategy_engine import (
     _strategy_requires_back_month,
 )
 from app.services.executability import CLOSE_SCORE_GAP
-from app.services.strategy_recommendation import is_defined_risk_strategy
+from app.services.strategy_recommendation import is_defined_risk_strategy, same_profile_band
 from app.analysis.options_rules import daily_theta_per_share, delta_theta_ratio
 from app.services.volatility_intel import build_volatility_payload
 
@@ -185,8 +185,10 @@ def build_layers(
     shares_short: int = 0,
     share_avg_cost: float | None = None,
     stock_ask: float | None = None,
+    provisional_candle: bool = False,
+    research_mode: str = "options",
 ) -> dict[str, Any]:
-    """All layers reuse the captured bars/snapshot. Do not pull a different view."""
+    """Indicators and patterns use the selected candle interval. Daily bars are the HV sample only."""
     highs = [float(b["h"]) for b in bars]
     lows = [float(b["l"]) for b in bars]
     closes = [float(b["c"]) for b in bars]
@@ -197,9 +199,13 @@ def build_layers(
     last = closes[-1] if closes else quote.price
     prev_high, prev_low, prev_close = (highs[-2], lows[-2], closes[-2]) if len(closes) > 1 else (quote.high, quote.low, last)
     pivots = pivot_points(prev_high, prev_low, prev_close)
-    hv = historical_vol(closes)
+    hv_closes = [float(b["c"]) for b in (daily_bars or []) if b.get("c") is not None]
+    if len(hv_closes) < 21 and snapshot.timeframe == "1D":
+        hv_closes = closes
+    hv = historical_vol(hv_closes) if len(hv_closes) >= 21 else None
+    hv_basis = "1D closes, annualized with √252" if hv is not None else "unavailable"
     resolved_expiry = expiry or (chain.expiry if chain else None)
-    vol_bars = daily_bars if daily_bars else bars
+    vol_bars = daily_bars if daily_bars else (bars if snapshot.timeframe == "1D" else [])
     vol_layer = build_volatility_payload(
         symbol=snapshot.symbol,
         bars=vol_bars,
@@ -224,6 +230,18 @@ def build_layers(
             ivr = iv_rank_proxy(vol_layer.get("iv"), vol_layer.get("hv"))
         if ivr is not None:
             vol_layer = {**vol_layer, "iv_rank": ivr}
+    vol_layer = {
+        **vol_layer,
+        "hv_interval": "1D" if hv is not None else None,
+        "chart_interval": snapshot.timeframe,
+        "hv_basis": hv_basis,
+        "hv_note": (
+            f"Historical volatility is the completed daily close series ({hv_basis}). "
+            f"The {snapshot.timeframe} chart is the technical context. It is not the HV sample, and it does not change the selected expiry."
+            if snapshot.timeframe != "1D"
+            else f"Historical volatility uses the completed daily closes ({hv_basis})."
+        ),
+    }
     rsi_v = ind["rsi"]
     macd_v = ind["macd"]
     ema = ind["ema"]
@@ -238,6 +256,7 @@ def build_layers(
         lows=lows,
         volumes=volumes,
         timestamps=timestamps,
+        timeframe=snapshot.timeframe,
         indicators={
             "ema": ema,
             "supertrend": st,
@@ -536,51 +555,33 @@ def build_layers(
     # The playbook builder still blanks legs at or below the old blocked band. Ask for the
     # structure above that band, then restore the real score. 72 is not a second gate.
     layer_composite = composite if composite > EXECUTION_SCORE_BLOCKED_MAX else float(EXECUTION_SCORE_BLOCKED_MAX + 1)
-    strategy_layer = build_strategy_layer(
-        strategy_name=strategy,
-        composite=layer_composite,
-        direction=direction,
-        vol_signal=vol_signal,
-        chain_analysis=chain_analysis,
-        vol_layer=vol_layer,
-        sentiment_layer=sentiment_payload,
-        fundamentals_layer=fundamentals_payload,
-        tech_score=tech_score,
-        auto_exec_threshold=auto_execution_threshold,
-        back_month_contracts=back_month_rows if _strategy_requires_back_month(structure_for_legs) else None,
-        back_expiry=back_expiry,
-        ticker=snapshot.symbol,
-        gate_reason=decision.gate_reason,
-        leg_structure=decision.leg_structure,
-        strategies_evaluated=decision.strategies_evaluated,
-        risk_notes=list(decision.risk_notes),
-        benchmark_rule=(
-            "rule2"
-            if any(
-                "APEX Benchmark Greeks Strategy Rule 2" in note
-                for note in next(
-                    (row.gate_notes for row in decision.candidates if row.name == strategy and row.eligible),
-                    [],
-                )
-            )
-            else None
-        ),
-    )
-    if layer_composite != composite:
-        _restore_scored_strategy_layer(
-            strategy_layer,
-            composite,
-            auto_execution_threshold,
-            scan_id=snapshot.symbol,
-        )
-    strategy, strategy_layer = _promote_close_executable(
-        strategy,
-        strategy_layer,
-        decision,
-        build=lambda name: _scored_strategy_layer(
-            name,
-            composite=composite,
-            layer_composite=layer_composite,
+    profile_unresolved = decision.gates.get("risk_profile") is False
+    if profile_unresolved:
+        strategy_layer = {
+            "title": "Strategy",
+            "selected_strategy": strategy,
+            "structure_label": strategy,
+            "tradeable": False,
+            "placeable": False,
+            "auto_exec_blocked": True,
+            "auto_execute_eligible": False,
+            "auto_exec_line": None,
+            "auto_exec_reasons": [decision.gate_reason] if decision.gate_reason else [],
+            "block_reason": decision.gate_reason,
+            "gate_reason": decision.gate_reason,
+            "risk_notes": list(decision.risk_notes),
+            "metrics": {"legs": []},
+            "spread_block_reasons": [],
+            "quote_not_current": False,
+            "quote_as_of": None,
+            "validation_errors": [],
+            "composite_score": composite,
+            "suitable_for_current_profile": False,
+        }
+    else:
+        strategy_layer = build_strategy_layer(
+            strategy_name=strategy,
+            composite=layer_composite,
             direction=direction,
             vol_signal=vol_signal,
             chain_analysis=chain_analysis,
@@ -588,17 +589,59 @@ def build_layers(
             sentiment_layer=sentiment_payload,
             fundamentals_layer=fundamentals_payload,
             tech_score=tech_score,
-            auto_execution_threshold=auto_execution_threshold,
-            back_month_rows=back_month_rows,
+            auto_exec_threshold=auto_execution_threshold,
+            back_month_contracts=back_month_rows if _strategy_requires_back_month(structure_for_legs) else None,
             back_expiry=back_expiry,
             ticker=snapshot.symbol,
             gate_reason=decision.gate_reason,
             leg_structure=decision.leg_structure,
             strategies_evaluated=decision.strategies_evaluated,
             risk_notes=list(decision.risk_notes),
-            candidates=decision.candidates,
-        ),
-    )
+            benchmark_rule=(
+                "rule2"
+                if any(
+                    "APEX Benchmark Greeks Strategy Rule 2" in note
+                    for note in next(
+                        (row.gate_notes for row in decision.candidates if row.name == strategy and row.eligible),
+                        [],
+                    )
+                )
+                else None
+            ),
+        )
+        if layer_composite != composite:
+            _restore_scored_strategy_layer(
+                strategy_layer,
+                composite,
+                auto_execution_threshold,
+                scan_id=snapshot.symbol,
+            )
+        strategy, strategy_layer = _promote_close_executable(
+            strategy,
+            strategy_layer,
+            decision,
+            build=lambda name: _scored_strategy_layer(
+                name,
+                composite=composite,
+                layer_composite=layer_composite,
+                direction=direction,
+                vol_signal=vol_signal,
+                chain_analysis=chain_analysis,
+                vol_layer=vol_layer,
+                sentiment_layer=sentiment_payload,
+                fundamentals_layer=fundamentals_payload,
+                tech_score=tech_score,
+                auto_execution_threshold=auto_execution_threshold,
+                back_month_rows=back_month_rows,
+                back_expiry=back_expiry,
+                ticker=snapshot.symbol,
+                gate_reason=decision.gate_reason,
+                leg_structure=decision.leg_structure,
+                strategies_evaluated=decision.strategies_evaluated,
+                risk_notes=list(decision.risk_notes),
+                candidates=decision.candidates,
+            ),
+        )
     execution_tier = "auto_exec" if composite >= auto_execution_threshold else "caution"
     strategy_legs = []
     equity_legs = []
@@ -637,7 +680,11 @@ def build_layers(
                 "risk_notes": list(strategy_layer.get("risk_notes") or []) + [missing_equity_note],
             }
             strategy_legs = []
-    defined_risk = is_defined_risk_strategy(str(strategy_layer.get("selected_strategy") or strategy))
+    defined_risk = (
+        False
+        if profile_unresolved
+        else is_defined_risk_strategy(str(strategy_layer.get("selected_strategy") or strategy))
+    )
     auto_submit_on_ack = bool(strategy_layer.get("auto_execute_eligible"))
     layers: dict[str, Any] = {
         DeepScanLayer.TECHNICAL: {
@@ -657,10 +704,27 @@ def build_layers(
                 f"Snapshot locked at scan click: {snapshot.symbol} {snapshot.timeframe} "
                 f"visible {snapshot.visible_from} → {snapshot.visible_to}. "
                 f"Active studies: {', '.join(snapshot.studies)}. "
-                f"All subsequent slides reuse this exact OHLC window ({len(bars)} bars). "
-                f"Price {last:.2f} is {'above' if last > ema[200] else 'below'} the 200 EMA gate "
-                f"and {st['direction']} versus SuperTrend {st['value']:.2f}."
+                f"Indicators and patterns use {len(bars)} completed {snapshot.timeframe} candles"
+                f"{', and the forming candle is excluded' if provisional_candle else ''}. "
+                + (
+                    f"Price {last:.2f} is {'above' if last > ema[200] else 'below'} the 200 EMA on this interval "
+                    if len(closes) >= 200
+                    else f"Price {last:.2f}. The 200-period EMA is not warmed on {len(bars)} candles, so that gate is not used. "
+                )
+                + f"and {st['direction']} versus SuperTrend {st['value']:.2f}. "
+                f"{vol_layer.get('hv_note') or ''}"
             ),
+            "analysis_context": {
+                "research_mode": research_mode,
+                "symbol": snapshot.symbol,
+                "interval": snapshot.timeframe,
+                "bar_count": len(bars),
+                "as_of": snapshot.captured_at,
+                "last_completed": timestamps[-1] if timestamps else None,
+                "provisional_candle": provisional_candle,
+                "secondary": [{"interval": "1D", "role": hv_basis}],
+                "expiry": resolved_expiry,
+            },
         },
         DeepScanLayer.VOLUME: {
             "title": "Volume — accumulation, distribution, spikes",
@@ -951,6 +1015,8 @@ def _promote_close_executable(
     best_layer = None
     for cand in decision.candidates:
         if cand.name == strategy or not cand.eligible or not cand.defined_risk:
+            continue
+        if not same_profile_band(strategy, cand.name, getattr(decision, "risk_profile", None)):
             continue
         if primary_score - float(cand.score) > CLOSE_SCORE_GAP:
             continue

@@ -4,16 +4,20 @@ import { explainOrderRefusal } from "../lib/orderRefusal";
 type Props = {
   reason: string;
   onClose: () => void;
+  onViewPortfolio?: () => void;
 };
 
 /** A submit was attempted and the server or broker refused it. The order is not filled. */
-export function OrderRefusalDialog({ reason, onClose }: Props) {
+export function OrderRefusalDialog({ reason, onClose, onViewPortfolio }: Props) {
   const trapRef = useFocusTrap(true);
   useEscapeKey(true, onClose);
 
-  const queued = /your order is waiting|your order is queued|has not confirmed a fill|broker received this order/i.test(
-    reason,
-  );
+  const explained = explainOrderRefusal(reason);
+  const apexQueued = /your order is waiting|waiting in apex and has not been sent|market closed/i.test(reason);
+  const brokerPending = /waiting to fill at the broker|awaiting execution/i.test(explained);
+  const title = apexQueued ? "Order queued" : brokerPending ? "Order submitted" : "Order was not placed";
+  const body = apexQueued ? reason : explained;
+  const closeLabel = apexQueued || brokerPending ? "View Portfolio" : "Close";
   return (
     <div
       ref={trapRef}
@@ -27,13 +31,21 @@ export function OrderRefusalDialog({ reason, onClose }: Props) {
         <div className="order-cert-frame">
           <div className="order-cert-inner order-cert-stack">
             <h2 id="order-refusal-title" className="order-cert-title">
-              {queued ? "Order queued" : "Order was not placed"}
+              {title}
             </h2>
             <p className="order-cert-copy" data-testid="order-refusal-reason">
-              {queued ? reason : explainOrderRefusal(reason)}
+              {body}
             </p>
-            <button type="button" className="order-cert-dismiss" data-testid="order-refusal-close" onClick={onClose}>
-              {queued ? "View Portfolio" : "Close"}
+            <button
+              type="button"
+              className="order-cert-dismiss"
+              data-testid="order-refusal-close"
+              onClick={() => {
+                onClose();
+                if ((apexQueued || brokerPending) && onViewPortfolio) onViewPortfolio();
+              }}
+            >
+              {closeLabel}
             </button>
           </div>
         </div>

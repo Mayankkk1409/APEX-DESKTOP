@@ -26,6 +26,7 @@ class User(Base):
     brokerage_connected: Mapped[bool] = mapped_column(Boolean, default=False)
     connect_later_banner: Mapped[bool] = mapped_column(Boolean, default=False)
     first_login_completed: Mapped[bool] = mapped_column(Boolean, default=False)
+    platform_tour_seen: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     refresh_tokens: Mapped[list["RefreshToken"]] = relationship(back_populates="user")

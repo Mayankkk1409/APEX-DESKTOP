@@ -59,14 +59,14 @@ def can_auto_execute(scan: Any, user_settings: Any) -> AutoExecuteDecision:
         reasons.append(detail or "Pre-trade validation did not pass.")
     if composite is None:
         reasons.append("Composite score is missing.")
-    elif composite < minimum:
+    elif displayed_below_minimum(composite, minimum):
         reasons.append("Composite is below your minimum.")
     eligible = (
         auto_enabled is not False
         and executable is True
         and validation_passed is True
         and composite is not None
-        and composite >= minimum
+        and not displayed_below_minimum(composite, minimum)
     )
     if eligible:
         return AutoExecuteDecision(eligible=True, reasons=[])
@@ -450,6 +450,21 @@ def _short_block(reason: str) -> str:
 def _one_decimal(value: float) -> str:
     """One decimal. 59 → 59.0. 62.9 stays 62.9. Does not change the score."""
     return f"{float(value):.1f}"
+
+
+def displayed_below_minimum(composite: float | None, minimum: float | None) -> bool:
+    """True when the one-decimal score the user sees is under the one-decimal minimum.
+
+    49.94 displays as 49.9 and is below 50. 49.96 displays as 50.0 and is not.
+    """
+    if composite is None or minimum is None:
+        return False
+    try:
+        shown = float(_one_decimal(float(composite)))
+        floor = float(_one_decimal(float(minimum)))
+    except (TypeError, ValueError):
+        return False
+    return shown < floor
 
 
 def _quote_failed_stale(quote: Any, as_of: Any, *, now: datetime | None) -> bool:

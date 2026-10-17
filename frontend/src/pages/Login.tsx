@@ -4,8 +4,9 @@ import { ApexLogo } from "../components/ApexLogo";
 import { PasswordField } from "../components/PasswordField";
 import { OtpBoxes } from "../components/OtpBoxes";
 import { LegalFooter } from "../components/LegalFooter";
-import { ExpiryLoginCertificate } from "../components/ExpiryLoginCertificate";
 import { LoginCodeDialog } from "../components/LoginCodeDialog";
+import { PlatformTourDialog } from "../components/PlatformTourDialog";
+import { SessionArrivalNotices } from "../components/SessionArrivalNotices";
 import { SignupNoticeDialog } from "../components/SignupNoticeDialog";
 import { api, AUTH_REDIRECT_KEY, getAccessToken, restoreSession, setAccessToken } from "../api";
 import { loginFailureDialog, type LoginFailureDialog } from "../lib/apiError";
@@ -16,18 +17,7 @@ import {
   signInDigits,
   type LoginCodeNotice,
 } from "../lib/loginCode";
-import {
-  expiryLoginArrivalAlreadyShown,
-  expiryLoginRows,
-  expiryLoginShouldNavigate,
-  markExpiryLoginArrivalShown,
-  markExpiryLoginCertificatePainted,
-  readExpiryLoginDays,
-  resetExpiryLoginArrival,
-  shouldShowExpiryLoginCertificate,
-  type ExpiryLoginCheck,
-  type ExpiryLoginRow,
-} from "../lib/expiryLoginNotice";
+import { resetExpiryLoginArrival } from "../lib/expiryLoginNotice";
 import { resolveAutofillCode } from "../lib/otpAutofill";
 import { useSession } from "../store";
 
@@ -43,8 +33,8 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
   const nav = useNavigate();
   const setUser = useSession((s) => s.setUser);
   const setModal = useSession((s) => s.setConnectModal);
-  const setExpiryNoticeOnLogin = useSession((s) => s.setExpiryNoticeOnLogin);
-  const [checkingSession, setCheckingSession] = useState(!skipSessionRestore);
+  const setExpiryLoginPending = useSession((s) => s.setExpiryLoginPending);
+  const expiryLoginPending = useSession((s) => s.expiryLoginPending);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -56,10 +46,6 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
   const [err, setErr] = useState("");
   const [codeNotice, setCodeNotice] = useState<LoginCodeNotice | null>(null);
   const [failure, setFailure] = useState<LoginFailureDialog | null>(null);
-  const [expiryRows, setExpiryRows] = useState<ExpiryLoginRow[] | null>(null);
-  const [expiryIsPaper, setExpiryIsPaper] = useState(false);
-  const [expiryUserId, setExpiryUserId] = useState<string | null>(null);
-  const [expiryMarketDay, setExpiryMarketDay] = useState<string | null>(null);
   const [flow, setFlow] = useState<Flow>("login");
   const [stage, setStage] = useState<Stage>("identify");
   const [submitting, setSubmitting] = useState(false);
@@ -67,60 +53,15 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [emailHint, setEmailHint] = useState("");
   const [codeReused, setCodeReused] = useState(false);
+  const [awaitingNotices, setAwaitingNotices] = useState(false);
+  const [otpEntryNotices, setOtpEntryNotices] = useState(false);
+  const [showPlatformTour, setShowPlatformTour] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
   const verifyBusy = useRef(false);
   const flowRef = useRef<Flow>("login");
   const afterExpiryPath = useRef("/portfolio");
+  const otpEntryRef = useRef(false);
   flowRef.current = flow;
-
-  async function maybeShowExpiry(
-    me: import("../types").User,
-    isCancelled: () => boolean,
-    otpEntry: boolean,
-  ): Promise<ExpiryLoginCheck> {
-    try {
-      const watch = await api.expiryWatch();
-      if (isCancelled()) return "cancelled";
-      const rows = expiryLoginRows(watch.items, watch.market_day);
-      let paintedMarketDay: string | null = null;
-      let legacyNoticeDay: string | null = null;
-      try {
-        const days = readExpiryLoginDays(sessionStorage, me.id);
-        paintedMarketDay = days.paintedMarketDay;
-        legacyNoticeDay = days.legacyNoticeDay;
-      } catch {
-        paintedMarketDay = null;
-        legacyNoticeDay = null;
-      }
-      if (
-        !shouldShowExpiryLoginCertificate({
-          rowCount: rows.length,
-          marketDay: watch.market_day,
-          paintedMarketDay,
-          legacyNoticeDay,
-          credentialLogin: otpEntry,
-          alreadyPresented: expiryLoginArrivalAlreadyShown(),
-          otpEntry,
-        })
-      ) {
-        setExpiryNoticeOnLogin(false);
-        return "skip";
-      }
-      if (isCancelled()) return "cancelled";
-      markExpiryLoginArrivalShown();
-      setExpiryNoticeOnLogin(false);
-      setExpiryUserId(me.id);
-      setExpiryMarketDay(watch.market_day);
-      setExpiryIsPaper(watch.is_paper);
-      setExpiryRows(rows);
-      setCheckingSession(false);
-      return "show";
-    } catch {
-      if (isCancelled()) return "cancelled";
-      setExpiryNoticeOnLogin(false);
-      return "skip";
-    }
-  }
 
   useEffect(() => {
     if (stage !== "code") return;
@@ -129,13 +70,10 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
   }, [stage]);
 
   useEffect(() => {
-    if (expiryRows === null || !expiryUserId || !expiryMarketDay) return;
-    try {
-      markExpiryLoginCertificatePainted(sessionStorage, expiryUserId, expiryMarketDay);
-    } catch {
-      /* private mode */
-    }
-  }, [expiryRows, expiryUserId, expiryMarketDay]);
+    if (!awaitingNotices || expiryLoginPending) return;
+    setAwaitingNotices(false);
+    nav(afterExpiryPath.current, { replace: true });
+  }, [awaitingNotices, expiryLoginPending, nav]);
 
   useEffect(() => {
     if (skipSessionRestore) return;
@@ -145,35 +83,16 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
       const restored = await restoreSession();
       if (cancelled) return;
       const tokenNow = getAccessToken();
-      if (!restored && tokenNow && tokenNow !== tokenBefore) {
-        setCheckingSession(false);
-        return;
-      }
-      if (restored) {
-        // A saved session still starts on the sign-in form. Submitting it
-        // opens the desk, or the code step when this login requires one.
-        setCheckingSession(false);
-        return;
-      }
+      if (restored || (tokenNow && tokenNow !== tokenBefore)) return;
       const redirectMsg = sessionStorage.getItem(AUTH_REDIRECT_KEY);
-      if (redirectMsg) {
+      if (redirectMsg && !redirectMsg.includes("Sign-in verification expired")) {
         setFailure(loginFailureDialog(redirectMsg));
-        sessionStorage.removeItem(AUTH_REDIRECT_KEY);
       }
-      // Failed refresh only. Do not clear symbol, expiry, or captured bars.
+      if (redirectMsg) sessionStorage.removeItem(AUTH_REDIRECT_KEY);
+      // A dead cookie does not replace the sign-in form, and it does not clear a password already typed.
       setAccessToken(null);
       setUser(null);
       setModal(false);
-      setFlow("login");
-      flowRef.current = "login";
-      setStage("identify");
-      setPassword("");
-      setNewPassword("");
-      setConfirmPassword("");
-      setCode("");
-      setAutofill(null);
-      setOtpUser("");
-      setCheckingSession(false);
     })();
     return () => {
       cancelled = true;
@@ -259,20 +178,48 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
     setStage("code");
   }
 
+  function beginArrivalNotices(otpEntry: boolean) {
+    setOtpEntryNotices(otpEntry);
+    setAwaitingNotices(true);
+    setExpiryLoginPending(true);
+  }
+
   async function enterDesk(
-    res: { access_token: string; expires_in: number; refresh_in: number },
+    res: {
+      access_token: string;
+      expires_in: number;
+      refresh_in: number;
+      platform_tour?: boolean;
+      show_connect_modal?: boolean;
+    },
     otpEntry = false,
   ) {
     setAccessToken(res.access_token, res.expires_in, res.refresh_in);
     const me = (await api.me()) as import("../types").User;
     setUser(me);
-    setModal(true);
+    setModal(Boolean(res.show_connect_modal));
     const next = pathAfterSessionRestore(null);
     afterExpiryPath.current = next;
     resetExpiryLoginArrival();
-    const expiryCheck = await maybeShowExpiry(me, () => false, otpEntry);
-    if (!expiryLoginShouldNavigate(expiryCheck)) return;
-    nav(next, { replace: true });
+    otpEntryRef.current = otpEntry;
+    // New accounts that just entered a code see the platform tour before anything else.
+    if (otpEntry && res.platform_tour === true) {
+      setOtpEntryNotices(true);
+      setShowPlatformTour(true);
+      return;
+    }
+    beginArrivalNotices(otpEntry);
+  }
+
+  async function finishPlatformTour() {
+    setShowPlatformTour(false);
+    try {
+      const me = await api.completePlatformTour();
+      setUser(me);
+    } catch {
+      /* notices still continue */
+    }
+    beginArrivalNotices(otpEntryRef.current);
   }
 
   async function onLogin(e: FormEvent) {
@@ -391,29 +338,10 @@ export function Login({ skipSessionRestore = false }: { skipSessionRestore?: boo
         ? "Reset password"
         : "Verify code";
 
-  const expiryDialog =
-    expiryRows !== null ? (
-      <ExpiryLoginCertificate
-        items={expiryRows}
-        isPaper={expiryIsPaper}
-        onDismiss={() => {
-          setExpiryRows(null);
-          nav(afterExpiryPath.current);
-        }}
-      />
-    ) : null;
-
-  if (checkingSession && !expiryDialog) {
-    return (
-      <main className="min-h-screen flex items-center justify-center px-4" data-testid="session-restore">
-        <p className="text-subtle">Restoring session…</p>
-      </main>
-    );
-  }
-
   return (
     <>
-    {expiryDialog}
+    {showPlatformTour ? <PlatformTourDialog onDismiss={() => void finishPlatformTour()} /> : null}
+    {awaitingNotices ? <SessionArrivalNotices otpEntry={otpEntryNotices} /> : null}
     {codeNotice ? <LoginCodeDialog kind={codeNotice} onClose={() => setCodeNotice(null)} /> : null}
     {failure ? (
       <SignupNoticeDialog

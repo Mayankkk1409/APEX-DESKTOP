@@ -265,7 +265,14 @@ async def test_paper_fill_stops_when_the_recheck_spread_is_wider_than_the_cap(db
 
 
 @pytest.mark.asyncio
-async def test_user_override_fills_a_stale_quote_at_the_latest_limit(db: AsyncSession) -> None:
+async def test_user_override_fills_a_stale_quote_at_the_latest_limit(
+    db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _soft_quote(_quote: object, *, now: object = None) -> str:
+        _ = now
+        return "Quote not current. Indicative price while the market is closed."
+
+    monkeypatch.setattr("app.services.executability.quote_problem", _soft_quote)
     adapter = _Broker(_UNCOVERED, fresh_reads=0)
     user = _user()
     db.add(user)

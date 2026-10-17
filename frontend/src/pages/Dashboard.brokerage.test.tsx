@@ -128,7 +128,14 @@ describe("Dashboard brokerage integration", () => {
     });
     qc.setQueryData(["quote", "SPX"], { symbol: "SPX", name: "S&P 500", price: 5000 });
     qc.setQueryData(["quote", "TSLA"], { symbol: "TSLA", name: "Tesla", price: 250, change: 5 });
-    qc.setQueryData(["port"], { balance: 0, buying_power: 0, portfolio_value: 0, day_pl: 99, day_pct: 1 });
+    qc.setQueryData(["port"], {
+      balance: 0,
+      buying_power: 0,
+      portfolio_value: 0,
+      day_pl: 99,
+      day_pct: 1,
+      top_movers: [{ symbol: "INTC261016C00121000", unrealized_pl: 400 }],
+    });
 
     const html = renderToStaticMarkup(
       <QueryClientProvider client={qc}>
@@ -146,6 +153,9 @@ describe("Dashboard brokerage integration", () => {
     expect(html).toContain("42,000");
     expect(html).toContain('data-testid="positions"');
     expect(html).toContain("TSLA");
+    expect(html).toContain('data-testid="top-movers"');
+    expect(html).toContain("Top movers: TSLA");
+    expect(html).not.toContain("INTC261016C00121000");
     expect(html).toContain("500");
     expect(html).toContain("Daily P/L");
     expect(html).toContain("25");

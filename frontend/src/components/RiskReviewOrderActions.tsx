@@ -14,19 +14,21 @@ export function RiskReviewOrderActions({
   thesisAccepted = false,
   onThesisChange,
   onPlace,
+  acceptanceText,
 }: {
   placement: OrderPlacement;
   pending?: boolean;
   thesisAccepted?: boolean;
   onThesisChange?: (checked: boolean) => void;
   onPlace: () => void;
+  acceptanceText?: string;
 }) {
   const state = thesisCheckboxState(placement);
   const ready = thesisAccepted && !pending;
   const showOverrideActions = placement.overrideRequired && thesisAccepted;
   return (
     <>
-      {!placement.overrideRequired && placement.note ? (
+      {placement.note ? (
         <p className="text-sm text-champagne/70" data-testid="manual-confirmation-note" role="note">
           {placement.note}
         </p>
@@ -48,7 +50,7 @@ export function RiskReviewOrderActions({
             onThesisChange?.(e.target.checked);
           }}
         />
-        <span>{state.submitsOnAccept ? THESIS_AUTHORIZE_TEXT : THESIS_ACCEPTANCE_TEXT}</span>
+        <span>{state.submitsOnAccept ? THESIS_AUTHORIZE_TEXT : acceptanceText || THESIS_ACCEPTANCE_TEXT}</span>
       </label>
       {showOverrideActions ? (
         <div className="flex flex-wrap gap-2">

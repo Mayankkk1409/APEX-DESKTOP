@@ -88,6 +88,10 @@ function buildFactorCards(data: FundamentalsLayer): FactorCard[] {
         if (extra.earnings_applicable === false) {
           return `${data.symbol} is classified as ${extra.security_type || "ETF"}. An issuer earnings date does not apply.`;
         }
+        if (typeof cal.dte === "number" && cal.dte < 0) {
+          const when = formatEarningsDate(extra.display || cal.next_date, extra.date_status) || cal.next_date;
+          return when ? `Earnings passed (${when}).` : "Earnings passed.";
+        }
         const shown = formatEarningsDate(extra.display || cal.next_date, extra.date_status);
         if (shown) return `Next earnings ${shown}${cal.dte != null ? ` (${cal.dte} DTE)` : ""}.`;
         if (extra.date_status === "unknown") return "Earnings date is unknown. This is a data gap.";
@@ -171,9 +175,11 @@ function FundFactorCards({ cards }: { cards: FactorCard[] }) {
 export function FundamentalsScan({
   symbol,
   initial,
+  equityDetail = false,
 }: {
   symbol: string;
   initial?: FundamentalsLayer | Record<string, unknown> | null;
+  equityDetail?: boolean;
 }) {
   const q = useQuery({
     queryKey: ["fundamentals-deep", symbol],
@@ -280,12 +286,18 @@ export function FundamentalsScan({
           <h2>Earnings calendar</h2>
           <dl className="sf-kv">
             <div>
-              <dt>Next date</dt>
-              <dd>{dash(cal.next_date)}</dd>
+              <dt>{typeof cal.dte === "number" && cal.dte < 0 ? "Earnings" : "Next date"}</dt>
+              <dd>
+                {typeof cal.dte === "number" && cal.dte < 0
+                  ? cal.next_date
+                    ? `Passed (${cal.next_date})`
+                    : "Passed"
+                  : dash(cal.next_date)}
+              </dd>
             </div>
             <div>
               <dt>DTE</dt>
-              <dd>{cal.dte != null ? fmtNum(cal.dte, 0) : "—"}</dd>
+              <dd>{cal.dte != null && cal.dte >= 0 ? fmtNum(cal.dte, 0) : "—"}</dd>
             </div>
             <div>
               <dt>Last reported</dt>
@@ -328,6 +340,54 @@ export function FundamentalsScan({
           <FundFactorCards cards={factorCards} />
         </article>
       </div>
+
+      {equityDetail ? (
+        <div className="sf-split" data-testid="equity-fundamentals-detail">
+          <article className="sf-panel">
+            <h2>Balance and market</h2>
+            <p className="sf-panel-note">Share-level figures from the same fundamentals feed. A missing figure stays blank.</p>
+            <dl className="sf-kv">
+              <div>
+                <dt>Dividend yield</dt>
+                <dd>{h.div_yield != null ? fmtPct(h.div_yield) : "—"}</dd>
+              </div>
+              <div>
+                <dt>Beta, 5 year</dt>
+                <dd>{fmtNum(h.beta_5y, 2)}</dd>
+              </div>
+              <div>
+                <dt>Average volume</dt>
+                <dd>{fmtNum(h.avg_volume, 0)}</dd>
+              </div>
+              <div>
+                <dt>Spot</dt>
+                <dd>{fmtNum(h.spot, 2)}</dd>
+              </div>
+            </dl>
+          </article>
+          <article className="sf-panel">
+            <h2>Classification</h2>
+            <dl className="sf-kv">
+              <div>
+                <dt>Sector</dt>
+                <dd>{dash(data.profile?.sector)}</dd>
+              </div>
+              <div>
+                <dt>Industry</dt>
+                <dd>{dash(data.profile?.industry)}</dd>
+              </div>
+              <div>
+                <dt>Net income YoY</dt>
+                <dd>{fmtPct(h.net_income_yoy_pct)}</dd>
+              </div>
+              <div>
+                <dt>Coverage source</dt>
+                <dd>{dash(analyst.source)}</dd>
+              </div>
+            </dl>
+          </article>
+        </div>
+      ) : null}
     </section>
   );
 }

@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
 import { humanizeLabel } from "../lib/humanizeLabel";
 import { clearNewsRetry, isNewsRateLimitMessage, newsRetryDelay, noteNewsRateLimit, scrubRateLimitCopy, visibleNewsError } from "../lib/newsFeed";
+import { earningsTiming, presentSource } from "../lib/sourceLabel";
 import type { SentimentLayer } from "../types";
 
 function dash(v: string | number | null | undefined): string {
@@ -29,7 +30,8 @@ function gaugeOffset(score: number | null): number {
   return 126 * (1 - t);
 }
 
-function sentimentBand(data: SentimentLayer): string {
+function sentimentBand(data: SentimentLayer, focus: "options" | "equity" = "options"): string {
+  if (focus === "equity" && (data.score === null || data.score === undefined)) return "Unavailable";
   if (data.band) return data.band;
   const score = data.score;
   if (score === null || score === undefined) return "Neutral";
@@ -45,14 +47,41 @@ function fmtPublished(at: string | null | undefined): string {
   return at.slice(0, 16).replace("T", " ");
 }
 
+export function prepareEquitySentiment(data: SentimentLayer): SentimentLayer {
+  const news = data.components?.news;
+  const signed = news?.score;
+  const count = news?.count ?? news?.articles?.length ?? 0;
+  const publishers = [
+    ...new Set(
+      (news?.articles ?? [])
+        .map((row) => presentSource(row.source).label)
+        .filter((label) => label && label !== "Source unavailable" && label !== "Published news"),
+    ),
+  ].slice(0, 3);
+  const attribution = publishers.length ? publishers.join(", ") : "published company coverage";
+  return {
+    ...data,
+    title: "Equity sentiment",
+    score: signed ?? null,
+    score_0_100: signed == null ? null : Math.round(((signed + 100) / 200) * 100),
+    band: signed == null ? "Unavailable" : undefined,
+    narrative:
+      count > 0 && signed != null
+        ? `Equity headline tone uses ${count} recent company articles from ${attribution}. The signed reading is ${signed}. Option flow, social posts, and order flow are not part of this score.`
+        : "No recent company headlines were returned. Equity sentiment is unavailable. It is not scored as neutral.",
+  };
+}
+
 export function SentimentScan({
   symbol,
   expiry,
   initial,
+  focus = "options",
 }: {
   symbol: string;
   expiry: string;
   initial?: SentimentLayer | Record<string, unknown> | null;
+  focus?: "options" | "equity";
 }) {
   const qc = useQueryClient();
   const newsKey = `deep:${symbol}:${expiry || ""}`;
@@ -87,7 +116,7 @@ export function SentimentScan({
         },
       };
     },
-    enabled: Boolean(symbol),
+    enabled: Boolean(symbol) && focus !== "equity",
     staleTime: 60_000,
     retry: (failureCount, error) => !isNewsRateLimitMessage((error as Error)?.message) && failureCount < 1,
     refetchInterval: () => newsRetryDelay(newsKey),
@@ -116,7 +145,7 @@ export function SentimentScan({
     );
   }
 
-  const band = sentimentBand(data);
+  const band = sentimentBand(data, focus);
   const bias = data.bias || band.toLowerCase().replace(/\s+/g, "-");
   const displayScore =
     data.score_0_100 != null && !Number.isNaN(data.score_0_100) ? Math.round(data.score_0_100) : null;
@@ -172,18 +201,76 @@ export function SentimentScan({
         </div>
       </div>
 
-      {alert?.message ? (
+      {alert?.message && !(typeof alert.dte === "number" && alert.dte < 0) ? (
         <div
           className={`sf-alert ${alert.active ? "is-hot" : ""}`}
           data-testid="sentiment-earnings-alert"
           data-active={alert.active ? "true" : "false"}
         >
           <span className="sf-alert-kicker">{alert.active ? "Earnings alert" : "Earnings context"}</span>
-          <p>{alert.message}</p>
-          {alert.source ? <p className="sf-panel-note">{alert.source}</p> : null}
+          <p>{earningsTiming(alert.dte, alert.next_date, alert.message)}</p>
+          {alert.source ? (
+            <p className="sf-panel-note">
+              {presentSource(alert.source).url ? (
+                <a href={presentSource(alert.source).url || undefined} target="_blank" rel="noreferrer">
+                  {presentSource(alert.source).label}
+                </a>
+              ) : (
+                presentSource(alert.source).label
+              )}
+            </p>
+          ) : null}
         </div>
+      ) : typeof alert?.dte === "number" && alert.dte < 0 ? (
+        <p className="sf-panel-note" data-testid="sentiment-earnings-passed">
+          {earningsTiming(alert.dte, alert.next_date, alert.message)}
+        </p>
       ) : null}
 
+      {focus === "equity" ? (
+        <article className="sf-panel" data-testid="equity-sentiment-tone">
+          <h2>Equity headline tone</h2>
+          <p className="sf-panel-note">
+            Company headlines only. Option flow, social posts, and order flow are not part of this reading.
+          </p>
+          <dl className="sf-kv">
+            <div>
+              <dt>Headlines</dt>
+              <dd>{fmtNum(news.count, 0)}</dd>
+            </div>
+            <div>
+              <dt>Constructive</dt>
+              <dd>{fmtNum(news.articles?.filter((row) => (row.nlp_score ?? 0) >= 20).length, 0)}</dd>
+            </div>
+            <div>
+              <dt>Negative</dt>
+              <dd>{fmtNum(news.articles?.filter((row) => (row.nlp_score ?? 0) <= -20).length, 0)}</dd>
+            </div>
+            <div>
+              <dt>Signed tone</dt>
+              <dd>{news.score == null ? "—" : fmtNum(news.score, 1)}</dd>
+            </div>
+            <div>
+              <dt>As of</dt>
+              <dd>{fmtPublished(news.as_of)}</dd>
+            </div>
+            <div>
+              <dt>Coverage</dt>
+              <dd>
+                {focus === "equity"
+                  ? [
+                      ...new Set(
+                        (news.articles ?? [])
+                          .map((row) => presentSource(row.source).label)
+                          .filter((label) => label && label !== "Source unavailable" && label !== "Published news"),
+                      ),
+                    ].slice(0, 3).join(", ") || "Published news"
+                  : news.source || "—"}
+              </dd>
+            </div>
+          </dl>
+        </article>
+      ) : (
       <article className="sf-panel">
         <h2>Options flow summary</h2>
         {flowContext ? <p className="sf-panel-note">{flowContext}</p> : null}
@@ -222,13 +309,16 @@ export function SentimentScan({
           </div>
         </dl>
       </article>
+      )}
 
       <article className="sf-panel sf-news" data-testid="sentiment-news">
         <h2>
           News <span>{news.count}</span>
         </h2>
         <p className="sf-panel-note">
-          {(news.source || "Alpaca News")} · {news.method || "lexicon_v1"}
+          {focus === "equity"
+            ? "Published company coverage. Each headline keeps its own publisher and date."
+            : `${news.source || "Alpaca News"} · ${news.method || "lexicon_v1"}`}
         </p>
         {!news.articles?.length ? (
           <p className="sf-empty-inline" data-testid="sentiment-news-empty">
@@ -240,7 +330,7 @@ export function SentimentScan({
                 </button>
               </>
             ) : (
-              `No recent news for ${symbol} from Alpaca News.`
+              focus === "equity" ? `No recent company headlines for ${symbol}.` : `No recent news for ${symbol} from Alpaca News.`
             )}
           </p>
         ) : (

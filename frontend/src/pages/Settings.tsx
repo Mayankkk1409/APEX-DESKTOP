@@ -14,8 +14,12 @@ import { fmtMoney } from "../lib/portfolioFormat";
 import {
   AUTO_EXEC_DISCLAIMER,
   DEFAULT_USER_SETTINGS,
+  isRiskProfile,
   patchUserSettings,
+  readRiskSelection,
   readUserSettings,
+  RISK_PROFILE_SELECTION_NOTE,
+  selectionFromServer,
   type RiskProfile,
   type UserSettings,
 } from "../lib/userSettings";
@@ -42,7 +46,12 @@ export function Settings() {
     enabled: !brokerage.usingBrokerage,
   });
 
-  const [settings, setSettings] = useState<UserSettings>(() => readUserSettings());
+  const initialRisk = readRiskSelection();
+  const [settings, setSettings] = useState<UserSettings>(() => ({
+    ...readUserSettings(),
+    riskProfile: initialRisk.profile || readUserSettings().riskProfile,
+  }));
+  const [profileSelectionRequired, setProfileSelectionRequired] = useState(initialRisk.selectionRequired);
   const [balanceDraft, setBalanceDraft] = useState("");
   const [balanceModalOpen, setBalanceModalOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -53,6 +62,21 @@ export function Settings() {
   useEffect(() => {
     applyTheme(settings.theme);
   }, [settings.theme]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api.getSettings().then((raw) => {
+      if (cancelled || !raw || typeof raw !== "object") return;
+      const next = selectionFromServer((raw as { risk_profile?: unknown }).risk_profile);
+      setProfileSelectionRequired(next.selectionRequired);
+      if (next.profile) {
+        setSettings((current) => ({ ...current, riskProfile: next.profile as RiskProfile }));
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const stats = brokerage.usingBrokerage && brokerage.stats
     ? {
@@ -69,9 +93,14 @@ export function Settings() {
   const totalPl = accountPnl.total;
 
   function persist(patch: Partial<UserSettings>) {
+    const choosingProfile = isRiskProfile(patch.riskProfile);
     const next = patchUserSettings({ ...settings, ...patch });
     setSettings(next);
-    void api.syncSettings(next).catch(() => undefined);
+    if (choosingProfile) setProfileSelectionRequired(false);
+    const payload = choosingProfile || !profileSelectionRequired ? next : { ...next, riskProfile: undefined };
+    void api.syncSettings(payload).then(() => {
+      if (choosingProfile) void qc.invalidateQueries({ queryKey: ["scans-recent"] });
+    });
   }
 
   const resetBalance = useMutation({
@@ -187,15 +216,26 @@ export function Settings() {
             <select
               className="mt-1 w-full rounded-md border border-line bg-panel px-3 py-2 text-sm"
               data-testid="settings-risk-profile"
-              value={settings.riskProfile}
-              onChange={(e) => persist({ riskProfile: e.target.value as RiskProfile })}
+              value={profileSelectionRequired ? "" : settings.riskProfile}
+              onChange={(e) => {
+                if (isRiskProfile(e.target.value)) persist({ riskProfile: e.target.value });
+              }}
             >
+              {profileSelectionRequired ? (
+                <option value="" disabled>
+                  Select a risk profile
+                </option>
+              ) : null}
               <option value="conservative">Conservative</option>
               <option value="moderate">Moderate</option>
               <option value="aggressive">Aggressive</option>
-              <option value="custom">Custom</option>
             </select>
           </label>
+          {profileSelectionRequired ? (
+            <p className="mt-2 text-xs text-faint" data-testid="settings-risk-profile-required">
+              {RISK_PROFILE_SELECTION_NOTE}
+            </p>
+          ) : null}
 
           <label className="block text-sm">
             <span className="text-subtle">
@@ -225,33 +265,19 @@ export function Settings() {
             <span>Global auto-execution (off by default)</span>
           </label>
 
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="block text-sm">
-              <span className="text-subtle">Max risk per trade (%)</span>
-              <input
-                type="number"
-                min={0.5}
-                max={10}
-                step={0.5}
-                className="mt-1 w-full rounded-md border border-line bg-panel px-3 py-2"
-                data-testid="settings-max-risk"
-                value={settings.maxRiskPerTradePct}
-                onChange={(e) => persist({ maxRiskPerTradePct: Number(e.target.value) })}
-              />
-            </label>
-            <label className="block text-sm">
-              <span className="text-subtle">Max open positions</span>
-              <input
-                type="number"
-                min={1}
-                max={50}
-                className="mt-1 w-full rounded-md border border-line bg-panel px-3 py-2"
-                data-testid="settings-max-positions"
-                value={settings.maxPositions}
-                onChange={(e) => persist({ maxPositions: Number(e.target.value) })}
-              />
-            </label>
-          </div>
+          <label className="block text-sm">
+            <span className="text-subtle">Max risk per trade (%)</span>
+            <input
+              type="number"
+              min={0.5}
+              max={10}
+              step={0.5}
+              className="mt-1 w-full rounded-md border border-line bg-panel px-3 py-2"
+              data-testid="settings-max-risk"
+              value={settings.maxRiskPerTradePct}
+              onChange={(e) => persist({ maxRiskPerTradePct: Number(e.target.value) })}
+            />
+          </label>
         </Section>
 
         <Section title="Appearance" testId="settings-appearance">

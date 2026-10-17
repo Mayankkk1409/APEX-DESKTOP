@@ -94,6 +94,7 @@ class TokenResponse(BaseModel):
     first_login: bool
     account_mode: AccountMode
     show_connect_modal: bool
+    platform_tour: bool = False
 
 
 class UserOut(BaseModel):
@@ -105,6 +106,7 @@ class UserOut(BaseModel):
     brokerage_connected: bool
     connect_later_banner: bool
     first_login_completed: bool
+    platform_tour_seen: bool = False
     cash_balance: float
     buying_power: float
     portfolio_value: float

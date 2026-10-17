@@ -12,6 +12,7 @@ export interface User {
   brokerage_connected: boolean;
   connect_later_banner: boolean;
   first_login_completed: boolean;
+  platform_tour_seen?: boolean;
   cash_balance: number;
   buying_power: number;
   portfolio_value: number;
@@ -383,9 +384,11 @@ export interface StrategyLayer {
 export interface ScanResult {
   id: string;
   symbol: string;
-  composite_score: number;
+  composite_score: number | null;
+  research_mode?: "options" | "equity";
   recommendedContract?: RecommendedContract | null;
   layers: string[];
+  slide_layers?: string[];
   layer_data: Record<string, Record<string, unknown>>;
 }
 
@@ -436,6 +439,7 @@ export interface OrderPlacementResult {
   asset_class: string;
   legs_filled?: OrderLegFill[];
   queue_message?: string;
+  status_message?: string;
 }
 
 export interface OrderLegFill {

@@ -449,12 +449,28 @@ def _earnings_alert(fundamentals: dict[str, Any] | None) -> dict[str, Any]:
     dte = cal.get("dte")
     next_date = cal.get("next_date")
     last = cal.get("last_reported")
+    if isinstance(dte, (int, float)) and dte < 0:
+        return {
+            "active": False,
+            "dte": dte,
+            "next_date": next_date,
+            "message": f"Earnings passed ({next_date})." if next_date else "Earnings passed.",
+            "source": cal.get("source"),
+        }
+    if dte == 0:
+        return {
+            "active": True,
+            "dte": dte,
+            "next_date": next_date,
+            "message": f"Earnings today ({next_date}). Sentiment near the event is noisy — size down." if next_date else "Earnings today. Sentiment near the event is noisy — size down.",
+            "source": cal.get("source"),
+        }
     if dte is not None and dte <= 7:
         return {
             "active": True,
             "dte": dte,
             "next_date": next_date,
-            "message": f"Earnings in {dte} day(s) ({next_date}). Sentiment near events is noisy — size down.",
+            "message": f"Earnings in {int(dte)} day(s) ({next_date}). Sentiment near events is noisy — size down.",
             "source": cal.get("source"),
         }
     if next_date:

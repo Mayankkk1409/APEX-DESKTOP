@@ -32,14 +32,36 @@ describe("OrderRefusalDialog", () => {
     expect(html).not.toContain("Trade executed");
   });
 
-  it("calls an unconfirmed broker order queued", () => {
+  it("calls a broker-accepted order pending, not an APEX queue", () => {
     const reason =
       "The broker received this order but has not confirmed a fill. Check its status before sending another order.";
     const html = renderToStaticMarkup(<OrderRefusalDialog reason={reason} onClose={() => undefined} />);
-    expect(html).toContain("Order queued");
-    expect(html).toContain("has not confirmed a fill");
-    expect(html).not.toContain("Order not confirmed");
+    expect(html).toContain("Order submitted");
+    expect(html).toContain("waiting to fill at the broker");
+    expect(html.match(/waiting to fill at the broker/g)).toHaveLength(1);
+    expect(html).not.toContain("Order queued");
+    expect(html).not.toContain("Broker accepted");
     expect(html).not.toContain("This check is enough to hold the order.");
+  });
+
+  it("states the position limit once", () => {
+    const reason =
+      "Open positions are already at the limit of 40. This order was not sent. Existing holdings were not closed. This order was not sent. Review the reason, then try again if you still want the trade.";
+    const html = renderToStaticMarkup(<OrderRefusalDialog reason={reason} onClose={() => undefined} />);
+    expect(html).toContain("Order was not placed");
+    expect(html).toContain("Open positions are already at the limit of 40. This order was not sent. Existing holdings were not closed.");
+    expect(html.match(/This order was not sent/g)).toHaveLength(1);
+    expect(html).not.toContain("Review the reason");
+  });
+
+  it("replaces a stale-quote hold with a plain sentence", () => {
+    const reason = "Stale or suspect quote. This check is enough to hold the order. No order was sent.";
+    const html = renderToStaticMarkup(<OrderRefusalDialog reason={reason} onClose={() => undefined} />);
+    expect(html).toContain("Order was not placed");
+    expect(html).toContain("up-to-date price");
+    expect(html).toContain("No order was sent");
+    expect(html).not.toContain("Stale or suspect");
+    expect(html).not.toContain("enough to hold the order");
   });
 
   it("shows the broker buying-power sentence unchanged", () => {

@@ -140,29 +140,31 @@ describe("DeepScan risk review order panel", () => {
     expect(html).not.toContain("NO TRADE");
   });
 
-  it("shows Place Trade below the saved minimum and keeps the checkbox as consent", () => {
+  it("does not submit a below-minimum score until Proceed at my own risk", () => {
     const placement = orderPlacement({
       ...executableScan,
       toggleOn: DEFAULT_USER_SETTINGS.autoExecEnabled,
-      serverAutoSubmit: false,
-      composite: 39,
-      threshold: 40,
+      serverAutoSubmit: true,
+      composite: 49.9,
+      threshold: 50,
     });
-    const html = renderOrderActions(placement);
-    expect(placement.placeTradeEnabled).toBe(true);
+    const closed = renderOrderActions(placement, false);
+    expect(placement.overrideRequired).toBe(true);
     expect(thesisCheckboxState(placement)).toEqual({
       disabled: false,
       submitsOnAccept: false,
       reason: null,
     });
-    expect(html).toContain('data-testid="submit-order"');
-    expect(html).toContain("Place Trade");
-    expect(html).toContain('data-testid="thesis"');
-    expect(html).toContain('data-testid="manual-confirmation-note"');
-    expect(html).toContain("Manual confirmation required (score 39.0 vs. your auto-execute minimum 40.0).");
-    expect(html).not.toContain('data-testid="auto-exec-hint"');
-    expect(html).not.toContain("Acknowledge");
-    expect(html).not.toContain("NO TRADE");
+    expect(closed).toContain('data-testid="thesis"');
+    expect(closed).toContain("I accept the thesis");
+    expect(closed).toContain("Not recommended");
+    expect(closed).toContain("49.9");
+    expect(closed).not.toContain('data-testid="submit-order"');
+    expect(closed).not.toContain('data-testid="auto-exec-hint"');
+    const open = renderOrderActions(placement, true);
+    expect(open).toContain('data-testid="acknowledge-order"');
+    expect(open).toContain("Place Trade");
+    expect(open).not.toContain("NO TRADE");
   });
 
   it("keeps the checkbox clickable and opens Acknowledge when the order would be rejected", () => {
@@ -207,8 +209,9 @@ describe("DeepScan risk review order panel", () => {
       submitsOnAccept: false,
       reason: null,
     });
-    expect(unconfirmed.overrideRequired).toBe(true);
-    expect(renderOrderActions(unconfirmed, true)).toContain("Acknowledge");
+    expect(unconfirmed.placeTradeEnabled).toBe(false);
+    expect(unconfirmed.overrideRequired).toBe(false);
+    expect(renderOrderActions(unconfirmed, true)).not.toContain('data-testid="submit-order"');
     const confirmed = orderPlacement({
       ...executableScan,
       composite: 80,
@@ -251,7 +254,7 @@ describe("DeepScan risk review order panel", () => {
     expect(page).toContain("OrderSubmitProgress");
     expect(page).toContain("order.isPending || progressComplete");
     expect(page).toContain("orderConfirmation && !order.isPending && !progressComplete");
-    expect(page).toContain('toLowerCase() !== "filled"');
+    expect(page).toContain('status !== "filled"');
     expect(page).toContain("refreshDeskQueries(qc)");
     expect(page).toContain('nav("/app")');
     expect(page).toContain("if (orderRefusal !== null) return");
@@ -521,7 +524,7 @@ describe("DeepScan risk review order panel", () => {
     const placement = orderPlacement({
       ...executableScan,
       serverAutoSubmit: false,
-      composite: 30,
+      composite: 80,
       threshold: 40,
       hasLegs: review.rows.length > 0,
     });

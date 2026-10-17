@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
-from app.database import get_db
+from app.database import get_db, release_db_lock
 from app.deps import current_user, get_adapter
 from app.models.trading import WatchlistItem
 from app.models.user import User
@@ -23,6 +23,7 @@ class WatchIn(BaseModel):
 @router.get("/watchlist")
 async def list_watch(user: User = Depends(current_user), db: AsyncSession = Depends(get_db), adapter=Depends(get_adapter)) -> dict:
     rows = (await db.scalars(select(WatchlistItem).where(WatchlistItem.user_id == user.id))).all()
+    await release_db_lock(db)
     items = []
     for row in rows:
         q = await adapter.quote(row.symbol)

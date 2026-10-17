@@ -53,6 +53,7 @@ from app.services.strategy_recommendation import (
     format_vol_percent,
     is_defined_risk_strategy,
     recommend_strategy,
+    same_profile_band,
     record_ledger,
     selection_rationale_for,
     strategy_vega_sign,
@@ -839,7 +840,7 @@ def _prefer_executable_match(
     With no per-name flags the recommendation is unchanged. When every name fails,
     the best-ranked real strategy stays in place.
     """
-    if not executable_by_name:
+    if not executable_by_name or getattr(rec, "gates", {}).get("risk_profile") is False:
         return rec
     ordered = order_candidates_by_executability(rec.candidates, executable_by_name)
     rec.candidates = ordered
@@ -848,6 +849,8 @@ def _prefer_executable_match(
         return rec
     winner = viable[0]
     if winner.name == rec.best_match:
+        return rec
+    if not same_profile_band(rec.best_match, winner.name, rec.risk_profile):
         return rec
     current = next((c for c in ordered if c.name == rec.best_match), None)
     if current is not None and executable_by_name.get(current.name, False):
@@ -1481,7 +1484,7 @@ def _fundamentals_apex_section(
         f"P/E (TTM) {_apex_fmt(pe, 1)}. Analyst target {_apex_fmt(target)} "
         f"({_apex_fmt(upside, 1)}% vs spot). Sector {rotation.get('sector', '—')}: "
         f"{rotation.get('flow', '—')} vs {rotation.get('benchmark', 'SPY')}. "
-        f"Next earnings: {calendar.get('next_date', '—')} ({calendar.get('status', '—')})."
+        f"{_earnings_calendar_line(calendar)}"
     )
 
     weight_para = (
@@ -1490,12 +1493,13 @@ def _fundamentals_apex_section(
         "stable growth supports holding period for diagonal and married structures."
     )
 
+    upcoming_earnings = _nonnegative_earnings_days(calendar)
     if fund_score >= 65 and rev_yoy is not None and float(rev_yoy) > 10:
         action = (
             "Actionable view: fundamentals support holding-period structures; still respect earnings "
             "blackout unless using APEX Strategy with explicit catalyst rules."
         )
-    elif calendar.get("days_until") is not None and int(calendar.get("days_until", 99)) <= 7:
+    elif upcoming_earnings is not None and upcoming_earnings <= 7:
         action = (
             "Actionable view: earnings proximity elevates gap risk — reduce size, favor defined risk, or "
             "use catalyst-specific structures only."
@@ -1858,10 +1862,13 @@ def factual_structure_copy(legs: list[dict[str, Any]] | None) -> str:
         return "Option legs were not resolved for this scan."
     bits: list[str] = []
     for leg in stock:
-        action = str(leg.get("action") or "trade").capitalize()
         shares = leg.get("quantity") or 100
-        held = " already held" if leg.get("already_held") else ""
-        bits.append(f"{action} {shares:g} shares{held}")
+        order_qty = leg.get("order_qty")
+        if leg.get("already_held") or order_qty == 0:
+            bits.append(f"Use {shares:g} shares already held. No additional shares are bought.")
+        else:
+            action = str(leg.get("action") or "trade").capitalize()
+            bits.append(f"{action} {shares:g} shares")
     for leg in opts:
         action = str(leg.get("action") or "trade").capitalize()
         strike = _strike(leg)
@@ -2805,6 +2812,34 @@ def _protective_put_label(legs: list[dict[str, Any]], *, covered: bool) -> str |
     if len(stock) == 1 and len(puts) == 1 and not calls:
         return "Protective Put"
     return None
+
+
+def _earnings_calendar_line(calendar: dict[str, Any]) -> str:
+    raw = calendar.get("dte")
+    if raw is None:
+        raw = calendar.get("days_until")
+    try:
+        days = int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        days = None
+    if days is not None and days < 0:
+        when = calendar.get("next_date")
+        return f"Earnings passed ({when})." if when else "Earnings passed."
+    return f"Next earnings: {calendar.get('next_date', '—')} ({calendar.get('status', '—')})."
+
+
+def _nonnegative_earnings_days(calendar: dict[str, Any]) -> int | None:
+    """Calendar days until earnings. A date that already passed is not an upcoming event."""
+    raw = calendar.get("days_until")
+    if raw is None:
+        raw = calendar.get("dte")
+    try:
+        days = int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+    if days is None or days < 0:
+        return None
+    return days
 
 
 def _earnings_inputs(

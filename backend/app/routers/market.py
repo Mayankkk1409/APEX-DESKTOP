@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, time, timezone
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.services.market_session import NY, OPEN, getLastMarketOpen, is_trading_day
 
@@ -97,12 +97,20 @@ async def sentiment_deep(
 
 @router.get("/bars/{symbol}")
 async def bars(symbol: str, timeframe: str = "1D", limit: int = 400, adapter=Depends(get_adapter)) -> dict:
+    from app.analysis.timeframe import is_supported
+
+    if not is_supported(timeframe):
+        raise HTTPException(400, f"{timeframe} is not a supported chart interval. No daily series was substituted.")
     data = await adapter.bars(symbol, timeframe, limit)
     return {"symbol": symbol.upper(), "timeframe": timeframe, "bars": data}
 
 
 @router.get("/indicators/{symbol}")
 async def indicators(symbol: str, timeframe: str = "1D", adapter=Depends(get_adapter)) -> dict:
+    from app.analysis.timeframe import is_supported
+
+    if not is_supported(timeframe):
+        raise HTTPException(400, f"{timeframe} is not a supported chart interval. No daily series was substituted.")
     data = await adapter.bars(symbol, timeframe, 400)
     highs = [b["h"] for b in data]
     lows = [b["l"] for b in data]

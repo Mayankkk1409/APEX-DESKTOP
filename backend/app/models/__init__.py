@@ -1,3 +1,4 @@
+from app.models.assistant import AssistantUsage
 from app.models.brokerage import AccountBalance, AuditLog, BrokerageAccount, BrokerageConnection
 from app.models.otp_device import OtpCode, OtpDevice
 from app.models.trading import Order, Position, Scan, WatchlistItem
@@ -20,4 +21,5 @@ __all__ = [
     "PaperBalanceAudit",
     "OtpDevice",
     "OtpCode",
+    "AssistantUsage",
 ]

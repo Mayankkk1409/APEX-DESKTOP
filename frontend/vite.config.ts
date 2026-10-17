@@ -21,6 +21,7 @@ const wsProxy = {
 const proxy = {
   "/api": apiProxyOptions(API),
   "/auth": apiProxyOptions(API),
+  "/assistant": apiProxyOptions(API),
   "/health": apiProxyOptions(API),
   "/market": apiProxyOptions(API),
   "/volatility": apiProxyOptions(API),

@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { OhlcBar } from "./lib/ta";
 import { readPortfolioViewMode, writePortfolioViewMode } from "./lib/portfolioViewMode";
+import { readResearchMode, writeResearchMode, type ResearchMode } from "./lib/researchMode";
 import type { AccountMode, ChartSnapshot, PortfolioViewMode, RecommendedContract, User } from "./types";
 
 /** Scan progress only. Never put access or refresh tokens here. */
@@ -80,11 +81,17 @@ interface SessionState {
   selectedBrokerageAccountId: string | null;
   /** Paper vs connected brokerage — controls which data feeds dashboard/portfolio. */
   portfolioViewMode: PortfolioViewMode;
+  /** Options terminal or equity research. Does not change the account or balances. */
+  researchMode: ResearchMode;
   showConnectModal: boolean;
   /** Set on a fresh sign-in so the expiry notice shows even if this market day was already seen. */
   expiryNoticeOnLogin: boolean;
   /** Cookie restore on a protected route, before the login certificate has been decided. */
   expiryLoginPending: boolean;
+  /** Login expiry certificate is on screen. The execution notice waits until it closes. */
+  expiryLoginCertificateOpen: boolean;
+  /** Expiry watch reminder is on screen. The execution notice waits until it closes. */
+  expiryWatchOpen: boolean;
   symbol: string;
   timeframe: string;
   /** Dashboard-selected option expiry — persisted for the whole scan session. */
@@ -106,9 +113,12 @@ interface SessionState {
   setUser: (user: User | null) => void;
   setSelectedBrokerageAccountId: (id: string | null) => void;
   setPortfolioViewMode: (mode: PortfolioViewMode) => void;
+  setResearchMode: (mode: ResearchMode) => void;
   setConnectModal: (v: boolean) => void;
   setExpiryNoticeOnLogin: (v: boolean) => void;
   setExpiryLoginPending: (v: boolean) => void;
+  setExpiryLoginCertificateOpen: (v: boolean) => void;
+  setExpiryWatchOpen: (v: boolean) => void;
   setSymbol: (s: string) => void;
   setTimeframe: (t: string) => void;
   setExpiry: (e: string) => void;
@@ -130,9 +140,12 @@ export const useSession = create<SessionState>((set) => ({
   accountMode: null,
   selectedBrokerageAccountId: null,
   portfolioViewMode: readPortfolioViewMode(),
+  researchMode: readResearchMode(),
   showConnectModal: false,
   expiryNoticeOnLogin: false,
   expiryLoginPending: false,
+  expiryLoginCertificateOpen: false,
+  expiryWatchOpen: false,
   symbol: persistedScan.symbol ?? "SPX",
   timeframe: persistedScan.timeframe ?? "1D",
   expiry: persistedScan.expiry ?? "",
@@ -153,9 +166,15 @@ export const useSession = create<SessionState>((set) => ({
     writePortfolioViewMode(portfolioViewMode);
     set({ portfolioViewMode });
   },
+  setResearchMode: (researchMode) => {
+    writeResearchMode(researchMode);
+    set({ researchMode });
+  },
   setConnectModal: (showConnectModal) => set({ showConnectModal }),
   setExpiryNoticeOnLogin: (expiryNoticeOnLogin) => set({ expiryNoticeOnLogin }),
   setExpiryLoginPending: (expiryLoginPending) => set({ expiryLoginPending }),
+  setExpiryLoginCertificateOpen: (expiryLoginCertificateOpen) => set({ expiryLoginCertificateOpen }),
+  setExpiryWatchOpen: (expiryWatchOpen) => set({ expiryWatchOpen }),
   setSymbol: (symbol) => set({ symbol }),
   setTimeframe: (timeframe) => set({ timeframe }),
   setExpiry: (expiry) => set({ expiry }),

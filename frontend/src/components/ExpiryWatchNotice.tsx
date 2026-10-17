@@ -31,6 +31,7 @@ export function ExpiryWatchNotice() {
   const qc = useQueryClient();
   const userId = useSession((s) => s.user?.id ?? "session");
   const expiryLoginPending = useSession((s) => s.expiryLoginPending);
+  const setExpiryWatchOpen = useSession((s) => s.setExpiryWatchOpen);
   const token = getAccessToken();
   const [payload, setPayload] = useState<ExpiryWatchResponse | null>(null);
   const [open, setOpen] = useState(false);
@@ -84,10 +85,16 @@ export function ExpiryWatchNotice() {
     };
   }, [token, userId, expiryLoginPending]);
 
+  useEffect(() => {
+    const showing = open && Boolean(payload && payload.items.length > 0);
+    setExpiryWatchOpen(showing);
+    return () => setExpiryWatchOpen(false);
+  }, [open, payload, setExpiryWatchOpen]);
+
   useMarketSocket({
     token,
     onMessage: (msg) => {
-      if (msg.type !== "fill") return;
+      if (msg.type !== "fill" && msg.type !== "order") return;
       const user = useSession.getState().user;
       if (user && msg.balance != null && msg.buying_power != null && msg.portfolio_value != null) {
         useSession.getState().setUser({

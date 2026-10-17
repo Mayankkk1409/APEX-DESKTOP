@@ -170,6 +170,7 @@ def _token_response(user: User, access: str, settings: Settings, *, show_connect
         first_login=not user.first_login_completed,
         account_mode=user.account_mode,  # type: ignore[arg-type]
         show_connect_modal=show_connect_modal,
+        platform_tour=not bool(getattr(user, "platform_tour_seen", False)),
     )
 
 
@@ -341,7 +342,15 @@ async def login(
     now = datetime.now(timezone.utc)
     device_id = _bind_device(request, response, settings)
     device = await _device_row(db, user.id, device_id)
-    if device is not None and device.otp_verified_at is not None and otp_skip_active(device.otp_verified_at, now):
+    # 24 hours is not enough after the next regular open. A token stamped with
+    # last night's verification is rejected as soon as the market opens, so this
+    # login must email a code instead of issuing that token.
+    if (
+        device is not None
+        and device.otp_verified_at is not None
+        and otp_skip_active(device.otp_verified_at, now)
+        and verification_current(device.otp_verified_at, now)
+    ):
         token = await _issue_session(
             user,
             response,
@@ -532,6 +541,15 @@ async def logout(request: Request, response: Response, db: AsyncSession = Depend
 
 @router.get("/me", response_model=UserOut)
 async def me(user: User = Depends(current_user)) -> User:
+    return user
+
+
+@router.post("/platform-tour/complete", response_model=UserOut)
+async def complete_platform_tour(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> User:
+    """Mark the first-login platform tour as seen after skip or finish."""
+    user.platform_tour_seen = True
+    await db.commit()
+    await db.refresh(user)
     return user
 
 

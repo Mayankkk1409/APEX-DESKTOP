@@ -26,6 +26,20 @@ from app.strategies.validator import validate_strategy_output
 from app.ws.hub import hub
 
 
+class StockLegAwaiting(Exception):
+    """The stock order is at the broker and has not filled yet. Do not send the stock again."""
+
+    def __init__(self, order_id: str, broker_order_id: str) -> None:
+        self.order_id = order_id
+        self.broker_order_id = broker_order_id
+        super().__init__(STOCK_AWAITING_TEXT)
+
+
+STOCK_AWAITING_TEXT = (
+    "The stock order is at the broker. The option legs will be sent when that fill is confirmed."
+)
+
+
 def position_multiplier(asset_class: str) -> int:
     return 100 if asset_class == "us_option" else 1
 
@@ -101,6 +115,39 @@ def _sentence(reason: str, fallback: str) -> str:
     if text[-1] not in ".!?":
         text = f"{text}."
     return text
+
+
+def _close_settlement(pos: Position | None, side: str, delta: float) -> dict[str, float] | None:
+    """Average cost of the contracts this fill closed. None when the fill opens a lot."""
+    if pos is None or delta <= 0:
+        return None
+    reducing = (pos.qty > 0 and side == "sell") or (pos.qty < 0 and side == "buy")
+    if not reducing:
+        return None
+    closed = min(float(delta), abs(float(pos.qty)))
+    if closed <= 0:
+        return None
+    try:
+        basis = float(pos.avg_cost)
+    except (TypeError, ValueError):
+        return None
+    if basis < 0:
+        return None
+    signed = closed if pos.qty > 0 else -closed
+    return {"basis": basis, "closed_qty": signed}
+
+
+def _expiry_mark(raw: object) -> float | None:
+    """Settlement price for an expiring contract, including an explicit zero."""
+    if isinstance(raw, bool) or raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value < 0:
+        return None
+    return round(value, 2)
 
 
 def _positive_mark(raw: object) -> float | None:
@@ -192,16 +239,26 @@ async def _submit_for_fill(
 async def refresh_portfolio_value(user: User, db: AsyncSession, adapter: Any) -> float:
     from app.services.daily_pnl import quotes_for_positions
 
-    positions = (await db.scalars(select(Position).where(Position.user_id == user.id))).all()
-    quotes = await quotes_for_positions(list(positions), adapter)
-    live_value = user.cash_balance
+    positions = list((await db.scalars(select(Position).where(Position.user_id == user.id))).all())
+    # Cash and open lots are already on the session. Commit before quotes so a
+    # slow mark does not hold the write lock, then mark what is still open.
+    await db.commit()
+    if adapter is not None and positions:
+        quotes = await quotes_for_positions(positions, adapter)
+    else:
+        quotes = [None] * len(positions)
+    live_value = float(user.cash_balance or 0)
     for pos, q in zip(positions, quotes):
         if q is not None and q.price is not None and not _option_quote_is_equity_fallback(pos.symbol, q):
             pos.current_price = q.price
+        mark = pos.current_price
+        if mark is None:
+            continue
         mult = position_multiplier(pos.asset_class)
-        live_value += pos.qty * pos.current_price * mult
-    user.portfolio_value = round(live_value, 2)
+        live_value += float(pos.qty) * float(mark) * mult
+    user.cash_balance = round(float(user.cash_balance or 0), 2)
     user.buying_power = user.cash_balance
+    user.portfolio_value = round(live_value, 2)
     return user.portfolio_value
 
 
@@ -225,6 +282,13 @@ async def _apply_fill_to_book(
     certificate: dict[str, Any] | None,
 ) -> None:
     pos = await db.scalar(select(Position).where(Position.user_id == user.id, Position.symbol == symbol))
+    if fill_px == 0:
+        full = pos is not None and abs(abs(float(pos.qty)) - qty) < 1e-9
+        covering = pos is not None and ((pos.qty > 0 and side == "sell") or (pos.qty < 0 and side == "buy"))
+        if full and covering:
+            await db.delete(pos)
+            return
+        raise ValueError("A zero price can only close the full contract.")
     if pos:
         updated = position_after_fill(pos.qty, pos.avg_cost, side=side, fill_qty=qty, fill_px=fill_px)
         if updated is None:
@@ -278,20 +342,30 @@ async def execute_market_fill(
     spread_max: float = DEFAULT_SPREAD_MAX,
     submission_path: str = "market_fill",
     user_override: bool = False,
+    paper_book: bool | None = None,
 ) -> Order:
     from app.services.executability import enforce_submission_quotes, marketable_limit
 
-    await enforce_submission_quotes(
-        adapter,
-        [symbol],
-        path=submission_path,
-        spread_confirmed=spread_confirmed,
-        contracts=qty,
-        multiplier=position_multiplier(asset_class),
-        spread_max=spread_max,
-        user_override=user_override,
-    )
-    if asset_class == "us_option":
+    expiry_mark = _expiry_mark(mark_price) if submission_path == "expiry_close" else None
+    # Release SQLite before every quote/submit. Holding the write lock across
+    # Alpaca HTTP is what made sign-in time out the next day.
+    await db.commit()
+    if expiry_mark is None:
+        await enforce_submission_quotes(
+            adapter,
+            [symbol],
+            path=submission_path,
+            spread_confirmed=spread_confirmed,
+            contracts=qty,
+            multiplier=position_multiplier(asset_class),
+            spread_max=spread_max,
+            user_override=user_override,
+        )
+    if expiry_mark is not None:
+        px = expiry_mark
+        order_type = "limit"
+        limit_price = expiry_mark
+    elif asset_class == "us_option":
         quote = await adapter.quote(symbol)
         live = marketable_limit(side, quote)
         live_limit = live[0] if live is not None else None
@@ -302,9 +376,11 @@ async def execute_market_fill(
             order_type = "limit"
             if limit_price is None:
                 limit_price = _positive_mark(getattr(quote, "price", None))
-    mark = _positive_mark(mark_price)
-    if asset_class == "us_option" and mark is not None:
-        px = mark
+        mark = _positive_mark(mark_price)
+        if mark is not None:
+            px = mark
+        else:
+            px = limit_price if order_type == "limit" and limit_price is not None else getattr(quote, "price", None)
     else:
         quote = await adapter.quote(symbol)
         px = limit_price if order_type == "limit" and limit_price is not None else quote.price
@@ -330,8 +406,18 @@ async def execute_market_fill(
     )
     db.add(order)
     await db.flush()
+    await db.commit()
 
-    broker = await _submit_for_fill(
+    if expiry_mark == 0:
+        broker = {
+            "status": "filled",
+            "filled_avg_price": 0,
+            "filled_qty": order.qty,
+            "venue": "simulation",
+            "broker": "demo_paper",
+        }
+    else:
+        broker = await _submit_for_fill(
         adapter,
         force_paper=force_paper,
         symbol=order.symbol,
@@ -340,7 +426,7 @@ async def execute_market_fill(
         order_type=order.order_type,
         limit_price=order.limit_price,
         strict=strict,
-        session_paper=user.account_mode != "real_brokerage",
+        session_paper=user.account_mode != "real_brokerage" if paper_book is None else paper_book,
     )
     if routing is not None and isinstance(broker, dict) and broker.get("session_paper_fill"):
         routing["force_paper"] = True
@@ -354,7 +440,10 @@ async def execute_market_fill(
         broker["filled_avg_price"] = px
         broker["filled_qty"] = broker.get("filled_qty") or order.qty
         broker["status"] = "filled"
-    settlement = classify_execution(broker, requested_qty=order.qty)
+    if expiry_mark == 0:
+        settlement = Execution("filled", 0.0, float(order.qty), None, "simulation", None)
+    else:
+        settlement = classify_execution(broker, requested_qty=order.qty)
     if settlement.broker_order_id:
         prior = await db.scalar(
             select(Order).where(
@@ -399,6 +488,8 @@ async def execute_market_fill(
     order.fill_price = fill_px
     order.filled_qty = filled_qty
     order.filled_at = datetime.now(timezone.utc)
+    lot = await db.scalar(select(Position).where(Position.user_id == user.id, Position.symbol == order.symbol))
+    order.settlement = _close_settlement(lot, order.side, delta)
     await _apply_fill_to_book(
         user=user,
         db=db,
@@ -510,6 +601,7 @@ async def execute_strategy_legs(
     wide_spread_only: bool = False,
     user_override: bool = False,
     override_reasons: list[str] | None = None,
+    paper_book: bool | None = None,
 ) -> list[Order]:
     """Fill stock first, then options. A short call is sent only after covering shares are in place."""
     from app.analysis.gate_config import refuse_if_checks_failed
@@ -655,8 +747,11 @@ async def execute_strategy_legs(
                 raise ValueError("Each equity leg must include a ticker symbol, buy/sell side, and share quantity")
             order = await _fill_one(symbol=symbol, side=side, leg_qty=eq_qty, asset_class="us_equity")
             if order.status != "filled":
+                if order.broker_order_id and order.status in {"accepted", "pending", "new", "pending_new"}:
+                    raise StockLegAwaiting(order.id, order.broker_order_id)
                 raise ValueError("Stock leg did not fill")
             orders.append(order)
+        await db.commit()
         if len(legs) >= 2:
             for leg in legs:
                 symbol = str(leg.get("symbol") or "").upper()
@@ -685,6 +780,7 @@ async def execute_strategy_legs(
                     spread_max=spread_max,
                     submission_path=submission_path,
                     user_override=honored_override,
+                    paper_book=paper_book,
                 )
             )
             return orders
@@ -830,6 +926,37 @@ async def _open_combo_positions(
     )
 
 
+async def _paper_crossing_limit(adapter: Any, legs: list[dict[str, Any]]) -> float | None:
+    """Net debit that lifts the current offer, plus one penny.
+
+    Alpaca paper leaves a multi-leg limit unfilled when the net is the mid.
+    A paper order uses this crossing price so the broker can fill it.
+    None means a live bid or ask is missing, and the caller keeps the confirmed net.
+    """
+    debit = 0.0
+    for leg in legs:
+        symbol = str(leg.get("symbol") or "")
+        side = str(leg.get("side") or "").lower()
+        try:
+            quote = await adapter.quote(symbol)
+        except Exception:  # noqa: BLE001
+            return None
+        bid = getattr(quote, "bid", None)
+        ask = getattr(quote, "ask", None)
+        try:
+            bid_f = float(bid) if bid is not None else None
+            ask_f = float(ask) if ask is not None else None
+        except (TypeError, ValueError):
+            return None
+        if side == "buy" and ask_f is not None and ask_f > 0:
+            debit += ask_f
+        elif side == "sell" and bid_f is not None and bid_f > 0:
+            debit -= bid_f
+        else:
+            return None
+    return round(debit + 0.01, 2)
+
+
 async def _execute_combo(
     *,
     user: User,
@@ -845,6 +972,7 @@ async def _execute_combo(
     spread_max: float = DEFAULT_SPREAD_MAX,
     submission_path: str = "strategy_legs",
     user_override: bool = False,
+    paper_book: bool | None = None,
 ) -> Order:
     """One limit combo at the net mid. A rejection is not split into market orders.
 
@@ -878,6 +1006,17 @@ async def _execute_combo(
                 "position_intent": "buy_to_open" if leg_side == "buy" else "sell_to_open",
             }
         )
+    session_paper = user.account_mode != "real_brokerage" if paper_book is None else paper_book
+    await db.commit()
+    if session_paper:
+        from app.services.order_queue import session_open
+
+        if session_open(datetime.now(timezone.utc)):
+            crossed = await _paper_crossing_limit(adapter, broker_legs)
+            if crossed is not None:
+                net = crossed
+                limit = round(abs(net), 2)
+                side = "buy" if net >= 0 else "sell"
     mult = position_multiplier("us_option")
     cost = estimate_order_cost(qty, limit, asset_class="us_option", multiplier=mult)
     if side == "buy" and cost > user.buying_power:
@@ -895,7 +1034,6 @@ async def _execute_combo(
         "legs": broker_legs,
         "strict": True,
     }
-    session_paper = user.account_mode != "real_brokerage"
 
     def _reject(reason: str) -> ComboHeldBack:
         text = _sentence(reason, "The broker did not accept this order")
@@ -904,6 +1042,7 @@ async def _execute_combo(
         )
 
     paper_note: str | None = None
+    await db.commit()
     try:
         broker = await adapter.submit_order(**payload)
     except TypeError as exc:
@@ -943,10 +1082,35 @@ async def _execute_combo(
         if settlement.outcome in {"ambiguous", "accepted"} or (
             settlement.outcome not in {"rejected", "filled", "partial"} and settlement.fill_price is None
         ):
-            raise ComboHeldBack(
-                "The broker received this order but has not confirmed a fill. "
-                "Check its status before sending another order."
+            confirmed = settlement.outcome == "accepted" and bool(settlement.broker_order_id)
+            pending = Order(
+                user_id=user.id,
+                scan_id=scan_id,
+                symbol=combo_symbol,
+                side=side,
+                qty=qty,
+                order_type="limit",
+                limit_price=limit,
+                estimated_cost=cost,
+                asset_class="us_option",
+                multiplier=mult,
+                status="accepted" if confirmed else "unknown",
+                fill_price=None,
+                filled_qty=0,
+                venue=settlement.venue,
+                broker_order_id=settlement.broker_order_id,
             )
+            message = (
+                "Order submitted to Alpaca — awaiting execution."
+                if confirmed
+                else "The broker result is not confirmed. This order may already have been sent. "
+                "Check Pending orders before you try again. APEX will not send a second copy from this attempt."
+            )
+            db.add(pending)
+            await db.commit()
+            await db.refresh(pending)
+            pending.status_message = message  # type: ignore[attr-defined]
+            return pending
         if settlement.outcome == "rejected" or settlement.fill_price is None:
             raise _reject(settlement.reason or "The broker did not accept this order")
         fill_px = settlement.fill_price

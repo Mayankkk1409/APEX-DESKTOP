@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.trading import Position
 from app.models.user import User
+from app.services.executability import marketable_limit
 from app.services.fills import execute_market_fill
 from app.services.occ_symbol import expiry_iso_from_text, parse_occ, parse_occ_expiry
 
@@ -155,6 +156,40 @@ def merge_notices(primary: list[dict[str, Any]], extra: list[dict[str, Any]]) ->
     return merged
 
 
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number
+
+
+async def _settlement_price(adapter: Any, symbol: str, side: str, stored_mark: float | None) -> float | None:
+    """Price an expiring contract from the live quote, then the mark already on the position.
+
+    An explicit zero quote is a worthless settlement. A missing quote is not turned into zero.
+    """
+    quote = None
+    try:
+        quote = await adapter.quote(symbol)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("expiry quote failed symbol={} reason={}", symbol, type(exc).__name__)
+    price = _number(getattr(quote, "price", None)) if quote is not None else None
+    bid = _number(getattr(quote, "bid", None)) if quote is not None else None
+    ask = _number(getattr(quote, "ask", None)) if quote is not None else None
+    if price == 0 and not (bid is not None and bid > 0) and not (ask is not None and ask > 0):
+        return 0.0
+    if quote is not None:
+        live = marketable_limit(side, quote)
+        if live is not None:
+            return live[0]
+    if stored_mark is not None and stored_mark > 0:
+        return round(float(stored_mark), 2)
+    return None
+
+
 async def close_expiring_paper_positions(
     db: AsyncSession,
     adapter: Any,
@@ -170,22 +205,31 @@ async def close_expiring_paper_positions(
     """
     local = as_ny(now)
     today = local.date()
-    use_paper = not market_is_open(local)
+    # Paper books always settle locally at expiry. A live broker reject during the
+    # morning catch-up would leave an expired contract open and cash wrong.
     users = (await db.scalars(select(User).where(User.account_mode == "paper_funded"))).all()
     closed = 0
     for user in users:
+        await db.refresh(user)
         positions = (await db.scalars(select(Position).where(Position.user_id == user.id))).all()
-        due: list[tuple[str, float, str]] = []
+        due: list[tuple[str, float, str, float | None]] = []
         for pos in positions:
             expiry = parse_occ_expiry(pos.symbol)
             if expiry is None or pos.qty == 0:
                 continue
             if not due_for_auto_close(expiry, today, local, cutoff):
                 continue
-            due.append((pos.symbol, float(pos.qty), pos.asset_class or "us_option"))
-        for symbol, qty, asset_class in due:
+            stored = _number(pos.current_price)
+            due.append((pos.symbol, float(pos.qty), pos.asset_class or "us_option", stored))
+        await db.commit()
+        for symbol, qty, asset_class, stored in due:
             side = "sell" if qty > 0 else "buy"
+            price = await _settlement_price(adapter, symbol, side, stored)
+            if price is None:
+                logger.warning("expiry close skipped symbol={} reason=no settlement price", symbol)
+                continue
             try:
+                await db.refresh(user)
                 await execute_market_fill(
                     user=user,
                     db=db,
@@ -194,9 +238,12 @@ async def close_expiring_paper_positions(
                     side=side,
                     qty=abs(qty),
                     asset_class=asset_class,
-                    force_paper=use_paper,
+                    force_paper=True,
                     closing=True,
+                    mark_price=price,
                     submission_path="expiry_close",
+                    strategy_name="Expiry close",
+                    paper_book=True,
                 )
                 closed += 1
             except Exception as exc:  # noqa: BLE001

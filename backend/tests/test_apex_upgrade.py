@@ -396,6 +396,43 @@ async def test_trading_settings_persistence(client: AsyncClient) -> None:
 
     again = await client.get("/api/settings/trading", headers=headers)
     assert again.json()["auto_execution_threshold"] == 88
+    assert again.json()["risk_profile"] == "aggressive"
+    assert again.json()["profile_selection_required"] is False
+
+
+@pytest.mark.asyncio
+async def test_custom_profile_is_rejected_and_an_existing_row_is_not_remapped(client: AsyncClient) -> None:
+    from sqlalchemy import select
+
+    from app.database import get_db
+    from app.models.user_settings import UserTradingSettings
+
+    token = await _auth(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    await client.patch("/api/settings/trading", json={"max_positions": 6}, headers=headers)
+    rejected = await client.patch("/api/settings/trading", json={"risk_profile": "custom"}, headers=headers)
+    assert rejected.status_code == 422
+    kept = await client.get("/api/settings/trading", headers=headers)
+    assert kept.json()["risk_profile"] == "moderate"
+
+    app = client._transport.app  # type: ignore[attr-defined]
+    override = app.dependency_overrides[get_db]
+    session_gen = override()
+    session = await session_gen.__anext__()
+    row = await session.scalar(select(UserTradingSettings))
+    assert row is not None
+    row.risk_profile = "custom"
+    await session.commit()
+    await session_gen.aclose()
+
+    stored = await client.get("/api/settings/trading", headers=headers)
+    assert stored.json()["risk_profile"] == "custom"
+    assert stored.json()["profile_selection_required"] is True
+    touched = await client.patch("/api/settings/trading", json={"max_positions": 4}, headers=headers)
+    assert touched.status_code == 200
+    assert touched.json()["risk_profile"] == "custom"
+    assert touched.json()["max_positions"] == 4
+    assert touched.json()["profile_selection_required"] is True
 
 
 @pytest.mark.asyncio

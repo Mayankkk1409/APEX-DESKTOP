@@ -16,6 +16,7 @@ from app.database import Base
 from app.models.trading import Order, Position
 from app.models.user import User
 from app.schemas.market import Quote
+from app.services.portfolio_pnl import account_trade_pnl
 from app.services.expiry_close import (
     close_expiring_paper_positions,
     expiring_notices,
@@ -38,18 +39,33 @@ def _occ(expiry: date, root: str = "AAPL") -> str:
 
 
 class StubAdapter:
-    def __init__(self, *, price: float = QUOTE_PX, reject: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        price: float = QUOTE_PX,
+        reject: bool = False,
+        bid: float | None = None,
+        ask: float | None = None,
+        fail: bool = False,
+    ) -> None:
         self.price = price
         self.reject = reject
+        self.bid = bid
+        self.ask = ask
+        self.fail = fail
         self.submits: list[dict] = []
         self.quotes: list[str] = []
 
     async def quote(self, symbol: str) -> Quote:
         self.quotes.append(symbol)
+        if self.fail:
+            raise RuntimeError("quote unavailable")
         return Quote(
             symbol=symbol,
             name=symbol,
             price=self.price,
+            bid=self.bid,
+            ask=self.ask,
             source="test",
             as_of=datetime.now(ZoneInfo("UTC")).isoformat(),
         )
@@ -255,7 +271,8 @@ async def test_past_expiry_closes_when_the_market_is_closed(db: AsyncSession) ->
     assert orders[0].fill_price == pytest.approx(QUOTE_PX)
 
 
-async def test_broker_rejection_uses_quote_price(db: AsyncSession) -> None:
+async def test_broker_rejection_still_settles_paper_book(db: AsyncSession) -> None:
+    """Expiry settles the paper book locally. A live reject must not leave cash wrong."""
     user = _user()
     pos = _position(user, _occ(TODAY))
     db.add(user)
@@ -264,10 +281,195 @@ async def test_broker_rejection_uses_quote_price(db: AsyncSession) -> None:
 
     price = 3.37
     adapter = StubAdapter(price=price, reject=True)
-    # Session still open, but past a test cutoff so the close is due and the broker is tried.
     await close_expiring_paper_positions(db, adapter, now=_at(15, 30), cutoff=time(15, 0))
-    assert len(adapter.submits) == 1
-    # A broker rejection is not rewritten into a fill at the quote.
+    assert adapter.submits == []
+    assert await db.get(Position, pos.id) is None
+    await db.refresh(user)
+    credit = price * 100
+    assert user.cash_balance == pytest.approx(10_000 + credit)
+    assert user.buying_power == pytest.approx(10_000 + credit)
+    assert user.portfolio_value == pytest.approx(10_000 + credit)
+
+
+async def test_expiry_close_updates_cash_pnl_and_history_together(db: AsyncSession) -> None:
+    """The debit is already out of cash. The close adds the sale and the realized result."""
+    user = _user(cash=9_850.0)
+    user.starting_balance = 10_000.0
+    user.portfolio_value = 10_000.0
+    pos = _position(user, _occ(TODAY))
+    pos.current_price = 1.5
+    db.add(user)
+    db.add(pos)
+    await db.commit()
+
+    adapter = StubAdapter()
+    await close_expiring_paper_positions(db, adapter, now=_at(16, 5))
+    await db.refresh(user)
+    sale = QUOTE_PX * 100
+    assert user.cash_balance == pytest.approx(9_850 + sale)
+    assert user.buying_power == pytest.approx(9_850 + sale)
+    assert user.portfolio_value == pytest.approx(9_850 + sale)
+    assert await db.get(Position, pos.id) is None
+    orders = (await db.scalars(select_orders(user.id))).all()
+    assert len(orders) == 1
+    assert orders[0].status == "filled"
+    assert orders[0].side == "sell"
+    assert orders[0].fill_price == pytest.approx(QUOTE_PX)
+    # (2.40 − 1.50) × 1 × 100 = 90. No opening order is required for that result.
+    assert account_trade_pnl(orders, []) == pytest.approx(90)
+
+
+async def test_opening_order_is_not_counted_twice(db: AsyncSession) -> None:
+    user = _user(cash=9_850.0)
+    pos = _position(user, _occ(TODAY))
+    opened = Order(
+        user_id=user.id,
+        symbol=pos.symbol,
+        side="buy",
+        qty=1,
+        order_type="limit",
+        fill_price=1.5,
+        filled_qty=1,
+        status="filled",
+        asset_class="us_option",
+        multiplier=100,
+    )
+    db.add(user)
+    db.add(pos)
+    db.add(opened)
+    await db.commit()
+
+    await close_expiring_paper_positions(db, StubAdapter(), now=_at(16, 5))
+    orders = (await db.scalars(select_orders(user.id))).all()
+    assert len(orders) == 2
+    assert account_trade_pnl(orders, []) == pytest.approx(90)
+
+
+async def test_wide_spread_still_settles_at_the_bid(db: AsyncSession) -> None:
+    user = _user(cash=9_850.0)
+    pos = _position(user, _occ(TODAY))
+    db.add(user)
+    db.add(pos)
+    await db.commit()
+
+    adapter = StubAdapter(price=1.05, bid=0.10, ask=2.00)
+    await close_expiring_paper_positions(db, adapter, now=_at(16, 5))
+    await db.refresh(user)
+    assert await db.get(Position, pos.id) is None
+    assert user.cash_balance == pytest.approx(9_850 + 10)
+    orders = (await db.scalars(select_orders(user.id))).all()
+    assert orders[0].fill_price == pytest.approx(0.10)
+    assert account_trade_pnl(orders, []) == pytest.approx((0.10 - 1.5) * 100)
+
+
+async def test_worthless_quote_removes_the_position_without_a_cash_credit(db: AsyncSession) -> None:
+    user = _user(cash=9_850.0)
+    user.portfolio_value = 10_000.0
+    pos = _position(user, _occ(TODAY))
+    pos.current_price = 1.5
+    db.add(user)
+    db.add(pos)
+    await db.commit()
+
+    await close_expiring_paper_positions(db, StubAdapter(price=0), now=_at(16, 5))
+    await db.refresh(user)
+    assert await db.get(Position, pos.id) is None
+    assert user.cash_balance == pytest.approx(9_850)
+    assert user.buying_power == pytest.approx(9_850)
+    assert user.portfolio_value == pytest.approx(9_850)
+    orders = (await db.scalars(select_orders(user.id))).all()
+    assert orders[0].status == "filled"
+    assert orders[0].fill_price == pytest.approx(0)
+    assert account_trade_pnl(orders, []) == pytest.approx(-150)
+
+
+async def test_missing_quote_uses_the_stored_mark(db: AsyncSession) -> None:
+    user = _user(cash=9_850.0)
+    pos = _position(user, _occ(TODAY))
+    pos.current_price = 1.5
+    db.add(user)
+    db.add(pos)
+    await db.commit()
+
+    await close_expiring_paper_positions(db, StubAdapter(fail=True), now=_at(16, 5))
+    await db.refresh(user)
+    assert await db.get(Position, pos.id) is None
+    assert user.cash_balance == pytest.approx(9_850 + 150)
+    orders = (await db.scalars(select_orders(user.id))).all()
+    assert orders[0].fill_price == pytest.approx(1.5)
+    assert account_trade_pnl(orders, []) == pytest.approx(0)
+
+
+async def test_short_expiry_close_debits_cash_and_clears_pnl(db: AsyncSession) -> None:
+    """A short is bought back. Cash falls by the debit; buying power and value follow."""
+    user = _user(cash=10_000.0)
+    user.portfolio_value = 10_150.0
+    pos = _position(user, _occ(TODAY), qty=-1)
+    pos.avg_cost = 1.5
+    pos.current_price = 1.5
+    opened = Order(
+        user_id=user.id,
+        symbol=pos.symbol,
+        side="sell",
+        qty=1,
+        order_type="limit",
+        fill_price=1.5,
+        filled_qty=1,
+        status="filled",
+        asset_class="us_option",
+        multiplier=100,
+    )
+    db.add(user)
+    db.add(pos)
+    db.add(opened)
+    await db.commit()
+
+    await close_expiring_paper_positions(db, StubAdapter(price=2.4), now=_at(16, 5))
+    await db.refresh(user)
+    assert await db.get(Position, pos.id) is None
+    debit = 2.4 * 100
+    assert user.cash_balance == pytest.approx(10_000 - debit)
+    assert user.buying_power == pytest.approx(10_000 - debit)
+    assert user.portfolio_value == pytest.approx(10_000 - debit)
+    orders = (await db.scalars(select_orders(user.id))).all()
+    assert len(orders) == 2
+    close = next(o for o in orders if o.side == "buy")
+    assert close.fill_price == pytest.approx(2.4)
+    # Short sold at 1.50, bought back at 2.40 → −90.
+    assert account_trade_pnl(orders, []) == pytest.approx(-90)
+
+
+async def test_long_and_short_expiry_closes_update_book_together(db: AsyncSession) -> None:
+    user = _user(cash=10_000.0)
+    long_pos = _position(user, _occ(TODAY, root="AAPL"), qty=1)
+    short_pos = _position(user, _occ(TODAY, root="MSFT"), qty=-1)
+    long_pos.avg_cost = 1.0
+    short_pos.avg_cost = 2.0
+    db.add_all([user, long_pos, short_pos])
+    await db.commit()
+
+    await close_expiring_paper_positions(db, StubAdapter(price=1.5), now=_at(16, 5))
+    await db.refresh(user)
+    assert await db.get(Position, long_pos.id) is None
+    assert await db.get(Position, short_pos.id) is None
+    # +150 from the long sale, −150 from covering the short.
+    assert user.cash_balance == pytest.approx(10_000)
+    assert user.buying_power == pytest.approx(10_000)
+    assert user.portfolio_value == pytest.approx(10_000)
+
+
+async def test_no_price_at_all_leaves_the_position_open(db: AsyncSession) -> None:
+    user = _user(cash=9_850.0)
+    pos = _position(user, _occ(TODAY))
+    pos.current_price = 0
+    db.add(user)
+    db.add(pos)
+    await db.commit()
+
+    result = await close_expiring_paper_positions(db, StubAdapter(fail=True), now=_at(16, 5))
+    assert result["closed"] == 0
     assert await db.get(Position, pos.id) is not None
     await db.refresh(user)
-    assert user.cash_balance == pytest.approx(10_000)
+    assert user.cash_balance == pytest.approx(9_850)
+    orders = (await db.scalars(select_orders(user.id))).all()
+    assert orders == []

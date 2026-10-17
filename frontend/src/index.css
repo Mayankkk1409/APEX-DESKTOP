@@ -2923,6 +2923,40 @@ textarea::placeholder {
   color: #c4a56a;
 }
 
+.payoff-board {
+  margin-top: 0.75rem;
+}
+
+.payoff-board-legend {
+  display: flex;
+  gap: 1.25rem;
+  margin-bottom: 0.4rem;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #a78d5d;
+}
+
+.payoff-board-rows {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.payoff-pair {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-width: 8.75rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid rgba(196, 165, 106, 0.28);
+  border-radius: 0.45rem;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.75rem;
+  color: rgba(206, 191, 156, 0.92);
+}
+
 /* Order confirmation certificate */
 .order-cert-backdrop {
   backdrop-filter: blur(4px);
@@ -4079,6 +4113,599 @@ html[data-theme="light"] .apex-draw-stroke {
 .scan-beam-v { left: 0; }
 .portfolio-skeleton { animation: portfolio-loading 1.5s ease-in-out infinite alternate; }
 @keyframes portfolio-loading { from { opacity: 0.4; } to { opacity: 1; } }
+.apex-ai {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 36;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.65rem;
+  width: min(24rem, calc(100vw - 2rem));
+  pointer-events: none;
+}
+
+.apex-ai-launch,
+.apex-ai-panel,
+.apex-ai-panel *,
+.apex-ai-plans-card,
+.apex-ai-plans-card * {
+  pointer-events: auto;
+}
+
+.apex-ai-launch {
+  position: relative;
+  width: 3.25rem;
+  height: 3.25rem;
+  padding: 0.35rem;
+  border: 1px solid var(--apex-line);
+  border-radius: 999px;
+  background: var(--apex-panel);
+  cursor: pointer;
+  animation: apex-ai-glow 2.6s ease-in-out infinite;
+  transition: border-color 180ms ease, background-color 180ms ease, transform 180ms ease;
+}
+
+.apex-ai-launch::before {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border: 1px solid var(--apex-gold);
+  border-radius: inherit;
+  pointer-events: none;
+  animation: apex-ai-ring 2.6s ease-out infinite;
+}
+
+.apex-ai-launch img {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.apex-ai-launch:hover,
+.apex-ai-launch:focus-visible {
+  border-color: var(--apex-gold);
+  outline: none;
+  animation: none;
+  transform: scale(1.04);
+}
+
+.apex-ai-launch:hover::before,
+.apex-ai-launch:focus-visible::before,
+.apex-ai-launch.is-open,
+.apex-ai-launch.is-open::before {
+  animation: none;
+}
+
+.apex-ai-launch.is-open {
+  border-color: var(--apex-gold);
+}
+
+.apex-ai-launch.is-open::before,
+.apex-ai-launch:hover::before,
+.apex-ai-launch:focus-visible::before {
+  opacity: 0;
+}
+
+@keyframes apex-ai-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--apex-gold) 18%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 18px 1px color-mix(in srgb, var(--apex-gold) 55%, transparent);
+  }
+}
+
+@keyframes apex-ai-ring {
+  0% {
+    opacity: 0.7;
+    transform: scale(1);
+  }
+  75%,
+  100% {
+    opacity: 0;
+    transform: scale(1.38);
+  }
+}
+
+.apex-ai-panel {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 0.65rem);
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-height: min(32rem, calc(100dvh - 6.5rem));
+  overflow: hidden;
+  border: 1px solid var(--apex-line);
+  border-radius: 0.75rem;
+  background: var(--apex-panel);
+  color: var(--apex-text);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  transform-origin: bottom right;
+  opacity: 0;
+  transform: translateY(1.15rem) scale(0.82);
+  transition:
+    opacity 280ms ease,
+    transform 420ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.apex-ai-panel.is-open {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+.apex-ai-panel:not(.is-open),
+.apex-ai-panel:not(.is-open) * {
+  pointer-events: none;
+}
+
+.apex-ai-head,
+.apex-ai-compose {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.apex-ai-head {
+  flex: 0 0 auto;
+  padding: 0.75rem 0.75rem 0.55rem;
+  border-bottom: 1px solid var(--apex-line);
+}
+
+.apex-ai-head img {
+  width: 1.75rem;
+  height: 1.75rem;
+  object-fit: contain;
+}
+
+.apex-ai-head h2 {
+  margin: 0;
+  font-size: 0.95rem;
+  letter-spacing: 0.04em;
+}
+
+.apex-ai-head p,
+.apex-ai-status,
+.apex-ai-pending,
+.apex-ai-plan-note,
+.apex-ai-plan-sub {
+  margin: 0;
+  color: var(--apex-text-muted);
+  font-size: 0.72rem;
+}
+
+.apex-ai-head > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.apex-ai-close,
+.apex-ai-textbtn,
+.apex-ai-compose button,
+.apex-ai-bubble button,
+.apex-ai-period button {
+  border: 1px solid var(--apex-line);
+  border-radius: 0.4rem;
+  background: transparent;
+  color: var(--apex-text);
+  cursor: pointer;
+  font: inherit;
+}
+
+.apex-ai-close {
+  width: 1.75rem;
+  height: 1.75rem;
+  line-height: 1;
+}
+
+.apex-ai-textbtn,
+.apex-ai-compose button,
+.apex-ai-bubble button,
+.apex-ai-period button {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.72rem;
+}
+
+.apex-ai-close:hover,
+.apex-ai-textbtn:hover,
+.apex-ai-compose button:hover,
+.apex-ai-period button:hover,
+.apex-ai-close:focus-visible,
+.apex-ai-textbtn:focus-visible,
+.apex-ai-compose button:focus-visible,
+.apex-ai-period button:focus-visible {
+  border-color: var(--apex-gold);
+  outline: none;
+}
+
+.apex-ai-status,
+.apex-ai-input-error {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0.45rem 0.75rem 0;
+  font-size: 0.72rem;
+}
+
+.apex-ai-input-error {
+  color: var(--apex-error-text);
+}
+
+.apex-ai-thread {
+  flex: 1 1 auto;
+  min-height: min(8.5rem, 22dvh);
+  overflow: auto;
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.apex-ai-bubble {
+  max-width: 95%;
+  border: 1px solid var(--apex-line);
+  border-radius: 0.65rem;
+  padding: 0.5rem 0.65rem;
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.apex-ai-bubble p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.apex-ai-bubble.is-user {
+  align-self: flex-end;
+  background: var(--apex-surface);
+}
+
+.apex-ai-bubble.is-assistant {
+  align-self: flex-start;
+}
+
+.apex-ai-bubble button {
+  margin-top: 0.4rem;
+}
+
+.apex-ai-compose {
+  flex: 0 0 auto;
+  padding: 0.65rem 0.75rem 0.75rem;
+  border-top: 1px solid var(--apex-line);
+  background: var(--apex-panel);
+}
+
+.apex-ai-compose textarea {
+  flex: 1;
+  min-height: 2.6rem;
+  max-height: 6rem;
+  resize: vertical;
+  border: 1px solid var(--apex-line);
+  border-radius: 0.45rem;
+  background: var(--apex-surface);
+  color: var(--apex-text);
+  font: inherit;
+  font-size: 0.82rem;
+  padding: 0.4rem 0.5rem;
+}
+
+.apex-ai-compose textarea:focus-visible {
+  border-color: var(--apex-gold);
+  outline: none;
+}
+
+.apex-ai-compose button:disabled,
+.apex-ai-bubble button:disabled,
+.apex-ai-compose textarea:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.apex-ai-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
+
+.apex-ai-plans-card {
+  position: fixed;
+  z-index: 45;
+  top: 4.5rem;
+  left: 1rem;
+  display: flex;
+  flex-direction: column;
+  width: min(24rem, calc(100vw - 2rem));
+  max-height: min(32rem, calc(100dvh - 6rem));
+  overflow: hidden;
+  border: 1px solid var(--apex-line);
+  border-radius: 0.75rem;
+  background: var(--apex-panel);
+  color: var(--apex-text);
+  padding: 1rem;
+}
+
+.apex-ai-plans-drag {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.apex-ai-plans-drag:active {
+  cursor: grabbing;
+}
+
+.apex-ai-plans-drag p {
+  margin: 0;
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--apex-bronze);
+}
+
+.apex-ai-plans-drag button {
+  border: 0;
+  background: transparent;
+  color: var(--apex-gold);
+  font: inherit;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+
+.apex-ai-plans-card.is-dragging,
+.apex-ai-plans-card.is-dragging * {
+  user-select: none;
+}
+
+.apex-ai-plans-body {
+  min-height: 0;
+  overflow: auto;
+}
+
+.apex-ai-period {
+  display: flex;
+  gap: 0.35rem;
+  margin-bottom: 0.45rem;
+}
+
+.apex-ai-period button[aria-pressed="true"] {
+  border-color: var(--apex-gold);
+  color: var(--apex-gold);
+}
+
+.apex-ai-plan-list {
+  list-style: none;
+  margin: 0.6rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.apex-ai-plan-list > li {
+  border-top: 1px solid var(--apex-line);
+  padding-top: 0.65rem;
+}
+
+.apex-ai-plan-name {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+
+.apex-ai-current {
+  color: var(--apex-gold);
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.apex-ai-plan-price {
+  margin: 0.25rem 0;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+.apex-ai-plan-price span {
+  font-size: 1.35rem;
+}
+
+.apex-ai-plan-facts,
+.apex-ai-plan-list dl {
+  margin: 0.25rem 0 0;
+  padding: 0;
+}
+
+.apex-ai-plan-facts {
+  list-style: none;
+  font-size: 0.72rem;
+  color: var(--apex-text-muted);
+}
+
+.apex-ai-plan-list dl div {
+  display: grid;
+  grid-template-columns: 6.5rem 1fr;
+  gap: 0.35rem;
+  font-size: 0.72rem;
+  margin-top: 0.2rem;
+}
+
+.apex-ai-plan-list dt {
+  color: var(--apex-bronze, var(--apex-gold));
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.apex-ai-plan-list dd {
+  margin: 0;
+}
+
+.apex-ai-separate {
+  margin-top: 0.8rem;
+  padding-top: 0.65rem;
+  border-top: 1px solid var(--apex-line);
+  font-size: 0.72rem;
+  color: var(--apex-text-muted);
+}
+
+.apex-ai-separate h3 {
+  margin: 0 0 0.35rem;
+  color: var(--apex-text);
+  font-size: 0.78rem;
+}
+
+.apex-ai-separate p {
+  margin: 0 0 0.45rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .apex-ai-launch,
+  .apex-ai-launch::before,
+  .apex-ai-panel {
+    animation: none;
+    transition: none;
+  }
+
+  .apex-ai-launch:hover,
+  .apex-ai-launch:focus-visible {
+    transform: none;
+  }
+
+  .apex-ai-panel.is-open {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.research-mode {
+  position: relative;
+  display: inline-grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: center;
+  padding: 3px;
+  border: 1px solid rgba(201, 168, 106, 0.45);
+  border-radius: 999px;
+  background: rgba(12, 10, 8, 0.55);
+  min-width: 11.5rem;
+}
+.research-mode-thumb {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc(50% - 3px);
+  border-radius: 999px;
+  background: #c9a86a;
+  transition: transform 1100ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.research-mode-thumb.is-equity {
+  transform: translateX(100%);
+}
+.desk,
+main[data-testid="deep-scan"] {
+  position: relative;
+}
+.research-mode-wash {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  z-index: 80;
+  overflow: hidden;
+  background: linear-gradient(115deg, rgba(201, 168, 106, 0.46), rgba(16, 14, 12, 0.2) 48%, rgba(201, 168, 106, 0.28));
+  animation: research-wash 1.6s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+.research-mode-wash::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 34%;
+  background: linear-gradient(90deg, transparent, rgba(244, 226, 182, 0.72), transparent);
+  animation: research-sweep 1.6s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+.research-mode-wash[data-mode="options"] {
+  background: linear-gradient(to left, rgba(201, 168, 106, 0.62), rgba(16, 14, 12, 0.16) 42%, rgba(201, 168, 106, 0.38));
+  animation-duration: 1.9s;
+}
+.research-mode-wash[data-mode="options"]::after {
+  left: auto;
+  right: 0;
+  width: 46%;
+  background: linear-gradient(270deg, transparent, rgba(244, 226, 182, 0.92), transparent);
+  animation-name: research-sweep-left;
+  animation-duration: 1.9s;
+}
+.desk.is-mode-changing > :not(.research-mode-wash),
+main[data-testid="deep-scan"].is-mode-changing > .research-mode-sheet {
+  pointer-events: none;
+  animation: research-conceal-equity 2.7s linear forwards;
+}
+html[data-research-transition] .apex-ai {
+  pointer-events: none;
+  animation: research-conceal-equity 2.7s linear forwards;
+}
+.desk[data-research-mode="options"].is-mode-changing > :not(.research-mode-wash),
+main[data-testid="deep-scan"][data-research-mode="options"].is-mode-changing > .research-mode-sheet,
+html[data-research-transition="options"] .apex-ai {
+  animation-name: research-conceal-options;
+  animation-duration: 3s;
+}
+@keyframes research-wash {
+  0% { opacity: 1; }
+  68% { opacity: 1; }
+  100% { opacity: 0; }
+}
+@keyframes research-sweep {
+  from { transform: translateX(-120%); }
+  to { transform: translateX(380%); }
+}
+@keyframes research-sweep-left {
+  from { transform: translateX(130%); }
+  to { transform: translateX(-420%); }
+}
+@keyframes research-conceal-equity {
+  0% { opacity: 1; }
+  10% { opacity: 0; }
+  59% { opacity: 0; }
+  100% { opacity: 1; }
+}
+@keyframes research-conceal-options {
+  0% { opacity: 1; }
+  9% { opacity: 0; }
+  63% { opacity: 0; }
+  100% { opacity: 1; }
+}
+.research-mode button {
+  position: relative;
+  z-index: 1;
+  border: 0;
+  border-radius: 999px;
+  padding: 0.38rem 0.85rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+.research-mode button.is-selected {
+  color: #1a140c;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .scan-intro *,
   .scan-intro *::before,
@@ -4088,5 +4715,15 @@ html[data-theme="light"] .apex-draw-stroke {
   }
   .scan-progress-fill { transform: translateX(-50%); opacity: 1; }
   .portfolio-skeleton { animation: none; }
+  .research-mode-thumb { transition: none; }
+  .research-mode-wash,
+  .research-mode-wash::after { animation: none; opacity: 0; }
+  .desk.is-mode-changing > :not(.research-mode-wash),
+  main[data-testid="deep-scan"].is-mode-changing > .research-mode-sheet,
+  html[data-research-transition] .apex-ai {
+    animation: none !important;
+    opacity: 1 !important;
+    pointer-events: auto;
+  }
 }
 

@@ -7,6 +7,7 @@ import { BrokerageConnectionPanel } from "../components/BrokerageConnectionPanel
 import { LogoutButton } from "../components/LogoutButton";
 import { DailyPnlList, PositionDailyPnl } from "../components/DailyPnlList";
 import { PositionCertificateModal } from "../components/PositionCertificateModal";
+import { ResearchModeToggle } from "../components/ResearchModeToggle";
 import { SettingsGearLink } from "../components/SettingsGearLink";
 import { TradingViewChart } from "../components/TradingViewChart";
 import { LegalFooter } from "../components/LegalFooter";
@@ -16,20 +17,42 @@ import { DEFAULT_SYMBOL, SNAPSHOT_STUDIES } from "../constants";
 import { useBrokerage } from "../hooks/useBrokerage";
 import { useMarketSocket } from "../hooks/useMarketSocket";
 import { defaultAccountLabel, usePositionCertificate } from "../hooks/usePositionCertificate";
-import { DESK_STALE_MS, refreshDeskQueries } from "../lib/deskRefresh";
+import { applyReturnedFillBalances, DAY_PNL_REFRESH_MS, DESK_STALE_MS, refreshDeskQueries } from "../lib/deskRefresh";
 import { writeExpiryHold } from "../lib/fullChainExpiry";
 import { clearNewsRetry, isNewsRateLimitMessage, newsRetryDelay, noteNewsRateLimit, visibleNewsError } from "../lib/newsFeed";
 import { dayPlOrUnrealized, daysForPosition, displaySessionDay, formatSessionDate, markedPnl } from "../lib/dailyPnl";
-import { resolvePositionDayPl } from "../lib/positionDayPl";
+import { holdingsDayTotal, resolvePositionDayPl } from "../lib/positionDayPl";
+import { topMoverSymbols } from "../lib/topMovers";
 import { SEARCH_DEBOUNCE_MS, createDebouncedSymbolSearch } from "../lib/symbolSearch";
+import { RESEARCH_REVEAL_MS, RESEARCH_WASH_MS } from "../lib/researchMode";
 import { useSession } from "../store";
 import type { Fundamentals, PositionRow, Quote, SentimentRow, WatchItem } from "../types";
 
 export function Dashboard() {
   const nav = useNavigate();
   const qc = useQueryClient();
-  const { user, setUser, showConnectModal, setConnectModal, symbol, setSymbol, timeframe, setTimeframe, expiry, setExpiry, captureSnapshot } =
+  const { user, setUser, showConnectModal, setConnectModal, symbol, setSymbol, timeframe, setTimeframe, expiry, setExpiry, captureSnapshot, researchMode } =
     useSession();
+  const equityDesk = researchMode === "equity";
+  const modeSeen = useRef(researchMode);
+  const [modeWash, setModeWash] = useState(0);
+  const [modePhase, setModePhase] = useState<"idle" | "changing">("idle");
+  useEffect(() => {
+    if (modeSeen.current === researchMode) return;
+    modeSeen.current = researchMode;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    setModeWash((n) => n + 1);
+    setModePhase("changing");
+    document.documentElement.dataset.researchTransition = researchMode;
+    const done = window.setTimeout(() => {
+      setModePhase("idle");
+      delete document.documentElement.dataset.researchTransition;
+    }, RESEARCH_WASH_MS[researchMode] + RESEARCH_REVEAL_MS + 120);
+    return () => {
+      window.clearTimeout(done);
+      delete document.documentElement.dataset.researchTransition;
+    };
+  }, [researchMode]);
   const chartState = useSyncExternalStore(subscribeChartState, getChartState, getChartState);
   const chartMatchesIntent = chartState.symbol === symbol && chartState.allBars.length > 0;
   // The graph ticker is the desk ticker. Search, quotes, and the info card follow it.
@@ -109,12 +132,15 @@ export function Dashboard() {
     token: getAccessToken(),
     symbols: [activeSymbol, DEFAULT_SYMBOL],
     onMessage: (msg) => {
-      if (msg.type === "fill") {
+      if (msg.type === "fill" || msg.type === "order") {
         const livePatch: { balance?: number; buying_power?: number; portfolio_value?: number } = {};
         if (typeof msg.balance === "number") livePatch.balance = msg.balance;
         if (typeof msg.buying_power === "number") livePatch.buying_power = msg.buying_power;
         if (typeof msg.portfolio_value === "number") livePatch.portfolio_value = msg.portfolio_value;
-        if (Object.keys(livePatch).length) setLive((prev) => ({ ...prev, ...livePatch }));
+        if (Object.keys(livePatch).length) {
+          setLive((prev) => ({ ...prev, ...livePatch }));
+          applyReturnedFillBalances(qc, livePatch);
+        }
         refreshDeskQueries(qc);
       }
       if (msg.type === "quotes") {
@@ -183,19 +209,25 @@ export function Dashboard() {
     queryKey: ["port"],
     queryFn: () => api.portfolio(),
     enabled: paperBook,
-    staleTime: DESK_STALE_MS,
+    staleTime: 5_000,
+    refetchInterval: DAY_PNL_REFRESH_MS,
+    refetchIntervalInBackground: false,
   });
   const positions = useQuery({
     queryKey: ["pos"],
     queryFn: () => api.positions(),
     enabled: paperBook,
-    staleTime: DESK_STALE_MS,
+    staleTime: 5_000,
+    refetchInterval: DAY_PNL_REFRESH_MS,
+    refetchIntervalInBackground: false,
   });
   const dailyPnl = useQuery({
     queryKey: ["daily-pnl"],
     queryFn: () => api.dailyPnl(),
     enabled: paperBook,
-    staleTime: DESK_STALE_MS,
+    staleTime: 5_000,
+    refetchInterval: DAY_PNL_REFRESH_MS,
+    refetchIntervalInBackground: false,
   });
   // Equity graph and account P&L start with the book so the portfolio page is not a second round trip.
   useQuery({
@@ -290,6 +322,11 @@ export function Dashboard() {
   const displayPositions: PositionRow[] = brokerage.usingBrokerage
     ? brokerage.positionRows
     : ((positions.data?.positions as PositionRow[]) ?? []);
+  const moverSource = brokerage.usingBrokerage
+    ? displayPositions
+    : ((portfolio.data?.top_movers as { symbol: string; unrealized_pl?: number | null }[] | undefined) ??
+      displayPositions);
+  const moverLabel = topMoverSymbols(moverSource).join(", ") || "—";
   const positionsLoading = brokerage.usingBrokerage ? brokerage.positionsQuery.isLoading : positions.isLoading;
   const positionSymbols = useMemo(
     () => [...new Set(displayPositions.map((p) => p.symbol))],
@@ -299,7 +336,9 @@ export function Dashboard() {
     queries: positionSymbols.map((sym) => ({
       queryKey: ["quote", sym],
       queryFn: () => api.quote(sym),
-      staleTime: DESK_STALE_MS,
+      staleTime: 5_000,
+      refetchInterval: DAY_PNL_REFRESH_MS,
+      refetchIntervalInBackground: false,
       enabled: displayPositions.length > 0,
     })),
   });
@@ -314,8 +353,12 @@ export function Dashboard() {
   const dailyBook = !brokerage.usingBrokerage ? (dailyPnl.data?.book ?? null) : null;
   const latestBook = displaySessionDay(dailyBook);
   const seriesReady = dailyBook != null;
+  const holdingsDay =
+    brokerage.usingBrokerage && brokerage.stats?.day_pnl == null
+      ? holdingsDayTotal(displayPositions, quoteBySymbol)
+      : null;
   const dayPl = brokerage.usingBrokerage
-    ? (brokerage.stats?.day_pnl ?? null)
+    ? (brokerage.stats?.day_pnl ?? holdingsDay?.total ?? null)
     : seriesReady
       ? markedPnl(latestBook)
       : (portfolio.data?.day_pl as number | null | undefined);
@@ -404,11 +447,13 @@ export function Dashboard() {
   return (
     <div
       ref={deskRef}
-      className={`desk min-h-screen${chartFull ? " desk--chart-full" : ""}`}
+      className={`desk min-h-screen${chartFull ? " desk--chart-full" : ""}${modePhase === "idle" ? "" : ` is-mode-${modePhase}`}`}
       data-testid="dashboard"
+      data-research-mode={researchMode}
       data-chart-fullscreen={chartFull ? "true" : "false"}
       data-chart-animating={chartAnimating ? "true" : "false"}
     >
+      {modeWash > 0 ? <div key={modeWash} className="research-mode-wash" data-testid="research-mode-wash" data-mode={researchMode} aria-hidden="true" /> : null}
       <div
         ref={motionRef}
         data-desk-motion=""
@@ -505,6 +550,7 @@ export function Dashboard() {
           )}
         </div>
         <WatchlistToggle symbol={activeSymbol} testid="watchlist-toggle" />
+        {equityDesk ? null : (
         <select
           data-testid="expiry"
           className="rounded-md border border-line bg-panel px-2 py-1.5 text-sm"
@@ -528,6 +574,7 @@ export function Dashboard() {
             </option>
           ))}
         </select>
+        )}
         <button
           type="button"
           data-testid="info-score-card"
@@ -537,6 +584,7 @@ export function Dashboard() {
         >
           Info Score Card
         </button>
+        <ResearchModeToggle testId="research-mode-desk" />
         <button
           type="button"
           data-testid="scan-btn-fullscreen"
@@ -695,7 +743,7 @@ export function Dashboard() {
                 className={`font-mono ${dayPl == null ? "text-faint" : dayPl > 0 ? "num-up" : dayPl < 0 ? "num-down" : ""}`}
                 data-testid="day-pl-summary"
               >
-                {`Day P&L ${dayPlLabel}${sessionLabel ? ` · ${sessionLabel}` : ""} · ${dayPl == null || dayPct == null ? "—" : `${dayPct.toFixed(2)}%`}`}
+                {`${holdingsDay ? "Holdings Daily P&L" : "Day P&L"} ${dayPlLabel}${sessionLabel ? ` · ${sessionLabel}` : ""} · ${dayPl == null || dayPct == null || holdingsDay ? "—" : `${dayPct.toFixed(2)}%`}`}
               </p>
               {dailyBook && dailyBook.length > 0 && (
                 <div className="mt-2" data-testid="book-daily-pnl">
@@ -708,8 +756,8 @@ export function Dashboard() {
                   Daily P&L unavailable
                 </p>
               )}
-              <p className="text-xs text-faint">
-                Top movers: {((portfolio.data?.top_movers as { symbol: string }[]) ?? []).map((m) => m.symbol).join(", ") || "—"}
+              <p className="text-xs text-faint" data-testid="top-movers">
+                Top movers: {moverLabel}
               </p>
             </div>
             <button data-testid="scan-btn" disabled={scanning || !chartReady} onClick={() => void scan()} className="desk-scan-dock rounded-md bg-gold px-5 py-2 font-medium text-ink disabled:opacity-40">

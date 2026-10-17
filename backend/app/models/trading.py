@@ -97,6 +97,8 @@ class Order(Base):
     broker_order_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     asset_class: Mapped[str] = mapped_column(String(16), default="us_equity")
     multiplier: Mapped[int] = mapped_column(Integer, default=1)
+    # Basis of a lot this fill closed. Overall P&L uses it when order replay has no matching open.
+    settlement: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     filled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 

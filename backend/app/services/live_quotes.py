@@ -343,6 +343,94 @@ def _alpaca_stock_sync(symbol: str, settings: Settings) -> dict[str, Any] | None
     }
 
 
+def option_snapshot_fields(payload: Any, symbol: str, feed: str) -> dict[str, Any] | None:
+    """Bid, ask, and last trade from one Alpaca option snapshot. No filled-in price."""
+    if not isinstance(payload, dict):
+        return None
+    snaps = payload.get("snapshots")
+    if not isinstance(snaps, dict):
+        return None
+    row = snaps.get(symbol) or snaps.get(symbol.upper())
+    if not isinstance(row, dict) and len(snaps) == 1:
+        only = next(iter(snaps.values()))
+        row = only if isinstance(only, dict) else None
+    if not isinstance(row, dict):
+        return None
+    quote = row.get("latestQuote") if isinstance(row.get("latestQuote"), dict) else {}
+    trade = row.get("latestTrade") if isinstance(row.get("latestTrade"), dict) else {}
+    daily = row.get("dailyBar") if isinstance(row.get("dailyBar"), dict) else {}
+    bid = usable_positive_price(parse_number(quote.get("bp")))
+    ask = usable_positive_price(parse_number(quote.get("ap")))
+    last = usable_positive_price(parse_number(trade.get("p")))
+    price = last if last is not None else quote_mid(bid, ask)
+    if price is None:
+        price = bid if bid is not None else ask
+    if price is None and bid is None and ask is None:
+        return None
+    quoted_at = quote.get("t") or trade.get("t")
+    return {
+        "price": price,
+        "bid": bid,
+        "ask": ask,
+        "bid_size": parse_number(quote.get("bs")),
+        "ask_size": parse_number(quote.get("as")),
+        "as_of": quoted_at,
+        "quoted_at": quoted_at,
+        "open": usable_positive_price(parse_number(daily.get("o"))),
+        "high": usable_positive_price(parse_number(daily.get("h"))),
+        "low": usable_positive_price(parse_number(daily.get("l"))),
+        "volume": parse_number(daily.get("v")),
+        "source": "Alpaca",
+        "provider": "Alpaca",
+        "quote_feed": feed,
+        "feed_delayed": feed == "indicative",
+    }
+
+
+async def _alpaca_option(symbol: str, settings: Settings) -> dict[str, Any] | None:
+    if not settings.alpaca_keys_present:
+        return None
+    mode = str(getattr(settings, "alpaca_trading_mode", "") or "")
+    primary = "opra" if mode == "live" else "indicative"
+    feeds: list[str] = []
+    for feed in (primary, "indicative", "opra"):
+        if feed not in feeds:
+            feeds.append(feed)
+    base = settings.resolved_data_base_url.rstrip("/")
+    headers = {
+        "APCA-API-KEY-ID": settings.alpaca_api_key_id,
+        "APCA-API-SECRET-KEY": settings.alpaca_api_secret_key,
+    }
+    for feed in feeds:
+        payload = await _http_json_params(
+            f"{base}/v1beta1/options/snapshots",
+            headers=headers,
+            params={"symbols": symbol, "feed": feed},
+        )
+        parsed = option_snapshot_fields(payload, symbol, feed)
+        if parsed:
+            return parsed
+    return None
+
+
+async def _http_json_params(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    params: dict[str, str] | None = None,
+    timeout: float = 8.0,
+) -> Any | None:
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            res = await client.get(url, headers=headers, params=params)
+            if res.status_code >= 400:
+                return None
+            return res.json()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("options snapshot failed: {}", type(exc).__name__)
+        return None
+
+
 async def _alpaca_stock(symbol: str, settings: Settings) -> dict[str, Any] | None:
     if not settings.alpaca_keys_present:
         return None
@@ -551,25 +639,18 @@ async def _yahoo_chart(yahoo_symbol: str) -> dict[str, Any] | None:
     }
 
 
-_YAHOO_BAR_RANGE: dict[str, tuple[str, str]] = {
-    "1m": ("1m", "7d"),
-    "5m": ("5m", "1mo"),
-    "15m": ("15m", "1mo"),
-    "30m": ("30m", "1mo"),
-    "1H": ("60m", "3mo"),
-    "4H": ("60m", "6mo"),
-    "1D": ("1d", "2y"),
-    "1W": ("1wk", "5y"),
-}
-
-
 async def yahoo_ohlc_bars(symbol: str, timeframe: str, limit: int = 400) -> list[dict]:
     """Index OHLC when Alpaca has no index bars (SPX/DJI/…). Same Yahoo chart used for quotes."""
     from urllib.parse import quote
 
+    from app.analysis.timeframe import resample_hours, yahoo_range
+
+    chosen = yahoo_range(timeframe)
+    if chosen is None:
+        return []
     meta = _index_meta(symbol)
     yahoo_symbol = meta["yahoo"] if meta else symbol
-    interval, span = _YAHOO_BAR_RANGE.get(timeframe, ("1d", "2y"))
+    interval, span = chosen
     path = f"/v8/finance/chart/{quote(yahoo_symbol, safe='^')}?interval={interval}&range={span}&includePrePost=false"
     payload = None
     for host in ("https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"):
@@ -604,27 +685,8 @@ async def yahoo_ohlc_bars(symbol: str, timeframe: str, limit: int = 400) -> list
         iso = datetime.fromtimestamp(int(ts), timezone.utc).isoformat()
         bars.append({"t": iso, "o": float(o), "h": float(h), "l": float(l), "c": float(c), "v": v})
     if timeframe == "4H":
-        bars = _resample_ohlc(bars, 4)
+        bars = resample_hours(bars, 4)
     return bars[-limit:]
-
-
-def _resample_ohlc(bars: list[dict], group: int) -> list[dict]:
-    if group <= 1 or not bars:
-        return bars
-    out: list[dict] = []
-    for i in range(0, len(bars), group):
-        chunk = bars[i : i + group]
-        out.append(
-            {
-                "t": chunk[0]["t"],
-                "o": chunk[0]["o"],
-                "h": max(b["h"] for b in chunk),
-                "l": min(b["l"] for b in chunk),
-                "c": chunk[-1]["c"],
-                "v": sum(b["v"] for b in chunk),
-            }
-        )
-    return out
 
 
 def _apply(dst: _Bundle, src: dict[str, Any] | None, *, price: bool, fundamentals: bool) -> None:
@@ -700,7 +762,10 @@ async def _fetch_bundle(symbol: str, settings: Settings) -> _Bundle:
         asset_class="us_option" if option else (meta["asset_class"] if meta else "stock"),
     )
     # An OCC symbol is not a stock. The stock snapshot endpoint rejects it.
+    # The options snapshot is the quote the order path can actually price.
     if option:
+        snap = await _alpaca_option(symbol, settings)
+        _apply(bundle, snap, price=True, fundamentals=False)
         _bundle_cache[symbol] = (now, bundle)
         return bundle
 

@@ -9,8 +9,9 @@ import { Portfolio } from "./pages/Portfolio";
 import { Settings } from "./pages/Settings";
 import { Signup } from "./pages/Signup";
 import { Splash } from "./pages/Splash";
-import { ExpiryLoginGate } from "./components/ExpiryLoginGate";
+import { ApexAssistant } from "./components/ApexAssistant";
 import { ExpiryWatchNotice } from "./components/ExpiryWatchNotice";
+import { SessionArrivalNotices } from "./components/SessionArrivalNotices";
 import { resolveAuthGuard } from "./lib/authGuard";
 import { useSession } from "./store";
 
@@ -91,8 +92,9 @@ export default function App() {
 
   return (
     <>
-      {showExpiryNotice ? <ExpiryLoginGate /> : null}
+      {showExpiryNotice ? <SessionArrivalNotices /> : null}
       {showExpiryNotice ? <ExpiryWatchNotice /> : null}
+      {showExpiryNotice ? <ApexAssistant /> : null}
       <Routes location={loc}>
       <Route path="/" element={<Navigate to="/login" replace />} />
       <Route path="/login" element={<Login />} />
